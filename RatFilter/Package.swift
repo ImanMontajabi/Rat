@@ -7,10 +7,13 @@ let package = Package(
     products: [
         .library(name: "RatFilterCore", targets: ["RatFilterCore"]),
         .library(name: "RatFilterExtension", targets: ["RatFilterExtension"]),
+        .library(name: "RatMonitor", targets: ["RatMonitor"]),
     ],
     targets: [
         .target(name: "RatFilterCore"),
         .target(name: "RatFilterExtension", dependencies: ["RatFilterCore"]),
+        .target(name: "RatMonitor"),
+        .testTarget(name: "RatMonitorTests", dependencies: ["RatMonitor"]),
         .testTarget(name: "RatFilterCoreTests", dependencies: ["RatFilterCore"]),
     ]
 )

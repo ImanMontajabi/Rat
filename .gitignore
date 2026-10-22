@@ -4,3 +4,5 @@
 package-lock.json
 # raw full-resolution reference screenshots; optimized copies live in docs/screenshots
 screenshot/
+Rat.xcodeproj/
+*.xcuserstate

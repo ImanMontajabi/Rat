@@ -1,0 +1,31 @@
+name: Rat
+options:
+  bundleIdPrefix: com.imanmontajabi
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+packages:
+  RatFilter:
+    path: RatFilter
+targets:
+  Rat:
+    type: application
+    platform: macOS
+    sources: [App]
+    dependencies:
+      - package: RatFilter
+        product: RatMonitor
+      - package: RatFilter
+        product: RatFilterCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.imanmontajabi.Rat
+        MARKETING_VERSION: 0.2.0
+        CURRENT_PROJECT_VERSION: 1
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: NO
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Rat
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        SWIFT_VERSION: "5.9"
