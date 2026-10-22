@@ -67,7 +67,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testProfilesScopeRules() {
-        var s = RuleSet.standard()
+        var s = RuleSet.standard(silent: nil)
         let work = s.profiles[1]
         s.rules = [Rule(verdict: .deny, remoteDomain: "a.com", profileID: work.id)]
         let e = RuleEngine(ruleSet: s)
@@ -77,7 +77,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testDisabledGroupSilencesItsRules() {
-        var s = RuleSet.standard()
+        var s = RuleSet.standard(silent: nil)
         let g = RuleGroup(name: "Ads", enabled: false)
         s.groups = [g]; s.rules = [Rule(verdict: .deny, remoteDomain: "a.com", groupID: g.id)]
         let e = RuleEngine(ruleSet: s)
@@ -123,7 +123,7 @@ final class RuleEngineTests: XCTestCase {
     }
 
     func testAutomaticProfileSwitchingLookup() {
-        var s = RuleSet.standard()
+        var s = RuleSet.standard(silent: nil)
         let t = NetworkTrigger(signature: "CoffeeShop", name: "Cafe", profileID: s.profiles[2].id)
         s.triggers = [t]
         let e = RuleEngine(ruleSet: s)
@@ -141,5 +141,24 @@ final class RuleEngineTests: XCTestCase {
         e.importRules(RuleExport(groups: [], rules: [foreign]), markUnapproved: false)
         XCTAssertNil(e.allRules[0].profileID)
         XCTAssertEqual(e.evaluate(conn("a.com")), .deny)
+    }
+
+    func testNewInstallsAreSilentAllowAndVersion1FilesMigrate() throws {
+        XCTAssertEqual(RuleSet.standard().silentVerdict, .allow)
+        let v1 = #"{"version":1,"profiles":[{"id":"11111111-1111-1111-1111-111111111111","name":"Home","symbol":"house"}],"activeProfileID":"11111111-1111-1111-1111-111111111111","rules":[]}"#
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("v1-\(UUID()).json")
+        try v1.write(to: url, atomically: true, encoding: .utf8)
+        let s = try RuleStore(url: url).loadSet()
+        XCTAssertEqual(s.version, 2)
+        XCTAssertEqual(s.silentVerdict, .allow)
+        XCTAssertEqual(s.unknownNetworkAction, .ask)
+    }
+
+    func testUnknownNetworkActionRoundTrips() throws {
+        var s = RuleSet.standard()
+        s.unknownNetworkAction = .activate(s.profiles[1].id)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("a-\(UUID()).json")
+        try RuleStore(url: url).saveSet(s)
+        XCTAssertEqual(try RuleStore(url: url).loadSet().unknownNetworkAction, .activate(s.profiles[1].id))
     }
 }

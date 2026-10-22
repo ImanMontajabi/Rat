@@ -17,7 +17,7 @@ struct RatApp: App {
     @State private var menuBar: MenuBarController?
 
     var body: some Scene {
-        Window("Rat", id: "monitor") {
+        Window("Network Monitor", id: "monitor") {
             MonitorWindow()
                 .environmentObject(ledger)
                 .frame(minWidth: 1000, minHeight: 620)
@@ -31,12 +31,19 @@ struct RatApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { Task { await UpdateChecker.check() } }
             }
+            CommandGroup(after: .windowArrangement) {
+                OpenRulesCommand()
+            }
         }
 
-        Window("Rules & Profiles", id: "rules") {
+        Window("Rules", id: "rules") {
             RulesWindow().environmentObject(ledger)
         }
-        .defaultSize(width: 900, height: 600)
+        .defaultSize(width: 1000, height: 620)
+
+        Settings {
+            SettingsView().environmentObject(ledger)
+        }
     }
 
     @MainActor private func boot() {
@@ -46,5 +53,22 @@ struct RatApp: App {
             ledger.onTick = { [weak m] in m?.update() }
             menuBar = m
         }
+        Task { await UpdateChecker.checkIfDue() }
+        #if DEBUG
+        // Lets screenshots and manual checks open a window at launch: RAT_OPEN=settings|rules
+        switch ProcessInfo.processInfo.environment["RAT_OPEN"] {
+        case "settings"?: DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.activate(ignoringOtherApps: true); WindowOpener.open?("settings") }
+        case "rules"?: DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.activate(ignoringOtherApps: true); WindowOpener.open?("rules") }
+        default: break
+        }
+        #endif
+    }
+}
+
+/// ⌘⇧R opens the Rules window from the Window menu.
+struct OpenRulesCommand: View {
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Button("Rules") { openWindow(id: "rules") }.keyboardShortcut("r", modifiers: [.command, .shift])
     }
 }

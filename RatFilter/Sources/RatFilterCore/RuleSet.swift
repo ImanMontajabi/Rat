@@ -28,9 +28,15 @@ public struct NetworkTrigger: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+public enum UnknownNetworkAction: Codable, Equatable, Sendable {
+    case ask, doNothing, deactivate
+    case activate(UUID)
+}
+
 /// Everything the rule engine persists.
 public struct RuleSet: Codable, Equatable, Sendable {
-    public var version = 1
+    /// 2: unknown connections are allowed silently by default (version 1 asked).
+    public var version = 2
     public var profiles: [Profile]
     public var groups: [RuleGroup]
     public var triggers: [NetworkTrigger]
@@ -41,11 +47,34 @@ public struct RuleSet: Codable, Equatable, Sendable {
     /// What to do with unknown connections: nil = ask (alert mode); a verdict = silent mode.
     public var silentVerdict: Verdict?
     public var automaticProfileSwitching = false
+    /// What to do on a network no trigger knows: ask, do nothing, or switch to / away from a profile.
+    public var unknownNetworkAction = UnknownNetworkAction.ask
 
-    public static func standard() -> RuleSet {
+    /// `silent` is what happens to connections no rule covers: nil asks (alert mode).
+    public static func standard(silent: Verdict? = .allow) -> RuleSet {
         let home = Profile(name: "Home", symbol: "house")
-        return RuleSet(profiles: [home, Profile(name: "Work", symbol: "briefcase"), Profile(name: "Public Wi-Fi", symbol: "wifi")],
-                       groups: [], triggers: [], rules: [], activeProfileID: home.id)
+        var set = RuleSet(profiles: [home, Profile(name: "Work", symbol: "briefcase"), Profile(name: "Public Wi-Fi", symbol: "wifi")],
+                          groups: [], triggers: [], rules: [], activeProfileID: home.id)
+        set.silentVerdict = silent
+        return set
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version, profiles, groups, triggers, rules, activeProfileID, markNewRulesAsUnapproved, silentVerdict, automaticProfileSwitching, unknownNetworkAction
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        profiles = try c.decode([Profile].self, forKey: .profiles)
+        groups = try c.decodeIfPresent([RuleGroup].self, forKey: .groups) ?? []
+        triggers = try c.decodeIfPresent([NetworkTrigger].self, forKey: .triggers) ?? []
+        rules = try c.decodeIfPresent([Rule].self, forKey: .rules) ?? []
+        activeProfileID = try c.decode(UUID.self, forKey: .activeProfileID)
+        markNewRulesAsUnapproved = try c.decodeIfPresent(Bool.self, forKey: .markNewRulesAsUnapproved) ?? false
+        silentVerdict = try c.decodeIfPresent(Verdict.self, forKey: .silentVerdict)
+        automaticProfileSwitching = try c.decodeIfPresent(Bool.self, forKey: .automaticProfileSwitching) ?? false
+        unknownNetworkAction = try c.decodeIfPresent(UnknownNetworkAction.self, forKey: .unknownNetworkAction) ?? .ask
     }
 
     public init(profiles: [Profile], groups: [RuleGroup], triggers: [NetworkTrigger], rules: [Rule], activeProfileID: UUID) {

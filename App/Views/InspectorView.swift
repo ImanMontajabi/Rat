@@ -90,7 +90,7 @@ struct ProcessInspector: View {
             }
             SectionHeader(title: "Rules", open: $rules)
             if rules {
-                let appRules = ledger.rules.rules(for: app.id)
+                let appRules = ledger.rules.rules(for: app.identity.ruleKey)
                 if appRules.isEmpty { Text("No rules for these connections").foregroundStyle(.secondary).padding(.leading, 6) }
                 ForEach(appRules.prefix(8)) { r in
                     HStack(spacing: 6) {
@@ -99,7 +99,7 @@ struct ProcessInspector: View {
                         if !r.approved { Circle().fill(.blue).frame(width: 7, height: 7) }
                     }.font(.callout).padding(.leading, 6)
                 }
-                if ledger.rules.policy(for: app.id) == .deny {
+                if ledger.rules.policy(for: app.identity.ruleKey) == .deny {
                     Text("\(ledger.blockedAddresses(for: app.id)) server addresses blocked for every app on this Mac.")
                         .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
                     if !(ledger.enforcer.helperInstalled && ledger.enforcer.autoApply) {

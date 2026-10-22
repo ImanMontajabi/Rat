@@ -8,22 +8,31 @@ struct AppIdentity: Hashable {
     let name: String
     let bundlePath: String?
     let isSystem: Bool
+    var isExtension = false
+
+    /// What rules refer to: the app bundle (extensions share their host app's rules), or the executable path.
+    var ruleKey: String { bundlePath ?? id }
 
     static func resolve(processPath path: String, pid: Int32? = nil) -> AppIdentity {
         if let r = path.range(of: ".app/") ?? (path.hasSuffix(".app") ? path.range(of: ".app", options: .backwards) : nil) {
             let bundle = String(path[..<r.upperBound]).trimmingSuffix("/")
             let name = FileManager.default.displayName(atPath: bundle).replacingOccurrences(of: ".app", with: "")
+            // App extensions (.appex) are listed separately from their host app, like Little Snitch's "EXT" rows.
+            if path.contains(".appex/") { return AppIdentity(id: bundle + "#ext", name: name, bundlePath: bundle, isSystem: false, isExtension: true) }
             return AppIdentity(id: bundle, name: name, bundlePath: bundle, isSystem: false)
         }
         let systemPrefixes = ["/System/", "/usr/", "/sbin/", "/bin/", "/Library/Apple/", "/private/var/db/"]
         if systemPrefixes.contains(where: path.hasPrefix) {
             return AppIdentity(id: "macOS", name: "macOS", bundlePath: nil, isSystem: true)
         }
-        // Executables such as versioned CLI binaries ("…/2.1.308") are better named by their process name.
-        var base = (path as NSString).lastPathComponent
-        if base.first?.isNumber == true, let pid = pid {
-            var buf = [CChar](repeating: 0, count: 256)
-            if proc_name(pid, &buf, UInt32(buf.count)) > 0 { base = String(cString: buf) }
+        // Versioned CLI binaries ("…/claude/versions/2.1.308") belong to the tool, not to a version number.
+        let base = (path as NSString).lastPathComponent
+        if base.range(of: #"^\d[\d.]*$"#, options: .regularExpression) != nil {
+            let parent = (path as NSString).deletingLastPathComponent
+            var owner = parent
+            if (parent as NSString).lastPathComponent == "versions" { owner = (parent as NSString).deletingLastPathComponent }
+            let name = (owner as NSString).lastPathComponent
+            if !name.isEmpty { return AppIdentity(id: owner, name: name, bundlePath: nil, isSystem: false) }
         }
         return AppIdentity(id: path, name: base, bundlePath: nil, isSystem: false)
     }
@@ -35,7 +44,7 @@ struct AppIdentity: Hashable {
         let img: NSImage
         if let bundlePath { img = NSWorkspace.shared.icon(forFile: bundlePath) }
         else if isSystem, let sys = NSImage(systemSymbolName: "apple.logo", accessibilityDescription: nil) { img = sys }
-        else { img = NSWorkspace.shared.icon(forFile: id) }
+        else { img = NSWorkspace.shared.icon(forFile: id.replacingOccurrences(of: "#ext", with: "")) }
         Self.iconCache[id] = img
         return img
     }

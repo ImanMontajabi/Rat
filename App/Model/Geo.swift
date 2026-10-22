@@ -67,14 +67,20 @@ actor HostNames {
     }
 }
 
+/// True for IPv4 and IPv6 literals (an IPv6 address contains letters, so "has letters" is not a hostname test).
+func isIPLiteral(_ s: String) -> Bool {
+    var v4 = in_addr(), v6 = in6_addr()
+    return inet_pton(AF_INET, s, &v4) == 1 || inet_pton(AF_INET6, s, &v6) == 1
+}
+
 func registrableDomain(_ host: String) -> String {
     let parts = host.split(separator: ".")
-    guard parts.count > 2, host.contains(where: { $0.isLetter }) else { return host }
+    guard parts.count > 2, !isIPLiteral(host) else { return host }
     return parts.suffix(2).joined(separator: ".")
 }
 
 func isLocalAddress(_ a: String) -> Bool {
-    a.hasPrefix("127.") || a.hasPrefix("10.") || a.hasPrefix("192.168.") || a.hasPrefix("169.254.") || a == "::1" ||
+    LocalRanges.shared.contains(a) || a.hasPrefix("127.") || a.hasPrefix("10.") || a.hasPrefix("192.168.") || a.hasPrefix("169.254.") || a == "::1" ||
     a.hasPrefix("fe80:") || a.hasPrefix("fc") || a.hasPrefix("fd") || (a.hasPrefix("172.") && (Int(a.split(separator: ".")[1]) ?? 0).clamped(16...31))
 }
 

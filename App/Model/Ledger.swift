@@ -37,7 +37,7 @@ struct RemoteHost: Identifiable, Hashable {
 }
 
 struct AppEntry: Identifiable {
-    let identity: AppIdentity
+    var identity: AppIdentity
     var id: String { identity.id }
     var pids: Set<Int32> = []
     var remotes: [RemoteHost] = []
@@ -46,6 +46,23 @@ struct AppEntry: Identifiable {
     var totalIn: UInt64 = 0
     var totalOut: UInt64 = 0
     var lastActive = Date.distantPast
+    var otherUsers = false
+}
+
+struct ChartBar: Identifiable {
+    let start: Date
+    let end: Date
+    let rx: Double
+    let tx: Double
+    var id: Date { start }
+}
+
+struct ChartLayout {
+    var bars: [ChartBar]
+    var start: Date
+    var end: Date
+    var peak: Double
+    var labelFormat: Date.FormatStyle
 }
 
 struct TrafficPoint: Identifiable {
@@ -72,10 +89,18 @@ final class Ledger: ObservableObject {
     let rules: RulesModel
     let enforcer: Enforcer
     let geo = GeoService()
-    private(set) lazy var alerts = AlertCenter(rules: rules) { [unowned self] alert, verdict in
-        if verdict == .deny { recordDenied(appID: alert.appID, address: alert.address, host: alert.host, port: alert.port, proto: alert.proto) }
-        refreshBlocklist()
-    }
+    private(set) lazy var alerts: AlertCenter = {
+        let center = AlertCenter(rules: rules) { [unowned self] alert, verdict in
+            if verdict == .deny { recordDenied(appID: alert.appID, address: alert.address, host: alert.host, port: alert.port, proto: alert.proto) }
+            refreshBlocklist()
+        }
+        center.isStillPending = { [unowned self] a in
+            let c = Connection(process: ProcessIdentity(path: a.appID), host: a.host == a.address ? nil : a.host, address: a.address, port: a.port,
+                               proto: a.proto == "UDP" ? .udp : .tcp)
+            return rules.engine.evaluate(c) == .ask
+        }
+        return center
+    }()
     var onTick: (() -> Void)?
 
     private let names = HostNames()
@@ -103,10 +128,13 @@ final class Ledger: ObservableObject {
         enforcer = Enforcer(supportDirectory: store.directory)
         myLocation = GeoService.localPoint()
         let saved = store.load()
-        for a in saved.apps {
-            var e = AppEntry(identity: AppIdentity(id: a.id, name: a.name, bundlePath: a.bundlePath, isSystem: a.isSystem))
-            e.totalIn = a.totalIn; e.totalOut = a.totalOut; e.lastActive = a.lastActive
-            table[a.id] = e
+        for a in saved.apps where !a.id.hasPrefix("pid ") {
+            // Re-resolve plain executables so names learned by older versions ("2.1.308") are corrected and merged.
+            let ident = a.bundlePath != nil || a.isSystem ? AppIdentity(id: a.id, name: a.name, bundlePath: a.bundlePath, isSystem: a.isSystem, isExtension: a.id.hasSuffix("#ext"))
+                                                         : AppIdentity.resolve(processPath: a.id)
+            var e = table[ident.id] ?? AppEntry(identity: ident)
+            e.totalIn += a.totalIn; e.totalOut += a.totalOut; e.lastActive = max(e.lastActive, a.lastActive)
+            table[ident.id] = e
         }
         for (app, entries) in saved.denied { denied[app] = Dictionary(uniqueKeysWithValues: entries.map { ($0.address, $0) }) }
         for b in saved.buckets { buckets[b.minute] = b }
@@ -139,6 +167,9 @@ final class Ledger: ObservableObject {
         lastSave = Date()
     }
 
+    /// Re-checks queued alerts against the current rules and mode: answered, allowed or denied apps never prompt.
+    func revalidateAlerts() { alerts.revalidate() }
+
     func shutdown() {
         rules.purgeSessionRules()
         save()
@@ -160,6 +191,7 @@ final class Ledger: ObservableObject {
             await ingest(conns, traffic)
             rules.refreshNetwork()
             refreshBlocklist()
+            alerts.revalidate()
             onTick?()
             if Date().timeIntervalSince(lastSave) > 30 { save() }
             try? await Task.sleep(for: .seconds(1.5))
@@ -184,6 +216,7 @@ final class Ledger: ObservableObject {
         var identityByPid: [Int32: AppIdentity] = [:]
         var perApp: [String: (conns: [ObservedConnection], listening: Int)] = [:]
         for c in conns {
+            guard !c.processPath.hasPrefix("pid ") else { continue }   // process already gone: nothing to attribute
             let ident = identityByPid[c.pid] ?? AppIdentity.resolve(processPath: c.processPath, pid: c.pid)
             identityByPid[c.pid] = ident
             var e = perApp[ident.id] ?? ([], 0)
@@ -202,7 +235,9 @@ final class Ledger: ObservableObject {
             totalRx += dIn; totalTx += dOut
             let ident: AppIdentity
             if let i = identityByPid[t.pid] { ident = i } else {
-                ident = AppIdentity.resolve(processPath: ConnectionSampler.path(of: t.pid), pid: t.pid)
+                let path = ConnectionSampler.path(of: t.pid)
+                guard !path.hasPrefix("pid ") else { continue }
+                ident = AppIdentity.resolve(processPath: path, pid: t.pid)
                 if table[ident.id] == nil { table[ident.id] = AppEntry(identity: ident) }
             }
             rxByApp[ident.id, default: 0] += dIn; txByApp[ident.id, default: 0] += dOut
@@ -227,6 +262,7 @@ final class Ledger: ObservableObject {
             e.listening = perApp[id]?.listening ?? 0
             listenCount += e.listening
             if perApp[id] == nil { e.pids = e.pids.filter { pid in traffic.contains { $0.pid == pid } } }
+            e.otherUsers = !e.pids.isEmpty && e.pids.allSatisfy { ownerUID(of: $0) != getuid() }
 
             var remotes: [RemoteHost] = []
             var seen = Set<String>()
@@ -237,16 +273,19 @@ final class Ledger: ObservableObject {
                 remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint))
 
                 guard !isLocalAddress(c.remoteAddress) else { continue }
-                let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: id), host: host == c.remoteAddress ? nil : host,
+                                let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), host: host == c.remoteAddress ? nil : host,
                                       address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp)
-                switch rules.engine.evaluate(conn) {
+                let matched = rules.engine.matchingRule(conn)
+                let verdict = matched?.verdict ?? rules.engine.defaultVerdict
+                if matched == nil, verdict != .ask, warmedUp { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
+                switch verdict {
                 case .deny:
                     denyCount += 1
                     recordDenied(appID: id, address: c.remoteAddress, host: host, port: c.remotePort, proto: remotes.last!.proto)
                 case .ask:
                     askCount += 1
                     if warmedUp {
-                        alerts.report(ConnectionAlert(appID: id, appName: e.identity.name, host: host, address: c.remoteAddress, port: c.remotePort, proto: remotes.last!.proto))
+                        alerts.report(ConnectionAlert(appID: e.identity.ruleKey, appName: e.identity.name, host: host, address: c.remoteAddress, port: c.remotePort, proto: remotes.last!.proto))
                     }
                 case .allow: break
                 }
@@ -258,11 +297,31 @@ final class Ledger: ObservableObject {
         apps = Array(table.values)
     }
 
+    private var uidCache: [Int32: uid_t] = [:]
+
+    private func ownerUID(of pid: Int32) -> uid_t {
+        if let u = uidCache[pid] { return u }
+        var info = proc_bsdinfo()
+        let n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        let uid = n == Int32(MemoryLayout<proc_bsdinfo>.size) ? info.pbi_uid : getuid()
+        uidCache[pid] = uid
+        return uid
+    }
+
+    private var notifiedSilent = Set<String>()
+
+    /// "Silent Mode Connections": tell the user the first time a connection was allowed or denied without asking.
+    private func noteSilentConnection(app: String, host: String, allowed: Bool) {
+        guard AppSettings.shared.notifySilentConnections, notifiedSilent.insert("\(app)|\(registrableDomain(host))").inserted else { return }
+        Notifier.post(title: allowed ? "Silent Mode: connection allowed" : "Silent Mode: connection denied", body: "\(app) → \(host)")
+    }
+
     // MARK: blocking
 
     /// Allow/Deny from the process list. Deny also remembers the server addresses the app is using right now.
     func setPolicy(_ p: Policy?, for appID: String) {
-        rules.setPolicy(p, for: appID)
+        rules.setPolicy(p, for: table[appID]?.identity.ruleKey ?? appID)
+        alerts.revalidate()
         if p == .deny, let e = table[appID] {
             for r in e.remotes { recordDenied(appID: appID, address: r.address, host: r.host, port: r.port, proto: r.proto) }
         }
@@ -282,8 +341,9 @@ final class Ledger: ObservableObject {
         var out = Set<String>()
         for (appID, entries) in denied {
             let sig = table[appID].map { signing(for: $0.identity) } ?? (nil, nil)
+            let key = table[appID]?.identity.ruleKey ?? appID
             for e in entries.values {
-                let c = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: appID), host: e.host == e.address ? nil : e.host,
+                let c = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: key), host: e.host == e.address ? nil : e.host,
                                    address: e.address, port: e.port, proto: e.proto == "UDP" ? .udp : .tcp)
                 if rules.engine.evaluate(c) == .deny { out.insert(e.address) }
             }
@@ -315,22 +375,35 @@ final class Ledger: ObservableObject {
         return d.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }
     }
 
-    /// Chart data for a range: live samples up to an hour, minute buckets re-aggregated beyond that.
-    func chartPoints(_ range: TimeRange) -> [TrafficPoint] {
-        let cutoff = Date().addingTimeInterval(-range.seconds)
-        switch range {
-        case .fiveMinutes, .hour:
-            return history.filter { $0.date >= cutoff }
-        case .day, .week:
-            let size: TimeInterval = range == .day ? 1800 : 6 * 3600
-            var out: [Date: (Double, Double)] = [:]
-            for b in buckets.values where b.minute >= cutoff {
-                let key = Date(timeIntervalSince1970: (b.minute.timeIntervalSince1970 / size).rounded(.down) * size)
-                let cur = out[key] ?? (0, 0)
-                out[key] = (cur.0 + b.rx, cur.1 + b.tx)
-            }
-            return out.map { TrafficPoint(date: $0.key, rx: $0.value.0, tx: $0.value.1) }.sorted { $0.date < $1.date }
+    /// Bars for the traffic chart. The window shrinks to the data that exists (never a lone sliver on the right edge)
+    /// and the bars are sized so that they tile it completely.
+    func chartLayout(_ range: TimeRange, now: Date = Date()) -> ChartLayout {
+        let windowStart = now.addingTimeInterval(-range.seconds)
+        // (time, rx, tx) samples: live samples up to an hour, minute buckets beyond.
+        let samples: [(Date, Double, Double)] = range.seconds <= 3600
+            ? history.filter { $0.date >= windowStart }.map { ($0.date, $0.rx, $0.tx) }
+            : buckets.values.filter { $0.minute >= windowStart }.map { ($0.minute, $0.rx, $0.tx) }
+        let minSpan = min(range.seconds, 60.0)
+        let first = samples.map(\.0).min() ?? now.addingTimeInterval(-minSpan)
+        let start = min(max(windowStart, first), now.addingTimeInterval(-minSpan))
+        let span = now.timeIntervalSince(start)
+        let floorSize: TimeInterval = range.seconds <= 3600 ? 1.5 : 60
+        let size = max(span / 60, floorSize)
+        let count = max(Int((span / size).rounded(.up)), 1)
+        var rx = [Double](repeating: 0, count: count), tx = [Double](repeating: 0, count: count)
+        for (t, r, x) in samples {
+            let i = min(max(Int(t.timeIntervalSince(start) / size), 0), count - 1)
+            rx[i] += r; tx[i] += x
         }
+        let starts = (0..<count).map { start.addingTimeInterval(Double($0) * size) }
+        let ends = (0..<count).map { start.addingTimeInterval(Double($0 + 1) * size) }
+        // Square-root scale so quiet traffic stays visible next to a burst.
+        for i in 0..<count { rx[i] = rx[i].squareRoot(); tx[i] = tx[i].squareRoot() }
+        let bars = zip(zip(starts, ends), zip(rx, tx)).map { ChartBar(start: $0.0.0, end: $0.0.1, rx: $0.1.0, tx: $0.1.1) }
+        let peak = max((rx + tx).max() ?? 0, 1) * 1.1
+        let format: Date.FormatStyle = range == .week ? .dateTime.weekday(.abbreviated).day()
+            : range == .fiveMinutes ? .dateTime.hour().minute().second() : .dateTime.hour().minute()
+        return ChartLayout(bars: bars, start: start, end: start.addingTimeInterval(Double(count) * size), peak: peak, labelFormat: format)
     }
 
     #if DEBUG
@@ -354,6 +427,15 @@ final class Ledger: ObservableObject {
                                         geo: GeoPoint(coordinate: .init(latitude: d.3, longitude: d.4), city: d.1, country: d.2)))
             table[ident.id] = e
         }
+        let chrome = "/Applications/Demo/Google Chrome.app", telegram = "/Applications/Demo/Telegram.app", steam = "/Applications/Demo/Steam.app"
+        var pending = Rule(verdict: .deny, processPath: telegram, remoteDomain: "tracker.example", createdAt: Date(timeIntervalSinceNow: -60), note: "From a connection alert")
+        pending.approved = false
+        rules.ruleSet.rules = [
+            pending,
+            Rule(verdict: .allow, processPath: chrome, createdAt: Date(timeIntervalSinceNow: -120), note: "From the process list"),
+            Rule(verdict: .allow, processPath: steam, ports: 27015...27030, proto: .udp, createdAt: Date(timeIntervalSinceNow: -180)),
+            Rule(verdict: .deny, remoteDomain: "ads.example", createdAt: Date(timeIntervalSinceNow: -240)),
+        ]
         sessionIn = 12_400_000; sessionOut = 1_300_000
         unconfirmedCount = 6
         var points: [TrafficPoint] = []

@@ -7,7 +7,9 @@ final class RulesModelTests: XCTestCase {
     private func model() -> RulesModel {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-test-\(UUID())")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return RulesModel(directory: dir)
+        let m = RulesModel(directory: dir)
+        m.silentMode = .off   // these tests exercise alert mode; new installs default to Silent Allow
+        return m
     }
 
     private func alert(host: String = "cdn.example.com", port: Int = 443) -> ConnectionAlert {

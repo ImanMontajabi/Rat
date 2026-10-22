@@ -93,7 +93,11 @@ public struct RuleStore {
         guard FileManager.default.fileExists(atPath: url.path) else { return RuleSet.standard() }
         let data = try Data(contentsOf: url)
         let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
-        if let s = try? d.decode(RuleSet.self, from: data) { return s }
+        if var s = try? d.decode(RuleSet.self, from: data) {
+            // Version 1 files asked about every unknown connection; version 2 allows them silently.
+            if s.version < 2 { s.version = 2; s.silentVerdict = .allow }
+            return s
+        }
         var s = RuleSet.standard()
         s.rules = try d.decode([Rule].self, from: data)
         return s

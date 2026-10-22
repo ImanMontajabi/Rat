@@ -27,9 +27,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         update()
     }
 
-    /// Two-line throughput like "↑ 12 KB/s ↓ 1.2 MB/s".
+    /// Two-line throughput like "↑ 12 KB/s ↓ 1.2 MB/s", plus a moon while a Silent Mode is active.
     func update() {
-        let up = Self.rate(ledger.rateOut), down = Self.rate(ledger.rateIn)
+        let settings = AppSettings.shared
+        item.isVisible = settings.showInMenuBar
+        let silent = settings.silentModeSymbol && rules.silentMode != .off
+        item.button?.image = NSImage(systemSymbolName: silent ? "moon.fill" : "network", accessibilityDescription: "Rat")
+        guard settings.numericRates else { item.button?.attributedTitle = NSAttributedString(string: ""); return }
+        let up = settings.formatRate(ledger.rateOut), down = settings.formatRate(ledger.rateIn)
         let text = NSMutableAttributedString(string: "↑ \(up)\n↓ \(down)")
         let style = NSMutableParagraphStyle(); style.maximumLineHeight = 10; style.alignment = .right
         text.addAttributes([.font: NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular), .paragraphStyle: style, .baselineOffset: -4],
@@ -57,7 +62,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(header("Mode"))
         for m in SilentMode.allCases {
-            let i = NSMenuItem(title: m.rawValue, action: #selector(pickMode(_:)), keyEquivalent: "")
+            let title = m == .off ? "Alert" : m == .allow ? "Silent Allow" : "Silent Deny"
+            let i = NSMenuItem(title: title, action: #selector(pickMode(_:)), keyEquivalent: "")
             i.target = self; i.representedObject = m.rawValue
             i.state = rules.silentMode == m ? .on : .off
             menu.addItem(i)
@@ -66,7 +72,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if ledger.alerts.pendingCount > 0 { menu.addItem(header("\(ledger.alerts.pendingCount) connection alert(s) waiting")) }
         if rules.unapprovedCount > 0 { menu.addItem(header("\(rules.unapprovedCount) rule(s) to review")) }
         add(menu, "Open Network Monitor", #selector(openMonitor))
-        add(menu, "Rules & Profiles…", #selector(openRules))
+        add(menu, "Rules…", #selector(openRules))
+        add(menu, "Settings…", #selector(openSettings))
         menu.addItem(.separator())
         add(menu, "Quit Rat", #selector(quit))
     }
@@ -85,5 +92,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
     @objc private func openMonitor() { NSApp.activate(ignoringOtherApps: true); WindowOpener.open?("monitor") }
     @objc private func openRules() { NSApp.activate(ignoringOtherApps: true); WindowOpener.open?("rules") }
+    @objc private func openSettings() { NSApp.activate(ignoringOtherApps: true); WindowOpener.open?("settings") }
     @objc private func quit() { NSApp.terminate(nil) }
 }

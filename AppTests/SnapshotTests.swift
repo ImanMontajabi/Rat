@@ -102,7 +102,53 @@ final class SnapshotTests: XCTestCase {
         r1.approved = false
         let r2 = Rule(verdict: .allow, processPath: "/Applications/Demo/Steam.app", ports: 27015...27030, proto: .udp, createdAt: Date(timeIntervalSince1970: 1_700_000_000))
         ledger.rules.ruleSet.rules = [r1, r2]
-        try assertMatchesGolden(render(RulesTab().environmentObject(ledger), size: CGSize(width: 820, height: 520)), "rules-window", tolerance: 0.03)
+        try assertMatchesGolden(render(RulesList(category: .all).environmentObject(ledger), size: CGSize(width: 760, height: 520)), "rules-window", tolerance: 0.03)
+    }
+
+    func testSettingsPanesMatchGoldens() throws {
+        let ledger = demoLedger()
+        try assertMatchesGolden(render(AdvancedSettings().environmentObject(ledger), size: CGSize(width: 640, height: 520)), "settings-advanced")
+        try assertMatchesGolden(render(UpdateSettings(), size: CGSize(width: 640, height: 300)), "settings-update")
+        try assertMatchesGolden(render(GeneralSettings().environmentObject(ledger), size: CGSize(width: 640, height: 360)), "settings-general")
+    }
+
+    func testRulesSidebarWindowMatchesGolden() throws {
+        let ledger = demoLedger()
+        try assertMatchesGolden(render(RulesWindow().environmentObject(ledger), size: CGSize(width: 960, height: 560)), "rules-manager", tolerance: 0.05)
+    }
+
+    func testChartFillsItsWidthInASnapshot() throws {
+        let ledger = demoLedger()
+        let rep = render(TrafficChart(range: .fiveMinutes).environmentObject(ledger), size: CGSize(width: 380, height: 120))
+        let cg = rep.cgImage!
+        // Columns in the left and right quarters must both contain coloured bars (not a lone bar at one edge).
+        func hasBars(_ x0: Double, _ x1: Double) -> Bool {
+            let w = cg.width, h = cg.height
+            var data = [UInt8](repeating: 0, count: w * h * 4)
+            let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            var coloured = 0
+            for y in 0..<h { for x in Int(x0 * Double(w))..<Int(x1 * Double(w)) {
+                let i = (y * w + x) * 4
+                let r = Int(data[i]), g = Int(data[i + 1]), b = Int(data[i + 2])
+                if abs(b - g) > 60 || abs(r - g) > 60 { coloured += 1 }
+            } }
+            return coloured > 150
+        }
+        XCTAssertTrue(hasBars(0.05, 0.3), "left of the chart has bars")
+        XCTAssertTrue(hasBars(0.7, 0.95), "right of the chart has bars")
+    }
+
+    func testSettingsWindowMatchesReferenceScreenshotProportions() throws {
+        let ref = Self.referenceDir.appendingPathComponent("Screenshot 2026-10-22 at 14.38.22.png")
+        guard let img = NSImage(contentsOf: ref), let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { throw XCTSkip("reference screenshots not present (gitignored)") }
+        // The reference Settings pane is dark; ours must be too, and its text column starts at a similar relative offset.
+        let refLum = luminance(cg, region: CGRect(x: 0.2, y: 0.25, width: 0.6, height: 0.6))
+        let rep = render(AdvancedSettings().environmentObject(demoLedger()), size: CGSize(width: 640, height: 520))
+        let ours = luminance(rep.cgImage!, region: CGRect(x: 0.1, y: 0.05, width: 0.8, height: 0.9))
+        XCTAssertLessThan(refLum, 0.3)
+        XCTAssertLessThan(ours, 0.3)
+        XCTAssertEqual(ours, refLum, accuracy: 0.15)
     }
 
     // MARK: comparison with the Little Snitch screenshots

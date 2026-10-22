@@ -27,8 +27,24 @@ final class RulesModel: ObservableObject {
         store = RuleStore(url: directory.appendingPathComponent("rules.json"))
         var set = (try? store.loadSet()) ?? RuleSet.standard()
         if !set.profiles.contains(where: { $0.id == set.activeProfileID }), let first = set.profiles.first { set.activeProfileID = first.id }
+        Self.repair(&set)
         ruleSet = set
         engine = RuleEngine(ruleSet: set)
+    }
+
+    /// Fixes rules written by earlier versions: an IP address saved as a "domain" (it could never match), and
+    /// versioned executables ("…/claude/versions/2.1.308") that should refer to the tool, not one version.
+    static func repair(_ set: inout RuleSet) {
+        for i in set.rules.indices {
+            if let d = set.rules[i].remoteDomain, isIPLiteral(d) {
+                set.rules[i].remoteAddress = d
+                set.rules[i].remoteDomain = nil
+            }
+            if let p = set.rules[i].processPath, !p.contains(".app") {
+                let resolved = AppIdentity.resolve(processPath: p).id
+                if resolved != p && resolved != "macOS" { set.rules[i].processPath = resolved }
+            }
+        }
     }
 
     // MARK: profiles
@@ -61,7 +77,41 @@ final class RulesModel: ObservableObject {
     func applyNetwork(_ net: NetworkWatcher.Network?) {
         guard net != currentNetwork else { return }
         currentNetwork = net
-        guard ruleSet.automaticProfileSwitching, let net, let target = engine.profile(forNetwork: net.signature) else { return }
+        guard ruleSet.automaticProfileSwitching, let net else { return }
+        if let target = engine.profile(forNetwork: net.signature) {
+            switchAutomatically(to: target, network: net)
+            return
+        }
+        switch ruleSet.unknownNetworkAction {
+        case .ask: askForProfile(network: net)
+        case .activate(let id): if ruleSet.profiles.contains(where: { $0.id == id }) { switchAutomatically(to: id, network: net) }
+        case .doNothing, .deactivate: break
+        }
+    }
+
+    private func switchAutomatically(to id: UUID, network: NetworkWatcher.Network) {
+        guard ruleSet.activeProfileID != id else { return }
+        activate(id)
+        if AppSettings.shared.notifyProfileSwitch, let name = activeProfile?.name {
+            Notifier.post(title: "Profile switched to “\(name)”", body: "Joined \(network.name)")
+        }
+    }
+
+    /// "When joining an unknown network: Ask".
+    private func askForProfile(network: NetworkWatcher.Network) {
+        let alert = NSAlert()
+        alert.messageText = "Joined “\(network.name)”"
+        alert.informativeText = "Which profile should be active on this network? Rat will switch to it automatically next time."
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 26))
+        for p in ruleSet.profiles { popup.addItem(withTitle: p.name) }
+        popup.selectItem(withTitle: activeProfile?.name ?? "")
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "Use Profile")
+        alert.addButton(withTitle: "Not Now")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn, popup.indexOfSelectedItem >= 0, popup.indexOfSelectedItem < ruleSet.profiles.count else { return }
+        let target = ruleSet.profiles[popup.indexOfSelectedItem].id
+        rememberCurrentNetwork(profile: target)
         activate(target)
     }
 
@@ -106,7 +156,7 @@ final class RulesModel: ObservableObject {
     // MARK: alert answers
 
     enum Scope: String, CaseIterable, Identifiable {
-        case any = "Any connection", domain = "Domain", host = "Exact host", port = "Port"
+        case any = "This App (Any Server)", domain = "Domain", host = "Exact host", port = "Port"
         var id: String { rawValue }
     }
 
@@ -117,8 +167,10 @@ final class RulesModel: ObservableObject {
                      lifetime: lifetime == .once ? .untilQuit : lifetime, profileID: ruleSet.activeProfileID, note: "From a connection alert")
         switch scope {
         case .any: break
-        case .domain: r.remoteDomain = registrableDomain(alert.host)
-        case .host: if alert.host.contains(where: \.isLetter) { r.remoteHost = alert.host } else { r.remoteAddress = alert.address }
+        case .domain:
+            // A raw IP has no domain: scope it to the address instead.
+            if !isIPLiteral(alert.host) { r.remoteDomain = registrableDomain(alert.host) } else { r.remoteAddress = alert.address }
+        case .host: if !isIPLiteral(alert.host) { r.remoteHost = alert.host } else { r.remoteAddress = alert.address }
         case .port: r.ports = alert.port...alert.port; r.proto = alert.proto == "UDP" ? .udp : .tcp
         }
         if lifetime == .once { r.remoteAddress = alert.address; r.ports = alert.port...alert.port }

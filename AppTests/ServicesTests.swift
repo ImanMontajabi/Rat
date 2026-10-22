@@ -38,12 +38,17 @@ final class ServicesTests: XCTestCase {
 
     func testEnforcerNeverTouchesFirewallWithoutHelper() {
         let dir = tempDir()
-        let e = Enforcer(supportDirectory: dir)
+        let e = Enforcer(supportDirectory: dir, helperInstalled: false, autoApply: true)
         e.sync(["1.2.3.4"])
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("blocklist.txt").path))
         XCTAssertTrue(e.needsApply(for: ["1.2.3.4"]))
         XCTAssertFalse(e.needsApply(for: []))
         XCTAssertNil(e.systemSnapshotText())
+        // With the helper present and auto-apply on, syncing writes the list the daemon watches.
+        let installed = Enforcer(supportDirectory: dir, helperInstalled: true, autoApply: true)
+        installed.sync(["1.2.3.4", "5.6.7.8"])
+        XCTAssertEqual(try? String(contentsOf: dir.appendingPathComponent("blocklist.txt"), encoding: .utf8), "1.2.3.4\n5.6.7.8\n")
+        XCTAssertFalse(installed.needsApply(for: ["1.2.3.4", "5.6.7.8"]))
     }
 
     func testDeniedAppEntersWantedBlocklist() {
@@ -61,6 +66,7 @@ final class ServicesTests: XCTestCase {
     func testAlertCenterDedupesAndAnswers() {
         let dir = tempDir()
         let rules = RulesModel(directory: dir)
+        rules.silentMode = .off
         var decisions: [Verdict] = []
         let center = AlertCenter(rules: rules) { _, v in decisions.append(v) }
         let a = ConnectionAlert(appID: "/Applications/Foo.app", appName: "Foo", host: "a.example.com", address: "203.0.113.1", port: 443, proto: "TCP")

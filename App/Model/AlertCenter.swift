@@ -26,6 +26,9 @@ final class AlertCenter: ObservableObject {
     private unowned let rules: RulesModel
     private let onDecision: (ConnectionAlert, Verdict) -> Void
     var iconProvider: (String) -> NSImage = { _ in NSImage() }
+    /// Set by the ledger: false once rules, a policy button or the mode have already answered this alert.
+    var isStillPending: (ConnectionAlert) -> Bool = { _ in true }
+    private var timeoutTask: Task<Void, Never>?
 
     init(rules: RulesModel, onDecision: @escaping (ConnectionAlert, Verdict) -> Void) {
         self.rules = rules
@@ -41,7 +44,25 @@ final class AlertCenter: ObservableObject {
         presentNext()
     }
 
+    /// Drops queued alerts that no longer need an answer (e.g. the app got a process-wide Allow or Deny).
+    func revalidate() {
+        let before = queue.count
+        queue.removeAll { a in
+            let keep = isStillPending(a)
+            if !keep { answeredOrQueued.remove(a.key) }
+            return !keep
+        }
+        if let c = current, !isStillPending(c) {
+            timeoutTask?.cancel()
+            answeredOrQueued.remove(c.key)
+            current = nil
+            closePanel()
+        }
+        if before != queue.count || current == nil { presentNext() }
+    }
+
     func answer(_ alert: ConnectionAlert, verdict: Verdict, scope: RulesModel.Scope, lifetime: Lifetime) {
+        timeoutTask?.cancel()
         rules.addRule(from: alert, verdict: verdict, scope: scope, lifetime: lifetime)
         onDecision(alert, verdict)
         // A "once" answer should not silence the next connection from the same app.
@@ -53,8 +74,27 @@ final class AlertCenter: ObservableObject {
 
     private func presentNext() {
         guard current == nil, !queue.isEmpty else { return }
+        // Skip anything answered while it waited in the queue.
+        while let next = queue.first, !isStillPending(next) { answeredOrQueued.remove(next.key); queue.removeFirst() }
+        guard !queue.isEmpty else { return }
         current = queue.removeFirst()
         showPanel()
+        startTimeout()
+    }
+
+    /// Settings > Alert: confirm automatically after N seconds.
+    private func startTimeout() {
+        let secs = AppSettings.shared.alertTimeout
+        guard secs > 0, let alert = current else { return }
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(secs))
+            guard !Task.isCancelled, let self, self.current == alert else { return }
+            let allow = AppSettings.shared.alertTimeoutAllows
+            if AppSettings.shared.notifyAlertTimeout {
+                Notifier.post(title: allow ? "Connection allowed after timeout" : "Connection denied after timeout", body: "\(alert.appName) → \(alert.host)")
+            }
+            self.answer(alert, verdict: allow ? .allow : .deny, scope: .any, lifetime: .once)
+        }
     }
 
     private func showPanel() {
@@ -91,7 +131,9 @@ struct AlertView: View {
     let remaining: Int
     let decide: (Verdict, RulesModel.Scope, Lifetime) -> Void
 
-    @State private var scope: RulesModel.Scope = .domain
+    @ObservedObject private var settings = AppSettings.shared
+    // One click should cover the app, not just one of its many server addresses.
+    @State private var scope: RulesModel.Scope = .any
     @State private var lifetime: Lifetime = .forever
 
     private var target: String {
@@ -122,14 +164,23 @@ struct AlertView: View {
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button { decide(.deny, scope, lifetime) } label: { Label("Deny", systemImage: "xmark").frame(maxWidth: .infinity) }
-                    .keyboardShortcut(.cancelAction).tint(.red)
+                    .modifier(OptionalShortcut(key: .cancelAction, enabled: settings.confirmWithReturn)).tint(.red)
                 Button { decide(.allow, scope, lifetime) } label: { Label("Allow", systemImage: "checkmark").frame(maxWidth: .infinity) }
-                    .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent).tint(.green)
+                    .modifier(OptionalShortcut(key: .defaultAction, enabled: settings.confirmWithReturn)).buttonStyle(.borderedProminent).tint(.green)
             }
             .controlSize(.large)
         }
         .padding(18)
         .frame(width: 380)
         .background(.regularMaterial)
+    }
+}
+
+/// "Confirm with Return and Escape" can be turned off to avoid accidental answers.
+struct OptionalShortcut: ViewModifier {
+    let key: KeyboardShortcut
+    let enabled: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if enabled { content.keyboardShortcut(key) } else { content }
     }
 }

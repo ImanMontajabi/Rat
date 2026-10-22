@@ -11,19 +11,21 @@ A network monitor and application firewall for macOS, modelled on Little Snitch.
 
 ## Features
 
-- **Network Monitor:** per-app list with activity sparklines, session totals, traffic chart (5m / 1h / 1d / 1w), inspector (path, code-signing ID, servers, locations), summary of top processes, domains and countries.
+- **Network Monitor** (toolbar: view options, traffic chart, inspector, as in Little Snitch): per-app list with activity sparklines, session totals, traffic chart (5m / 1h / 1d / 1w), inspector (path, code-signing ID, servers, locations), summary of top processes, domains and countries.
 - **Offline world map:** server IPs are resolved on-device from a bundled DB-IP Lite database (`Contents/Resources/Vendor`). Arcs and city pins appear immediately, no lookups, no network.
-- **Connection alerts:** a floating panel for unknown connections. Pick the scope (any connection, domain, exact host, port) and the lifetime (once, until quit, forever), then Allow or Deny. **Alert Mode** or **Silent Mode** (allow or deny everything new).
-- **Rules & Profiles window:** rules matched on app, team ID, signing ID, domain, host, IP, port range and protocol; the most specific rule wins and deny beats allow on a tie. Rule groups, profiles (Home / Work / Public Wi-Fi), **automatic profile switching** per network, **unapproved rules** with a review queue, JSON **import / export**.
+- **Connection alerts:** **Silent Allow** is the default, so Rat never nags on first launch. Switch to **Alert Mode** for a floating panel on unknown connections: pick the scope (*This App (Any Server)* by default, domain, exact host, port) and the lifetime (once, until quit, forever), then Allow or Deny. An app with a process-wide Allow or Deny never raises an alert, and pending alerts for it vanish.
+- **Rules window** (⇧⌘R): sidebar of Rules / Unapproved / Profiles / Rule Groups / Known Networks / Invalid Rules and a table with Active, Process, Description and Status. Rules matched on app, team ID, signing ID, domain, host, IP, port range and protocol; the most specific rule wins and deny beats allow on a tie. Rule groups, profiles (Home / Work / Public Wi-Fi), **automatic profile switching** per network, **unapproved rules** with a review queue, JSON **import / export**.
 - **Menu bar:** live up/down throughput, profile selector, mode switch, shortcuts.
 - **Firewall enforcement:** Deny adds the server addresses to a `pf` table. Either click *Apply blocking* (one admin prompt each time, nothing installed), or opt in to the **background helper** (Options tab): two root LaunchDaemons that apply the blocklist the moment it changes and list *every* process's connections, so Rat also sees other users' and system processes. *Remove Helper* uninstalls both and clears the table. Without the helper Rat sees only your own processes.
 - **Updates:** *Rat menu → Check for Updates…* reads GitHub Releases.
 
-![Alert](docs/screenshots/rat-alert.png) ![Rules](docs/screenshots/rat-rules.png)
+![Rules](docs/screenshots/rat-rules.jpg)
+
+![Settings](docs/screenshots/rat-settings-general.jpg) ![Alert](docs/screenshots/rat-alert.png)
 
 ## Install
 
-Download `Rat-v1.0.0-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
+Download `Rat-v1.0.1-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
 
 ## Build
 

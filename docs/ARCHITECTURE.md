@@ -240,3 +240,20 @@ Design decisions:
 - **Profile switching** keys on the Wi-Fi name when macOS reveals it (needs Location access) and otherwise on the default gateway.
 
 Still out of scope: per-process blocking and pre-connection prompts (Network Extension entitlement), DNS encryption, blocklist subscriptions, Endpoint Security.
+
+---
+
+## 9. Revision 3 (v1.0.1): Settings and Rules windows rebuilt from Little Snitch's own resources
+
+The first versions guessed at the UI from screenshots. v1.0.1 follows the app's own localisation tables (`Settings.strings`, `RulesWindow*.strings`, `RulesCategory*.strings`, `FilterScopes.strings`, `ProfileInspector.strings`, `RuleLifetimeOption.strings`), read from the read-only mounted DMG. These record labels and structure only, not layout.
+
+| Little Snitch | Rat |
+|---|---|
+| Settings tabs General, Control Center, Alert, Monitor, APS, Security, DNS, Notifications, Update, Registration, Advanced | Same order and wording, minus DNS (no DNS encryption) and Registration (no licensing). Security holds the firewall helper because Rat has no code-signing lock settings. |
+| Rules window sidebar: Rules, Suggestions, Profiles, Rule Groups, Networks, Maintenance, Blocklists | Rules (All, Unapproved), Profiles, Rule Groups, Known Networks, Maintenance (Invalid Rules). Suggestions, redundant/unused rules and blocklists are not implemented. |
+| Rules table: Active, Process, Description, Status | Same columns; Status shows unapproved (blue dot) and temporary |
+| Operation mode: Alert, Silent Allow, Silent Deny | Same; **Silent Allow is the default** |
+| Unknown network: Ask, Do Nothing, Deactivate, Activate profile | Ask, Do Nothing, Activate profile (Rat always has an active profile) |
+| Monitor toolbar: view menu (Group By, Sort By, Show Local Network, Show Network Extensions, Show Connections of Other Users, Float on Top), traffic chart, inspector | Same three buttons and menu entries, all functional |
+
+Behaviour fixes in this release: alerts re-validated against the rules every tick, so an app with a whole-app Allow or Deny never prompts; alert scope defaults to *This App (Any Server)*; IP addresses are never stored as "domains"; the traffic chart tiles its window and fits it to the data that exists; versioned binaries (`…/claude/versions/2.1.308`) resolve to their tool; app extensions (`.appex`) are listed separately like Little Snitch's EXT rows.

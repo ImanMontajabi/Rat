@@ -34,11 +34,12 @@ final class Enforcer: ObservableObject {
     let snapshotURL: URL
     private var lastWritten: Set<String>?
 
-    init(supportDirectory: URL) {
+    /// `helperInstalled` and `autoApply` can be forced so tests do not depend on (or touch) the machine's real state.
+    init(supportDirectory: URL, helperInstalled: Bool? = nil, autoApply: Bool? = nil) {
         listURL = supportDirectory.appendingPathComponent("blocklist.txt")
         snapshotURL = supportDirectory.appendingPathComponent("system-sockets.txt")
-        helperInstalled = FileManager.default.fileExists(atPath: Self.plistPath(Self.applyLabel))
-        autoApply = UserDefaults.standard.bool(forKey: "autoApplyPF")
+        self.helperInstalled = helperInstalled ?? FileManager.default.fileExists(atPath: Self.plistPath(Self.applyLabel))
+        self.autoApply = autoApply ?? UserDefaults.standard.bool(forKey: "autoApplyPF")
     }
 
     func needsApply(for wanted: Set<String>) -> Bool { wanted != applied }
