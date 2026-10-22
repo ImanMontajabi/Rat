@@ -25,13 +25,13 @@ struct PersistedState: Codable {
     var buckets: [Bucket] = []
 }
 
-/// JSON state in ~/Library/Application Support/Rat.
+/// JSON state in ~/Library/Application Support/com.imanmontajabi.Rat.
 struct StateStore {
     let directory: URL
     var url: URL { directory.appendingPathComponent("state.json") }
 
     static func standard() -> StateStore {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Rat")
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("com.imanmontajabi.Rat")
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return StateStore(directory: base)
     }
