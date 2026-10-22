@@ -1,5 +1,6 @@
 import Foundation
 import CoreLocation
+import RatGeo
 import os
 
 private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "geo")
@@ -12,31 +13,38 @@ struct GeoPoint: Hashable {
     func hash(into h: inout Hasher) { h.combine(city); h.combine(country); h.combine(coordinate.latitude) }
 }
 
-/// Opt-in IP geolocation. Looking an address up sends it to ipwho.is, so the UI keeps this off until the user enables it.
-actor GeoService {
+/// Fully offline IP geolocation. Reads the DB-IP Lite city database bundled in Contents/Resources/Vendor;
+/// no address ever leaves the machine.
+final class GeoService: @unchecked Sendable {
+    static let databaseName = "dbip-city-lite"
+    private let db: GeoIP?
+    private let lock = NSLock()
     private var cache: [String: GeoPoint?] = [:]
-    private var inFlight = Set<String>()
 
-    func cached(_ ip: String) -> GeoPoint?? { cache[ip] }
+    var available: Bool { db != nil }
 
-    /// `ip` empty means "this machine's public address".
-    func lookup(_ ip: String) async -> GeoPoint? {
-        if let hit = cache[ip] { return hit }
-        guard !inFlight.contains(ip) else { return nil }
-        inFlight.insert(ip); defer { inFlight.remove(ip) }
-        guard let url = URL(string: "https://ipwho.is/\(ip)?fields=success,latitude,longitude,city,country") else { return nil }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            guard let j = try JSONSerialization.jsonObject(with: data) as? [String: Any], j["success"] as? Bool == true,
-                  let lat = j["latitude"] as? Double, let lon = j["longitude"] as? Double else { cache[ip] = .some(nil); return nil }
-            let p = GeoPoint(coordinate: .init(latitude: lat, longitude: lon), city: j["city"] as? String ?? "", country: j["country"] as? String ?? "")
-            cache[ip] = p
-            logger.notice("geolocated one address")
-            return p
-        } catch {
-            logger.error("geo lookup failed: \(error.localizedDescription, privacy: .public)")
-            return nil
+    init() {
+        let env = ProcessInfo.processInfo.environment["RAT_GEOIP_DB"]
+        let bundled = Bundle.main.url(forResource: Self.databaseName, withExtension: "mmdb", subdirectory: "Vendor")?.path
+        let path = [env, bundled].compactMap { $0 }.first { FileManager.default.fileExists(atPath: $0) }
+        db = path.flatMap { try? GeoIP(path: $0) }
+        logger.notice("geoip database \(self.db == nil ? "missing" : "loaded", privacy: .public)")
+    }
+
+    func lookup(_ ip: String) -> GeoPoint? {
+        if let hit = lock.withLock({ cache[ip] }) { return hit }
+        let result = db?.locate(ip).map {
+            GeoPoint(coordinate: .init(latitude: $0.latitude, longitude: $0.longitude), city: $0.city, country: $0.country)
         }
+        lock.withLock { cache[ip] = .some(result) }
+        return result
+    }
+
+    /// Where this Mac probably is, from its time zone (offline).
+    static func localPoint() -> GeoPoint? {
+        guard let z = TimeZoneLocator.coordinates() else { return nil }
+        let country = Locale.current.region.flatMap { Locale.current.localizedString(forRegionCode: $0.identifier) } ?? ""
+        return GeoPoint(coordinate: .init(latitude: z.lat, longitude: z.lon), city: z.city, country: country)
     }
 }
 

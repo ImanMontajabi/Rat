@@ -1,11 +1,10 @@
 import SwiftUI
 import CoreLocation
 import RatMonitor
+import RatFilterCore
 import os
 
 private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "ledger")
-
-enum Policy: String { case allow, deny }
 
 enum TimeRange: String, CaseIterable, Identifiable {
     case fiveMinutes = "5m", hour = "1h", day = "1d", week = "1w"
@@ -62,39 +61,57 @@ final class Ledger: ObservableObject {
     @Published var history: [TrafficPoint] = []
     @Published var sessionIn: UInt64 = 0
     @Published var sessionOut: UInt64 = 0
+    @Published var rateIn = 0.0
+    @Published var rateOut = 0.0
     @Published var myLocation: GeoPoint?
-    @Published var policies: [String: Policy] = [:]
-    @Published var geoEnabled = UserDefaults.standard.bool(forKey: "geoLookupEnabled")
+    @Published var deniedCount = 0
+    @Published var unconfirmedCount = 0
+    @Published var incomingCount = 0
+    @Published var systemWide = false
 
+    let rules: RulesModel
     let enforcer: Enforcer
+    let geo = GeoService()
+    private(set) lazy var alerts = AlertCenter(rules: rules) { [unowned self] alert, verdict in
+        if verdict == .deny { recordDenied(appID: alert.appID, address: alert.address, host: alert.host, port: alert.port, proto: alert.proto) }
+        refreshBlocklist()
+    }
+    var onTick: (() -> Void)?
 
-    private let geo = GeoService()
     private let names = HostNames()
-    private let store = StateStore.standard()
+    private let store: StateStore
     private var previous: [Int32: TrafficCounter] = [:]
     private var table: [String: AppEntry] = [:]
     private var buckets: [Date: Bucket] = [:]
-    /// Server addresses each denied app has talked to.
-    private var blocked: [String: Set<String>] = [:]
+    private var denied: [String: [String: DeniedEntry]] = [:]
+    private var signingCache: [String: (identifier: String?, team: String?)] = [:]
     private var running = false
     private var demo = false
     private var lastSave = Date()
+    private var lastTick = Date()
+    private var startedAt = Date()
 
-    init() {
+    init(directory: URL? = nil) {
+        #if DEBUG
+        // Demo mode never reads or writes the real data folder.
+        let demoDir = ProcessInfo.processInfo.environment["RAT_DEMO_MAP"] != nil ? FileManager.default.temporaryDirectory.appendingPathComponent("rat-demo-\(UUID())") : nil
+        store = StateStore.standard(base: directory ?? demoDir)
+        #else
+        store = StateStore.standard(base: directory)
+        #endif
+        rules = RulesModel(directory: store.directory)
         enforcer = Enforcer(supportDirectory: store.directory)
-        if let raw = UserDefaults.standard.dictionary(forKey: "policies") as? [String: String] {
-            policies = raw.compactMapValues(Policy.init(rawValue:))
-        }
+        myLocation = GeoService.localPoint()
         let saved = store.load()
         for a in saved.apps {
-            let ident = AppIdentity(id: a.id, name: a.name, bundlePath: a.bundlePath, isSystem: a.isSystem)
-            var e = AppEntry(identity: ident)
+            var e = AppEntry(identity: AppIdentity(id: a.id, name: a.name, bundlePath: a.bundlePath, isSystem: a.isSystem))
             e.totalIn = a.totalIn; e.totalOut = a.totalOut; e.lastActive = a.lastActive
             table[a.id] = e
         }
-        blocked = saved.blocked.mapValues(Set.init)
+        for (app, entries) in saved.denied { denied[app] = Dictionary(uniqueKeysWithValues: entries.map { ($0.address, $0) }) }
         for b in saved.buckets { buckets[b.minute] = b }
         apps = Array(table.values)
+        alerts.iconProvider = { [weak self] id in self?.table[id]?.identity.icon ?? NSImage() }
         #if DEBUG
         if ProcessInfo.processInfo.environment["RAT_DEMO_MAP"] != nil { installDemoData() }
         #endif
@@ -105,32 +122,45 @@ final class Ledger: ObservableObject {
     func start() {
         guard !running else { return }
         running = true
+        startedAt = Date()
         logger.notice("ledger started")
         Task { await loop() }
     }
 
     func save() {
+        guard !demo else { return }   // demo data must never reach the real state files
         let weekAgo = Date().addingTimeInterval(-TimeRange.week.seconds)
         let state = PersistedState(
             apps: table.values.map { PersistedApp(id: $0.id, name: $0.identity.name, bundlePath: $0.identity.bundlePath, isSystem: $0.identity.isSystem, totalIn: $0.totalIn, totalOut: $0.totalOut, lastActive: $0.lastActive) },
-            blocked: blocked.mapValues { Array($0) },
+            denied: denied.mapValues { Array($0.values) },
             buckets: buckets.values.filter { $0.minute > weekAgo }.sorted { $0.minute < $1.minute })
         store.save(state)
-        UserDefaults.standard.set(policies.mapValues(\.rawValue), forKey: "policies")
+        rules.saveNow()
         lastSave = Date()
     }
 
-    func setGeoEnabled(_ on: Bool) {
-        geoEnabled = on
-        UserDefaults.standard.set(on, forKey: "geoLookupEnabled")
-        if on { Task { await resolveGeo() } }
+    func shutdown() {
+        rules.purgeSessionRules()
+        save()
     }
 
     private func loop() async {
         while running && !demo {
-            let (conns, traffic) = await Task.detached(priority: .utility) { (ConnectionSampler.sample(), TrafficSampler.sample()) }.value
+            let useSnapshot = enforcer.systemSnapshotText()
+            let (conns, traffic) = await Task.detached(priority: .utility) { () -> ([ObservedConnection], [TrafficCounter]) in
+                var c = ConnectionSampler.sample()
+                if let text = useSnapshot {
+                    // Root helper snapshot: adds processes this app cannot inspect (other users, system daemons).
+                    var seen = Set(c.map { "\($0.pid)|\($0.proto.rawValue)|\($0.localPort)|\($0.remoteAddress)|\($0.remotePort)" })
+                    for x in SystemSnapshot.parse(text) where seen.insert("\(x.pid)|\(x.proto.rawValue)|\(x.localPort)|\(x.remoteAddress)|\(x.remotePort)").inserted { c.append(x) }
+                }
+                return (c, TrafficSampler.sample())
+            }.value
+            systemWide = useSnapshot != nil
             await ingest(conns, traffic)
-            if geoEnabled { await resolveGeo() }
+            rules.refreshNetwork()
+            refreshBlocklist()
+            onTick?()
             if Date().timeIntervalSince(lastSave) > 30 { save() }
             try? await Task.sleep(for: .seconds(1.5))
         }
@@ -138,8 +168,19 @@ final class Ledger: ObservableObject {
 
     // MARK: sampling
 
+    private func signing(for identity: AppIdentity) -> (identifier: String?, team: String?) {
+        if let c = signingCache[identity.id] { return c }
+        let s = identity.signing()
+        signingCache[identity.id] = s
+        return s
+    }
+
     private func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter]) async {
         let now = Date()
+        let dt = max(now.timeIntervalSince(lastTick), 0.2)
+        lastTick = now
+        let warmedUp = now.timeIntervalSince(startedAt) > 12   // don't alert for sockets that already existed at launch
+
         var identityByPid: [Int32: AppIdentity] = [:]
         var perApp: [String: (conns: [ObservedConnection], listening: Int)] = [:]
         for c in conns {
@@ -169,6 +210,7 @@ final class Ledger: ObservableObject {
             table[ident.id]!.pids.insert(t.pid)
         }
         sessionIn += UInt64(totalRx); sessionOut += UInt64(totalTx)
+        rateIn = totalRx / dt; rateOut = totalTx / dt
         history.append(TrafficPoint(date: now, rx: totalRx, tx: totalTx))
         if history.count > 2400 { history.removeFirst(history.count - 2400) }
         let minute = Date(timeIntervalSince1970: (now.timeIntervalSince1970 / 60).rounded(.down) * 60)
@@ -176,64 +218,88 @@ final class Ledger: ObservableObject {
         b.rx += totalRx; b.tx += totalTx
         buckets[minute] = b
 
+        var denyCount = 0, askCount = 0, listenCount = 0
         for id in table.keys {
             var e = table[id]!
             let rx = rxByApp[id] ?? 0, tx = txByApp[id] ?? 0
             e.rates.append((rx, tx)); if e.rates.count > 14 { e.rates.removeFirst() }
             if rx + tx > 0 || perApp[id] != nil { e.lastActive = now }
             e.listening = perApp[id]?.listening ?? 0
+            listenCount += e.listening
             if perApp[id] == nil { e.pids = e.pids.filter { pid in traffic.contains { $0.pid == pid } } }
+
             var remotes: [RemoteHost] = []
             var seen = Set<String>()
+            let sig = e.remotes.isEmpty && perApp[id] == nil ? (nil as String?, nil as String?) : signing(for: e.identity)
             for c in perApp[id]?.conns ?? [] where seen.insert("\(c.remoteAddress):\(c.remotePort)").inserted {
                 let host = await names.name(for: c.remoteAddress)
-                let old = e.remotes.first { $0.address == c.remoteAddress }
-                remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: old?.geo))
+                let geoPoint = isLocalAddress(c.remoteAddress) ? nil : geo.lookup(c.remoteAddress)
+                remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint))
+
+                guard !isLocalAddress(c.remoteAddress) else { continue }
+                let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: id), host: host == c.remoteAddress ? nil : host,
+                                      address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp)
+                switch rules.engine.evaluate(conn) {
+                case .deny:
+                    denyCount += 1
+                    recordDenied(appID: id, address: c.remoteAddress, host: host, port: c.remotePort, proto: remotes.last!.proto)
+                case .ask:
+                    askCount += 1
+                    if warmedUp {
+                        alerts.report(ConnectionAlert(appID: id, appName: e.identity.name, host: host, address: c.remoteAddress, port: c.remotePort, proto: remotes.last!.proto))
+                    }
+                case .allow: break
+                }
             }
             e.remotes = remotes
             table[id] = e
-            if policies[id] == .deny {
-                var set = blocked[id] ?? []
-                for r in remotes where !isLocalAddress(r.address) && set.count < 2000 { set.insert(r.address) }
-                blocked[id] = set
-            }
         }
+        deniedCount = denyCount; unconfirmedCount = askCount; incomingCount = listenCount
         apps = Array(table.values)
     }
 
-    private func resolveGeo() async {
-        guard !demo else { return }
-        if myLocation == nil { myLocation = await geo.lookup("") }
-        var changed = false
-        for (id, var e) in table {
-            for i in e.remotes.indices where e.remotes[i].geo == nil && !isLocalAddress(e.remotes[i].address) {
-                if let p = await geo.lookup(e.remotes[i].address) { e.remotes[i].geo = p; changed = true }
-            }
-            table[id] = e
+    // MARK: blocking
+
+    /// Allow/Deny from the process list. Deny also remembers the server addresses the app is using right now.
+    func setPolicy(_ p: Policy?, for appID: String) {
+        rules.setPolicy(p, for: appID)
+        if p == .deny, let e = table[appID] {
+            for r in e.remotes { recordDenied(appID: appID, address: r.address, host: r.host, port: r.port, proto: r.proto) }
         }
-        if changed { apps = Array(table.values) }
+        refreshBlocklist()
     }
 
-    // MARK: policy and blocking
-
-    func setPolicy(_ p: Policy?, for id: String) {
-        policies[id] = p
-        if p != .deny { blocked[id] = nil } else if let e = table[id] {
-            blocked[id] = Set(e.remotes.map(\.address).filter { !isLocalAddress($0) })
-        }
-        save()
+    private func recordDenied(appID: String, address: String, host: String, port: Int, proto: String) {
+        guard !isLocalAddress(address) else { return }
+        var set = denied[appID] ?? [:]
+        guard set.count < 2000 else { return }
+        set[address] = DeniedEntry(address: address, host: host, port: port, proto: proto)
+        denied[appID] = set
     }
 
-    /// Every address that should currently be blocked.
+    /// Every address that should be blocked right now: remembered denied connections that the rules still deny.
     var wantedBlocklist: Set<String> {
-        var all = Set<String>()
-        for (id, ips) in blocked where policies[id] == .deny { all.formUnion(ips) }
-        return all
+        var out = Set<String>()
+        for (appID, entries) in denied {
+            let sig = table[appID].map { signing(for: $0.identity) } ?? (nil, nil)
+            for e in entries.values {
+                let c = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: appID), host: e.host == e.address ? nil : e.host,
+                                   address: e.address, port: e.port, proto: e.proto == "UDP" ? .udp : .tcp)
+                if rules.engine.evaluate(c) == .deny { out.insert(e.address) }
+            }
+        }
+        return out
     }
 
-    func blockedAddresses(for id: String) -> Int { policies[id] == .deny ? (blocked[id]?.count ?? 0) : 0 }
+    /// With the root helper installed, keep the pf table in step with the rules automatically.
+    func refreshBlocklist() { enforcer.sync(wantedBlocklist) }
 
-    func applyBlocking() { enforcer.apply(wantedBlocklist) }
+    func applyBlocking() { enforcer.applyOnce(wantedBlocklist) }
+
+    func blockedAddresses(for appID: String) -> Int {
+        let wanted = wantedBlocklist
+        return denied[appID]?.keys.filter(wanted.contains).count ?? 0
+    }
 
     // MARK: derived data
 
@@ -268,24 +334,36 @@ final class Ledger: ObservableObject {
     }
 
     #if DEBUG
-    /// Fake servers for checking the map without sending real addresses anywhere.
-    private func installDemoData() {
-        myLocation = GeoPoint(coordinate: .init(latitude: 52.52, longitude: 13.405), city: "Berlin", country: "Germany")
-        geoEnabled = true
+    /// Fixed data for visual checks and snapshot tests: no sampling, no alerts, no real addresses.
+    func installDemoData() {
         demo = true
+        myLocation = GeoPoint(coordinate: .init(latitude: 52.52, longitude: 13.405), city: "Berlin", country: "Germany")
         let places: [(String, String, String, Double, Double)] = [
             ("Google Chrome", "London", "United Kingdom", 51.507, -0.128), ("Google Chrome", "Amsterdam", "Netherlands", 52.37, 4.89),
             ("Telegram", "Frankfurt", "Germany", 50.11, 8.68), ("Telegram", "Paris", "France", 48.857, 2.352),
             ("Steam", "Stockholm", "Sweden", 59.33, 18.07), ("Steam", "Madrid", "Spain", 40.42, -3.70),
         ]
         for (i, d) in places.enumerated() {
-            let ident = AppIdentity.resolve(processPath: "/Applications/\(d.0).app/Contents/MacOS/x")
+            let ident = AppIdentity.resolve(processPath: "/Applications/Demo/\(d.0).app/Contents/MacOS/x")
             var e = table[ident.id] ?? AppEntry(identity: ident)
             e.lastActive = Date(); e.totalIn = UInt64(1_000_000 * (i + 1)); e.totalOut = UInt64(100_000 * (i + 1))
+            var rates: [(rx: Double, tx: Double)] = []
+            for k in 0..<14 { rates.append((rx: Double((k * (i + 3)) % 7), tx: Double((k * (i + 2)) % 5))) }
+            e.rates = rates
             e.remotes.append(RemoteHost(address: "203.0.113.\(i + 1)", host: "demo\(i).example.com", port: 443, proto: "TCP",
                                         geo: GeoPoint(coordinate: .init(latitude: d.3, longitude: d.4), city: d.1, country: d.2)))
             table[ident.id] = e
         }
+        sessionIn = 12_400_000; sessionOut = 1_300_000
+        unconfirmedCount = 6
+        var points: [TrafficPoint] = []
+        for k in 0..<60 {
+            let date = Date().addingTimeInterval(Double(k - 60) * 5)
+            let rx = Double((k * 37) % 90) * 1000
+            let tx = Double((k * 53) % 40) * 1000
+            points.append(TrafficPoint(date: date, rx: rx, tx: tx))
+        }
+        history = points
         apps = Array(table.values)
     }
     #endif

@@ -41,7 +41,7 @@ final class RatAppTests: XCTestCase {
         let script = try XCTUnwrap(Bundle(for: Self.self).path(forResource: "rat-pf-helper", ofType: "sh") ?? Bundle.main.path(forResource: "rat-pf-helper", ofType: "sh"))
         let list = FileManager.default.temporaryDirectory.appendingPathComponent("list-\(UUID()).txt")
         try "1.2.3.4\n999.1.1.1\nnot-an-ip\n2001:db8::1\n8.8.8.8; rm -rf /\n1.2.3.4\n".write(to: list, atomically: true, encoding: .utf8)
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/sh"); p.arguments = [script, list.path]
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/sh"); p.arguments = [script, "apply", list.path]
         p.environment = ["RAT_DRYRUN": "1"]
         let out = Pipe(); p.standardOutput = out; try p.run(); p.waitUntilExit()
         let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)

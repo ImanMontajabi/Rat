@@ -11,16 +11,27 @@ targets:
   Rat:
     type: application
     platform: macOS
-    sources: [App]
+    sources:
+      - path: App
+        excludes: ["Vendor"]
+      - path: App/Vendor
+        type: folder
+        buildPhase: resources
+    preBuildScripts:
+      - name: Fetch GeoIP database
+        script: '"$SRCROOT/scripts/fetch-geoip.sh"'
+        basedOnDependencyAnalysis: false
     dependencies:
       - package: RatFilter
         product: RatMonitor
+      - package: RatFilter
+        product: RatGeo
       - package: RatFilter
         product: RatFilterCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.imanmontajabi.Rat
-        MARKETING_VERSION: 0.2.0
+        MARKETING_VERSION: 1.0.0
         CURRENT_PROJECT_VERSION: 1
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"

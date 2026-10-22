@@ -44,16 +44,12 @@ struct MapPane: View {
             .mapStyle(.standard(elevation: .realistic, emphasis: .muted, pointsOfInterest: .excludingAll))
             .mapControls { MapZoomStepper() }
 
-            if !ledger.geoEnabled {
-                VStack(spacing: 10) {
-                    Image(systemName: "globe").font(.largeTitle)
-                    Text("Show server locations").font(.headline)
-                    Text("Looking up where servers are located sends their IP addresses to ipwho.is. Off by default.")
-                        .font(.callout).multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 300)
-                    Button("Enable Lookups") { ledger.setGeoEnabled(true) }.buttonStyle(.borderedProminent)
-                }
-                .padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            if !ledger.geo.available {
+                Text("Offline GeoIP database not found, so server locations are unavailable.")
+                    .font(.callout).padding(14).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
+            Text("IP geolocation by DB-IP.com").font(.caption2).foregroundStyle(.secondary).padding(6)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
         }
     }
 

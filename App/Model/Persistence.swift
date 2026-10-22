@@ -19,21 +19,41 @@ struct Bucket: Codable {
     var tx: Double
 }
 
-struct PersistedState: Codable {
-    var apps: [PersistedApp] = []
-    var blocked: [String: [String]] = [:]
-    var buckets: [Bucket] = []
+/// A connection the user denied; re-evaluated against the rules so the blocklist shrinks when a rule is removed.
+struct DeniedEntry: Codable {
+    var address: String
+    var host: String
+    var port: Int
+    var proto: String
 }
 
-/// JSON state in ~/Library/Application Support/com.imanmontajabi.Rat.
+struct PersistedState: Codable {
+    var apps: [PersistedApp] = []
+    var denied: [String: [DeniedEntry]] = [:]
+    var buckets: [Bucket] = []
+
+    init(apps: [PersistedApp] = [], denied: [String: [DeniedEntry]] = [:], buckets: [Bucket] = []) {
+        self.apps = apps; self.denied = denied; self.buckets = buckets
+    }
+
+    // Tolerant of state files written by earlier versions.
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        apps = try c.decodeIfPresent([PersistedApp].self, forKey: .apps) ?? []
+        denied = try c.decodeIfPresent([String: [DeniedEntry]].self, forKey: .denied) ?? [:]
+        buckets = try c.decodeIfPresent([Bucket].self, forKey: .buckets) ?? []
+    }
+}
+
+/// JSON state in ~/Library/Application Support/com.imanmontajabi.Rat (the only folder Rat writes to).
 struct StateStore {
     let directory: URL
     var url: URL { directory.appendingPathComponent("state.json") }
 
-    static func standard() -> StateStore {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("com.imanmontajabi.Rat")
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return StateStore(directory: base)
+    static func standard(base: URL? = nil) -> StateStore {
+        let root = base ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("com.imanmontajabi.Rat")
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return StateStore(directory: root)
     }
 
     func load() -> PersistedState {

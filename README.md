@@ -2,88 +2,61 @@
 
 # Rat
 
-A per-application outbound firewall for macOS, modelled on how Little Snitch works.
-Rat intercepts each new network connection, matches it against rules, and either
-allows it, blocks it, or pauses it so you can decide.
+A network monitor and application firewall for macOS, modelled on Little Snitch. Rat shows which app talks to which server (on a world map, offline), asks before unknown connections, lets you allow or deny them with rules and profiles, and blocks denied servers with the macOS packet filter.
 
-> **Status: v0.2.0.** A network monitor with reactive blocking. It is **not** a per-process
-> firewall like Little Snitch: that needs Apple's Network Extension entitlement (paid developer
-> program). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 7.
+![Network monitor](docs/screenshots/rat-monitor.jpg)
+<sub>Demo data. Server locations come from a bundled offline database; nothing leaves your Mac.</sub>
 
-## What works today
+> **Honest limits.** Little Snitch intercepts each connection *before* it is made, using Apple's Network Extension entitlement, which needs a paid developer account. Rat has none, so it is **reactive**: it notices a new connection after it starts, asks, and on **Deny** cuts it and blocks the server address. A blocked address is blocked for **every** app, not just one. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (sections 7 and 8).
 
-- Live list of apps and their connections, per-app traffic sparklines, session totals and a traffic chart (5m / 1h / 1d / 1w, history kept for a week).
-- Inspector with path, code-signing ID, server addresses and locations.
-- Map of server locations. **Off by default**: enabling it sends server IPs to ipwho.is.
-- Deny / Allow per app. Deny collects the server addresses the app talks to and, when you click *Apply blocking*, loads them into the macOS `pf` firewall (one admin-password prompt per apply, nothing installed permanently). **Limits:** a blocked address is blocked for every app, and new addresses are only blocked after the next Apply.
-- Check for Updates (Rat menu) against GitHub Releases.
+## Features
+
+- **Network Monitor:** per-app list with activity sparklines, session totals, traffic chart (5m / 1h / 1d / 1w), inspector (path, code-signing ID, servers, locations), summary of top processes, domains and countries.
+- **Offline world map:** server IPs are resolved on-device from a bundled DB-IP Lite database (`Contents/Resources/Vendor`). Arcs and city pins appear immediately, no lookups, no network.
+- **Connection alerts:** a floating panel for unknown connections. Pick the scope (any connection, domain, exact host, port) and the lifetime (once, until quit, forever), then Allow or Deny. **Alert Mode** or **Silent Mode** (allow or deny everything new).
+- **Rules & Profiles window:** rules matched on app, team ID, signing ID, domain, host, IP, port range and protocol; the most specific rule wins and deny beats allow on a tie. Rule groups, profiles (Home / Work / Public Wi-Fi), **automatic profile switching** per network, **unapproved rules** with a review queue, JSON **import / export**.
+- **Menu bar:** live up/down throughput, profile selector, mode switch, shortcuts.
+- **Firewall enforcement:** Deny adds the server addresses to a `pf` table. Either click *Apply blocking* (one admin prompt each time, nothing installed), or opt in to the **background helper** (Options tab): two root LaunchDaemons that apply the blocklist the moment it changes and list *every* process's connections, so Rat also sees other users' and system processes. *Remove Helper* uninstalls both and clears the table. Without the helper Rat sees only your own processes.
+- **Updates:** *Rat menu → Check for Updates…* reads GitHub Releases.
+
+![Alert](docs/screenshots/rat-alert.png) ![Rules](docs/screenshots/rat-rules.png)
 
 ## Install
 
-Download the `.dmg` from Releases and drag Rat to Applications. The app is ad-hoc signed, not notarized, so the first launch needs right-click, Open (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
+Download `Rat-v1.0.0-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
 
-## Where the design comes from
+## Build
 
-The original design comes from static reverse engineering of the Little Snitch network extension
-(with [REA](https://github.com/morluto/rea)), not from its source. Observed in the binary:
-
-- A `NEFilterDataProvider` content filter sees every new flow in `handleNewFlow`.
-- The verdict is allow, drop, or pause. A paused flow is resumed later with
-  `resumeFlow:withVerdict:` once the user answers.
-- Rules are re-applied to all live flows whenever the rule set changes.
-- Rules match on code signature / team ID, not just file path.
-- Imported or auto-created rules can be marked *unapproved* until reviewed.
-
-The v0.1 prototype reproduced this flow (kept in `RatFilter/Sources/RatFilterExtension`, not used by the app because it cannot run without the entitlement):
-
+```sh
+./scripts/fetch-geoip.sh                 # downloads the ~125 MB DB-IP database into App/Vendor (git-ignored)
+xcodegen generate
+xcodebuild -scheme Rat -configuration Release ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build
+xcodebuild -scheme Rat test              # app, rules-model and snapshot tests
+(cd RatFilter && RAT_GEOIP_DB=../App/Vendor/dbip-city-lite.mmdb swift test)
 ```
-NEFilterDataProvider.handleNewFlow
-        │  process identity from audit token (signing ID, team ID, path)
-        ▼
-   RuleEngine.evaluate ── allow ──▶ .allow()
-        │                └─ deny ──▶ .drop()
-        └─ ask ──▶ .pause() ──▶ UI prompt ──▶ new rule ──▶ resumeFlow
-```
+
+Snapshot tests compare rendered SwiftUI views with goldens in `AppTests/Snapshots` and check layout and colour against the Little Snitch reference screenshots (kept local in `./screenshot`). Re-record goldens with `TEST_RUNNER_RAT_RECORD_SNAPSHOTS=1`.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `RatFilter/Sources/RatFilterCore` | `Rule`, `Connection`, `RuleEngine`, JSON `RuleStore`. No system dependencies. |
-| `RatFilter/Sources/RatFilterExtension` | `RatFilterProvider`, the `NEFilterDataProvider` subclass (dormant). |
-| `RatFilter/Sources/RatMonitor` | `libproc` connection sampler and `nettop` traffic sampler. |
-| `App/` | SwiftUI app: monitor window, ledger, pf blocking, update check. |
-| `RatFilter/Tests` | Rule engine tests. |
+| `RatFilter/Sources/RatFilterCore` | Rules, profiles, groups, network triggers, engine, import/export. Pure Swift. |
+| `RatFilter/Sources/RatMonitor` | `libproc` connection sampler, `nettop` traffic sampler, root-snapshot parser. |
+| `RatFilter/Sources/RatGeo` | MaxMind DB (`.mmdb`) reader and time-zone locator. |
+| `RatFilter/Sources/RatFilterExtension` | `NEFilterDataProvider` from the first prototype. Dormant: it needs the Network Extension entitlement. |
+| `App/` | SwiftUI app: monitor, rules window, alert panel, menu bar, pf enforcer. |
+| `App/Resources/rat-pf-helper.sh` | The helper that runs as root (`apply` / `snapshot`). Validates every address it reads. |
 
-## Rule semantics
+## Where the design comes from
 
-- A rule can match signing ID or team ID, remote domain (including subdomains), remote
-  address, port range and protocol.
-- The most specific matching rule wins. At equal specificity, deny beats allow.
-- Disabled and unapproved rules never match.
-- With no matching rule the default verdict applies (`ask`).
-
-## Build and test
-
-```sh
-cd RatFilter && swift test          # packages
-cd .. && xcodegen generate
-xcodebuild -scheme Rat -configuration Release -destination 'platform=macOS' build
-xcodebuild -scheme Rat test
-```
-
-## What's missing
-
-- True per-process blocking and pre-connection prompts (needs the Network Extension entitlement).
-- Per-app history older than one launch for connections and domains; blocking only by server address.
-- DNS encryption, blocklists, profiles.
-
-## Reference screenshots
-
-Screenshots of Little Snitch used as UI reference. They are of a third-party product and
-show what Rat is aiming for, not Rat itself.
+Static reverse-engineering of the installed Little Snitch (with [REA](https://github.com/morluto/rea)): a `NEFilterDataProvider` content filter with allow / drop / pause verdicts, rules re-applied to live flows, matching by code signature, an *unapproved* rule state, profiles with network triggers, a separate agent for alerts, and an Endpoint Security extension. No Little Snitch code or assets are used. The screenshots below are of Little Snitch and are UI reference only.
 
 | | |
 |---|---|
 | ![Network monitor](docs/screenshots/network-monitor-map.jpg) | ![Process inspector](docs/screenshots/process-inspector.jpg) |
 | ![Profile switching](docs/screenshots/profile-switching.png) | ![Unapproved rules](docs/screenshots/unapproved-rules.png) |
+
+## Credits and license
+
+MIT, see [LICENSE](LICENSE). IP geolocation data by [DB-IP.com](https://db-ip.com), Lite database, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).

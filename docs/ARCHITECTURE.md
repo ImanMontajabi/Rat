@@ -218,3 +218,25 @@ Each module gets unit tests. UI gets snapshot tests compared against the referen
 - Minimum macOS: **14**. Endpoint Security and DNS proxy: deferred indefinitely (both need entitlements).
 
 **Revised M2 spike:** sample real connections on this Mac with `libproc`, verify a connection we create ourselves is observed, and log with `logger.notice`.
+
+---
+
+## 8. Revision 2 (v1.0.0): what changed from section 7
+
+| Area | v0.2 | v1.0 |
+|---|---|---|
+| Rules | Allow/deny per app only | Full `RatFilterCore` engine: app / team ID / signing ID, domain, exact host, IP, port range, protocol; specificity precedence; groups; profiles; network triggers; unapproved review; JSON import/export |
+| Prompts | None | Floating `NSPanel` alert (scope and lifetime), Alert Mode or Silent Mode |
+| Menu bar | None | `NSStatusItem` with throughput, profile and mode switchers |
+| Geolocation | Opt-in `ipwho.is` lookups | Offline DB-IP Lite `.mmdb` in `Contents/Resources/Vendor`, own reader (`RatGeo`); the Mac's position from its time zone |
+| Blocking | Manual "Apply" per change | Optional root helper (two LaunchDaemons): blocklist applied as soon as it changes; system-wide socket snapshots |
+| Storage | `state.json` | One folder, `com.imanmontajabi.Rat`: `state.json`, `rules.json`, `blocklist.txt`, `system-sockets.txt` |
+
+Design decisions:
+
+- **Reactive alerts.** The sampler sees a connection after it starts. Alerts are suppressed for the first 12 s after launch (existing sockets) and for private addresses, and deduplicated per app and domain.
+- **`approved` is a review marker.** Rules created from alerts stay active with a blue dot while *Mark new rules as unapproved* is on; imported rules arrive disabled and unapproved so a downloaded rule file cannot silently change behaviour. Imported rules lose profile scopes the local set does not have.
+- **Helper trust model.** The daemon script is root-owned, reads a user-writable blocklist but accepts only syntactically valid IP addresses, and the snapshot file it writes is owned by the user with mode 600. The helper is opt-in, explained before the admin prompt, and removable in one click.
+- **Profile switching** keys on the Wi-Fi name when macOS reveals it (needs Location access) and otherwise on the default gateway.
+
+Still out of scope: per-process blocking and pre-connection prompts (Network Extension entitlement), DNS encryption, blocklist subscriptions, Endpoint Security.

@@ -6,6 +6,7 @@ enum SortKey: String, CaseIterable { case name = "Name", traffic = "Traffic", re
 
 struct SidebarView: View {
     @EnvironmentObject var ledger: Ledger
+    @Environment(\.openWindow) private var openWindow
     @Binding var selection: String?
     @Binding var showChart: Bool
     @Binding var showInspector: Bool
@@ -23,7 +24,7 @@ struct SidebarView: View {
         var list = ledger.apps.filter { $0.lastActive >= cutoff && ($0.totalIn + $0.totalOut > 0 || !$0.remotes.isEmpty || $0.listening > 0) }
         if !showLocal { list = list.filter { $0.remotes.isEmpty || $0.remotes.contains { !isLocalAddress($0.address) } || $0.totalIn + $0.totalOut > 0 } }
         if onlyIncoming { list = list.filter { $0.listening > 0 } }
-        if onlyDenied { list = list.filter { ledger.policies[$0.id] == .deny } }
+        if onlyDenied { list = list.filter { ledger.rules.policy(for: $0.id) == .deny } }
         if !search.isEmpty {
             list = list.filter { a in
                 a.identity.name.localizedCaseInsensitiveContains(search) ||
@@ -57,7 +58,12 @@ struct SidebarView: View {
 
     private var toolbar: some View {
         HStack(spacing: 14) {
+            ProfileMenu().padding(.leading, 64)   // clear of the window's traffic-light buttons
             Spacer()
+            Button { openWindow(id: "rules") } label: {
+                Image(systemName: "list.bullet.rectangle")
+                    .overlay(alignment: .topTrailing) { if ledger.rules.unapprovedCount > 0 { Circle().fill(.blue).frame(width: 8, height: 8).offset(x: 4, y: -3) } }
+            }.help("Rules & Profiles")
             Menu {
                 Picker("Sort By", selection: $sort) { ForEach(SortKey.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
                 Divider()
@@ -102,7 +108,11 @@ struct SidebarView: View {
                 Pill(kind: .down, text: formatBytes(ledger.sessionIn), label: "received")
             }
             if showChart { TrafficChart(range: range) }
-            if ledger.enforcer.needsApply(for: ledger.wantedBlocklist) {
+            if ledger.enforcer.helperInstalled && ledger.enforcer.autoApply {
+                if !ledger.wantedBlocklist.isEmpty {
+                    Label("Blocking \(ledger.wantedBlocklist.count) addresses automatically", systemImage: "shield.checkered").font(.caption).foregroundStyle(.secondary)
+                }
+            } else if ledger.enforcer.needsApply(for: ledger.wantedBlocklist) {
                 Button { ledger.applyBlocking() } label: {
                     Label(ledger.enforcer.busy ? "Applying…" : "Apply blocking (\(ledger.wantedBlocklist.count) addresses)", systemImage: "shield.lefthalf.filled")
                         .frame(maxWidth: .infinity)
@@ -134,7 +144,7 @@ struct ProcessRow: View {
                 Text(app.identity.name).lineLimit(1).font(.system(size: 14, weight: .medium))
                 Spacer(minLength: 4)
                 Sparkline(rates: app.rates)
-                PolicyToggle(policy: ledger.policies[app.id]) { ledger.setPolicy($0, for: app.id) }
+                PolicyToggle(policy: ledger.rules.policy(for: app.id)) { ledger.setPolicy($0, for: app.id) }
             }
             .padding(.vertical, 7).padding(.horizontal, 6)
             .background(selected ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 8))

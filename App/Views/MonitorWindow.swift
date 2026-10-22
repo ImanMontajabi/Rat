@@ -21,5 +21,6 @@ struct MonitorWindow: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .ignoresSafeArea()
         .animation(.easeInOut(duration: 0.2), value: showInspector)
+        .modifier(OpenWindowBridge())
     }
 }

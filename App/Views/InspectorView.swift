@@ -22,9 +22,7 @@ struct SummaryInspector: View {
     @State private var stats = true
 
     var body: some View {
-        let denied = ledger.apps.filter { ledger.policies[$0.id] == .deny }.reduce(0) { $0 + $1.remotes.count }
-        let unconfirmed = ledger.apps.filter { ledger.policies[$0.id] == nil }.reduce(0) { $0 + $1.remotes.count }
-        let incoming = ledger.apps.reduce(0) { $0 + $1.listening }
+        let denied = ledger.deniedCount, unconfirmed = ledger.unconfirmedCount, incoming = ledger.incomingCount
         let topApps = ledger.apps.sorted { $0.totalIn + $0.totalOut > $1.totalIn + $1.totalOut }.prefix(3)
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -45,7 +43,7 @@ struct SummaryInspector: View {
             if stats {
                 group("Top Processes", topApps.map { ($0.identity.name, "\(formatBytes($0.totalIn)) down, \(formatBytes($0.totalOut)) up") })
                 group("Top Domains", ledger.domains().prefix(3).map { ($0.name, "\($0.count) connection\($0.count == 1 ? "" : "s")") })
-                if ledger.geoEnabled { group("Top Countries", ledger.countries().prefix(3).map { ($0.name, "\($0.count) connection\($0.count == 1 ? "" : "s")") }) }
+                if ledger.geo.available { group("Top Countries", ledger.countries().prefix(3).map { ($0.name, "\($0.count) connection\($0.count == 1 ? "" : "s")") }) }
             }
         }
     }
@@ -66,6 +64,7 @@ struct SummaryInspector: View {
 
 struct ProcessInspector: View {
     @EnvironmentObject var ledger: Ledger
+    @Environment(\.openWindow) private var openWindow
     let app: AppEntry
     @State private var proc = true
     @State private var rules = true
@@ -91,17 +90,24 @@ struct ProcessInspector: View {
             }
             SectionHeader(title: "Rules", open: $rules)
             if rules {
-                switch ledger.policies[app.id] {
-                case .allow: Text("Allow all connections").padding(.leading, 6)
-                case .deny: Text("Deny all connections").padding(.leading, 6)
-                case nil: Text("No rules for these connections").foregroundStyle(.secondary).padding(.leading, 6)
+                let appRules = ledger.rules.rules(for: app.id)
+                if appRules.isEmpty { Text("No rules for these connections").foregroundStyle(.secondary).padding(.leading, 6) }
+                ForEach(appRules.prefix(8)) { r in
+                    HStack(spacing: 6) {
+                        Image(systemName: r.verdict == .deny ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(r.verdict == .deny ? .red : .green)
+                        Text(r.summary).lineLimit(1)
+                        if !r.approved { Circle().fill(.blue).frame(width: 7, height: 7) }
+                    }.font(.callout).padding(.leading, 6)
                 }
-                if ledger.policies[app.id] == .deny {
-                    Text("\(ledger.blockedAddresses(for: app.id)) server addresses blocked for every app on this Mac. New addresses are added as the app connects; click Apply to load them.")
+                if ledger.rules.policy(for: app.id) == .deny {
+                    Text("\(ledger.blockedAddresses(for: app.id)) server addresses blocked for every app on this Mac.")
                         .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
-                    Button(ledger.enforcer.busy ? "Applying…" : "Apply blocking") { ledger.applyBlocking() }
-                        .disabled(ledger.enforcer.busy || !ledger.enforcer.needsApply(for: ledger.wantedBlocklist)).padding(.leading, 6)
+                    if !(ledger.enforcer.helperInstalled && ledger.enforcer.autoApply) {
+                        Button(ledger.enforcer.busy ? "Applying…" : "Apply blocking") { ledger.applyBlocking() }
+                            .disabled(ledger.enforcer.busy || !ledger.enforcer.needsApply(for: ledger.wantedBlocklist)).padding(.leading, 6)
+                    }
                 }
+                Button("Manage Rules…") { openWindow(id: "rules") }.padding(.leading, 6)
                 if let err = ledger.enforcer.lastError { Text(err).font(.caption).foregroundStyle(.red).padding(.leading, 6) }
             }
             SectionHeader(title: "Code Signature", open: $sig)
@@ -119,7 +125,7 @@ struct ProcessInspector: View {
             SectionHeader(title: "Geographic Information", open: $geo)
             if geo {
                 let places = Set(app.remotes.compactMap { $0.geo }.map { "\($0.city), \($0.country)" }).sorted()
-                if places.isEmpty { Text(ledger.geoEnabled ? "No locations resolved yet" : "Server lookups are off").foregroundStyle(.secondary).padding(.leading, 6) }
+                if places.isEmpty { Text("No locations for these connections").foregroundStyle(.secondary).padding(.leading, 6) }
                 ForEach(places, id: \.self) { Text($0).padding(.leading, 6) }
             }
         }
