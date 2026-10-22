@@ -38,7 +38,7 @@ public enum ConnectionSampler {
         return n > 0 ? Array(pids.prefix(Int(n))).filter { $0 > 0 } : []
     }
 
-    static func path(of pid: pid_t) -> String {
+    public static func path(of pid: pid_t) -> String {
         var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         return proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : "pid \(pid)"
     }
