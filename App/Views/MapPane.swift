@@ -4,6 +4,7 @@ import MapKit
 struct MapPane: View {
     @EnvironmentObject var ledger: Ledger
     let selection: String?
+    @State private var position: MapCameraPosition = .automatic
 
     private struct Arc: Identifiable { let id: String; let coords: [CLLocationCoordinate2D]; let highlighted: Bool }
     private struct Node: Identifiable { let id: String; let point: GeoPoint; let highlighted: Bool }
@@ -23,7 +24,7 @@ struct MapPane: View {
 
     var body: some View {
         ZStack {
-            Map {
+            Map(position: $position) {
                 ForEach(arcs) { a in
                     MapPolyline(coordinates: a.coords).stroke(a.highlighted ? Color.green : Color(white: 0.75, opacity: 0.55), lineWidth: a.highlighted ? 3 : 2)
                 }
@@ -49,7 +50,7 @@ struct MapPane: View {
                     Text("Show server locations").font(.headline)
                     Text("Looking up where servers are located sends their IP addresses to ipwho.is. Off by default.")
                         .font(.callout).multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 300)
-                    Button("Enable Lookups") { ledger.geoEnabled = true }.buttonStyle(.borderedProminent)
+                    Button("Enable Lookups") { ledger.setGeoEnabled(true) }.buttonStyle(.borderedProminent)
                 }
                 .padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
             }

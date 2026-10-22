@@ -96,7 +96,13 @@ struct ProcessInspector: View {
                 case .deny: Text("Deny all connections").padding(.leading, 6)
                 case nil: Text("No rules for these connections").foregroundStyle(.secondary).padding(.leading, 6)
                 }
-                Text("Rules are recorded but not enforced yet.").font(.caption).foregroundStyle(.orange).padding(.leading, 6)
+                if ledger.policies[app.id] == .deny {
+                    Text("\(ledger.blockedAddresses(for: app.id)) server addresses blocked for every app on this Mac. New addresses are added as the app connects; click Apply to load them.")
+                        .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
+                    Button(ledger.enforcer.busy ? "Applying…" : "Apply blocking") { ledger.applyBlocking() }
+                        .disabled(ledger.enforcer.busy || !ledger.enforcer.needsApply(for: ledger.wantedBlocklist)).padding(.leading, 6)
+                }
+                if let err = ledger.enforcer.lastError { Text(err).font(.caption).foregroundStyle(.red).padding(.leading, 6) }
             }
             SectionHeader(title: "Code Signature", open: $sig)
             if sig { kv("Identifier", ident ?? "none"); kv("Team", team ?? "none") }

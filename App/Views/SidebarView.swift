@@ -16,11 +16,12 @@ struct SidebarView: View {
     @State private var sort: SortKey = .recent
     @State private var showLocal = false
     @State private var floatOnTop = false
-    @State private var range = 5   // minutes shown in the chart
+    @State private var range: TimeRange = .week
 
     private var rows: [AppEntry] {
-        var list = ledger.apps.filter { !$0.remotes.isEmpty || $0.listening > 0 || $0.totalIn + $0.totalOut > 0 }
-        if !showLocal { list = list.filter { $0.remotes.contains { !isLocalAddress($0.address) } || $0.totalIn + $0.totalOut > 0 } }
+        let cutoff = Date().addingTimeInterval(-range.seconds)
+        var list = ledger.apps.filter { $0.lastActive >= cutoff && ($0.totalIn + $0.totalOut > 0 || !$0.remotes.isEmpty || $0.listening > 0) }
+        if !showLocal { list = list.filter { $0.remotes.isEmpty || $0.remotes.contains { !isLocalAddress($0.address) } || $0.totalIn + $0.totalOut > 0 } }
         if onlyIncoming { list = list.filter { $0.listening > 0 } }
         if onlyDenied { list = list.filter { ledger.policies[$0.id] == .deny } }
         if !search.isEmpty {
@@ -79,8 +80,8 @@ struct SidebarView: View {
             chip("arrow.down.left.circle", on: $onlyIncoming, help: "Only apps accepting incoming connections")
             chip("xmark.rectangle", on: $onlyDenied, help: "Only denied apps")
             Menu {
-                ForEach([5, 15, 60], id: \.self) { m in Button(m < 60 ? "\(m) minutes" : "1 hour") { range = m } }
-            } label: { Label(range < 60 ? "\(range)m" : "1h", systemImage: "clock").font(.callout) }
+                ForEach(TimeRange.allCases) { r in Button(r.title) { range = r } }
+            } label: { Label(range.rawValue, systemImage: "clock").font(.callout) }
             .menuStyle(.borderlessButton).fixedSize()
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
@@ -101,8 +102,15 @@ struct SidebarView: View {
                 Pill(kind: .down, text: formatBytes(ledger.sessionIn), label: "received")
             }
             if showChart { TrafficChart(range: range) }
+            if ledger.enforcer.needsApply(for: ledger.wantedBlocklist) {
+                Button { ledger.applyBlocking() } label: {
+                    Label(ledger.enforcer.busy ? "Applying…" : "Apply blocking (\(ledger.wantedBlocklist.count) addresses)", systemImage: "shield.lefthalf.filled")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent).disabled(ledger.enforcer.busy)
+            }
             HStack {
-                Text("Since launch").font(.caption).foregroundStyle(.secondary)
+                Text("Session totals").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Text("\(rows.count) apps").font(.caption).foregroundStyle(.secondary)
             }
@@ -150,10 +158,10 @@ struct ProcessRow: View {
 
 struct TrafficChart: View {
     @EnvironmentObject var ledger: Ledger
-    let range: Int
+    let range: TimeRange
     var body: some View {
-        let cutoff = Date().addingTimeInterval(-Double(range) * 60)
-        let pts = ledger.history.filter { $0.date >= cutoff }
+        let cutoff = Date().addingTimeInterval(-range.seconds)
+        let pts = ledger.chartPoints(range)
         Chart {
             ForEach(pts) { p in
                 BarMark(x: .value("t", p.date), y: .value("out", p.tx)).foregroundStyle(.purple)

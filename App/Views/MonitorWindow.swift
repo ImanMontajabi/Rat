@@ -10,14 +10,12 @@ struct MonitorWindow: View {
         HStack(spacing: 0) {
             SidebarView(selection: $selection, showChart: $showChart, showInspector: $showInspector)
                 .frame(width: 400)
-            ZStack(alignment: .topTrailing) {
-                MapPane(selection: selection)
-                if showInspector {
-                    InspectorView(selection: selection)
-                        .frame(width: 330)
-                        .background(.ultraThinMaterial)
-                        .transition(.move(edge: .trailing))
-                }
+            MapPane(selection: selection)
+            if showInspector {
+                InspectorView(selection: selection)
+                    .frame(width: 330)
+                    .background(.ultraThinMaterial)
+                    .transition(.move(edge: .trailing))
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
