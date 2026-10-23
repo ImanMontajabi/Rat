@@ -91,8 +91,7 @@ final class Ledger: ObservableObject {
     let geo = GeoService()
     private(set) lazy var alerts: AlertCenter = {
         let center = AlertCenter(rules: rules) { [unowned self] alert, verdict in
-            if verdict == .deny { recordDenied(appID: alert.appID, address: alert.address, host: alert.host, port: alert.port, proto: alert.proto) }
-            refreshBlocklist()
+            refreshEnforcement()
         }
         center.isStillPending = { [unowned self] a in
             let c = Connection(process: ProcessIdentity(path: a.appID), host: a.host == a.address ? nil : a.host, address: a.address, port: a.port,
@@ -108,7 +107,7 @@ final class Ledger: ObservableObject {
     private var previous: [Int32: TrafficCounter] = [:]
     private var table: [String: AppEntry] = [:]
     private var buckets: [Date: Bucket] = [:]
-    private var denied: [String: [String: DeniedEntry]] = [:]
+    private var deniedPorts = Set<Int>()
     private var signingCache: [String: (identifier: String?, team: String?)] = [:]
     private var running = false
     private var demo = false
@@ -136,7 +135,6 @@ final class Ledger: ObservableObject {
             e.totalIn += a.totalIn; e.totalOut += a.totalOut; e.lastActive = max(e.lastActive, a.lastActive)
             table[ident.id] = e
         }
-        for (app, entries) in saved.denied { denied[app] = Dictionary(uniqueKeysWithValues: entries.map { ($0.address, $0) }) }
         for b in saved.buckets { buckets[b.minute] = b }
         apps = Array(table.values)
         alerts.iconProvider = { [weak self] id in self?.table[id]?.identity.icon ?? NSImage() }
@@ -160,7 +158,6 @@ final class Ledger: ObservableObject {
         let weekAgo = Date().addingTimeInterval(-TimeRange.week.seconds)
         let state = PersistedState(
             apps: table.values.map { PersistedApp(id: $0.id, name: $0.identity.name, bundlePath: $0.identity.bundlePath, isSystem: $0.identity.isSystem, totalIn: $0.totalIn, totalOut: $0.totalOut, lastActive: $0.lastActive) },
-            denied: denied.mapValues { Array($0.values) },
             buckets: buckets.values.filter { $0.minute > weekAgo }.sorted { $0.minute < $1.minute })
         store.save(state)
         rules.saveNow()
@@ -190,7 +187,7 @@ final class Ledger: ObservableObject {
             systemWide = useSnapshot != nil
             await ingest(conns, traffic)
             rules.refreshNetwork()
-            refreshBlocklist()
+            refreshEnforcement()
             alerts.revalidate()
             onTick?()
             if Date().timeIntervalSince(lastSave) > 30 { save() }
@@ -254,6 +251,7 @@ final class Ledger: ObservableObject {
         buckets[minute] = b
 
         var denyCount = 0, askCount = 0, listenCount = 0
+        var portsNow = Set<Int>()
         for id in table.keys {
             var e = table[id]!
             let rx = rxByApp[id] ?? 0, tx = txByApp[id] ?? 0
@@ -281,7 +279,7 @@ final class Ledger: ObservableObject {
                 switch verdict {
                 case .deny:
                     denyCount += 1
-                    recordDenied(appID: id, address: c.remoteAddress, host: host, port: c.remotePort, proto: remotes.last!.proto)
+                    if c.localPort != 0 { portsNow.insert(c.localPort) }
                 case .ask:
                     askCount += 1
                     if warmedUp {
@@ -294,6 +292,7 @@ final class Ledger: ObservableObject {
             table[id] = e
         }
         deniedCount = denyCount; unconfirmedCount = askCount; incomingCount = listenCount
+        deniedPorts = portsNow
         apps = Array(table.values)
     }
 
@@ -318,51 +317,21 @@ final class Ledger: ObservableObject {
 
     // MARK: blocking
 
-    /// Allow/Deny from the process list. Deny also remembers the server addresses the app is using right now.
+    /// Allow/Deny from the process list. Deny is enforced by the root helper from the next pass (see `deniedAppPaths`).
     func setPolicy(_ p: Policy?, for appID: String) {
         rules.setPolicy(p, for: table[appID]?.identity.ruleKey ?? appID)
         alerts.revalidate()
-        if p == .deny, let e = table[appID] {
-            for r in e.remotes { recordDenied(appID: appID, address: r.address, host: r.host, port: r.port, proto: r.proto) }
-        }
-        refreshBlocklist()
+        refreshEnforcement()
     }
 
-    private func recordDenied(appID: String, address: String, host: String, port: Int, proto: String) {
-        guard !isLocalAddress(address) else { return }
-        var set = denied[appID] ?? [:]
-        guard set.count < 2000 else { return }
-        set[address] = DeniedEntry(address: address, host: host, port: port, proto: proto)
-        denied[appID] = set
-    }
-
-    /// Every address that should be blocked right now: remembered denied connections that the rules still deny.
-    var wantedBlocklist: Set<String> {
-        var out = Set<String>()
-        // With the enforcer running, an app that is denied outright is blocked by its own ports; its servers are
-        // not blocked for everyone (that would break the same site in an app that is allowed).
-        let byPort = enforcer.helperInstalled && enforcer.autoApply && !enforcer.helperOutdated ? deniedAppPaths : []
-        for (appID, entries) in denied {
-            if byPort.contains(table[appID]?.identity.ruleKey ?? appID) { continue }
-            let sig = table[appID].map { signing(for: $0.identity) } ?? (nil, nil)
-            let key = table[appID]?.identity.ruleKey ?? appID
-            for e in entries.values {
-                let c = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: key), host: e.host == e.address ? nil : e.host,
-                                   address: e.address, port: e.port, proto: e.proto == "UDP" ? .udp : .tcp)
-                if rules.engine.evaluate(c) == .deny { out.insert(e.address) }
-            }
-        }
-        return out
-    }
-
-    /// With the root helper installed, keep the pf table in step with the rules automatically.
-    func refreshBlocklist() {
-        enforcer.sync(wantedBlocklist)
+    /// Hands the helper what to block. Only ports of denied sockets are ever blocked, never server addresses.
+    func refreshEnforcement() {
         enforcer.syncApps(deniedAppPaths)
+        enforcer.syncPorts(deniedPorts)
     }
 
     /// Apps denied outright. The root daemon blocks every socket of their processes (helpers included), by local
-    /// port, so it does not matter which server they try next. An app with any allow rule is left to the address list.
+    /// port, so it does not matter which server they try next. An app with any allow rule is not blocked as a whole.
     var deniedAppPaths: Set<String> {
         var candidates = Set(table.values.map(\.identity.ruleKey))
         for r in rules.ruleSet.rules { if let p = r.processPath { candidates.insert(p) } }
@@ -380,13 +349,6 @@ final class Ledger: ObservableObject {
             }
         }
         return out
-    }
-
-    func applyBlocking() { enforcer.applyOnce(wantedBlocklist) }
-
-    func blockedAddresses(for appID: String) -> Int {
-        let wanted = wantedBlocklist
-        return denied[appID]?.keys.filter(wanted.contains).count ?? 0
     }
 
     // MARK: derived data

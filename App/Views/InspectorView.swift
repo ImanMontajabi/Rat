@@ -100,11 +100,12 @@ struct ProcessInspector: View {
                     }.font(.callout).padding(.leading, 6)
                 }
                 if ledger.rules.policy(for: app.identity.ruleKey) == .deny {
-                    Text("\(ledger.blockedAddresses(for: app.id)) server addresses also blocked for every app on this Mac.")
-                        .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
-                    if !(ledger.enforcer.helperInstalled && ledger.enforcer.autoApply) {
-                        Button(ledger.enforcer.busy ? "Applying…" : "Apply blocking") { ledger.applyBlocking() }
-                            .disabled(ledger.enforcer.busy || !ledger.enforcer.needsApply(for: ledger.wantedBlocklist)).padding(.leading, 6)
+                    if ledger.enforcer.helperInstalled && ledger.enforcer.autoApply {
+                        Text("Blocked by the firewall helper: every connection of this app and its helpers.")
+                            .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
+                    } else {
+                        Text("Not enforced yet: this needs the firewall helper (Settings > Security).")
+                            .font(.caption).foregroundStyle(.orange).padding(.leading, 6)
                     }
                 }
                 Button("Manage Rules…") { openWindow(id: "rules") }.padding(.leading, 6)

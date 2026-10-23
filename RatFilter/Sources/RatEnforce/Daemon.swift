@@ -24,11 +24,14 @@ public func runCommand(_ executable: String, _ arguments: [String], _ stdin: Str
 
 /// Root daemon. Polls every ~50 ms; for every process that belongs to a denied app it reads all sockets and loads
 /// their local ports into the pf anchor, so connections to servers Rat has never seen (CDN rotation, IPv6 fallback,
-/// QUIC migration) are cut as well. States towards the servers they reached are killed at once.
+/// QUIC migration) are cut as well. Only ports are ever blocked, never remote addresses.
 public final class EnforcerDaemon {
     public struct Settings {
         public var deniedFile: String
-        public var blocklistFile: String
+        /// Local ports of sockets that rules deny (written by Rat each pass); optional.
+        public var portsFile: String?
+        /// Older versions kept a list of server addresses here. It is deleted: addresses are never blocked.
+        public var legacyBlocklistFile: String?
         public var anchor = "com.apple/rat"
         /// How often the process list is checked while a denied app is running (new processes are caught within this).
         public var interval: TimeInterval = 0.003
@@ -41,15 +44,17 @@ public final class EnforcerDaemon {
         public var youngWindow: TimeInterval = 0.6
         /// Ports stay blocked this long after their socket disappears, to cover packets still in flight.
         public var portHold: TimeInterval = 5
-        public init(deniedFile: String, blocklistFile: String) { self.deniedFile = deniedFile; self.blocklistFile = blocklistFile }
+        public init(deniedFile: String, portsFile: String? = nil, legacyBlocklistFile: String? = nil) {
+            self.deniedFile = deniedFile; self.portsFile = portsFile; self.legacyBlocklistFile = legacyBlocklistFile
+        }
     }
 
     private let settings: Settings
     private let run: CommandRunner
     private var denied = DeniedApps(text: "")
     private var deniedStamp: Date?
-    private var blocklist: [String] = []
-    private var blocklistStamp: Date?
+    private var filePorts: [Int] = []
+    private var portsStamp: Date?
     private var verdictCache: [pid_t: Bool] = [:]
     private var lastScan = Date.distantPast
     private var deniedPIDs = Set<pid_t>()
@@ -60,9 +65,7 @@ public final class EnforcerDaemon {
     public private(set) var lastTickDuration: TimeInterval = 0
     private var portSeen: [Int: Date] = [:]
     private var loadedPorts: [Int] = []
-    private var loadedAddresses: [String] = []
-    private var killed = Set<String>()
-    private var pendingKills: [String] = []
+    private var loaded = false
     private var token: String?
     public private(set) var reloads = 0
     private let trace = ProcessInfo.processInfo.environment["RAT_TRACE"] != nil
@@ -86,7 +89,11 @@ public final class EnforcerDaemon {
             let text = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             token = text.components(separatedBy: "Token : ").dropFirst().first?.split(whereSeparator: \.isNewline).first.map(String.init)
         }
-        apply(ports: [], addresses: blocklist)
+        // Start clean: whatever an earlier version left in the anchor (address tables, old ports) is removed.
+        _ = run("/sbin/pfctl", ["-a", settings.anchor, "-F", "all"], nil)
+        if let legacy = settings.legacyBlocklistFile { try? FileManager.default.removeItem(atPath: legacy) }
+        loadedPorts = []
+        loaded = true
     }
 
     public func stop() {
@@ -113,7 +120,7 @@ public final class EnforcerDaemon {
         refreshFiles()
         guard !denied.isEmpty else {
             verdictCache.removeAll(); deniedPIDs.removeAll()
-            if !portSeen.isEmpty || !loadedPorts.isEmpty || blocklist != loadedAddresses { settle(now: now, live: []) }
+            settle(now: now, live: [])
             return false
         }
         let pids = ConnectionSampler.allPIDs()
@@ -165,45 +172,30 @@ public final class EnforcerDaemon {
             fdCache[pid] = known
             for c in known.values where c.tcpState != "LISTEN" { ports.insert(c.localPort) }
         }
-        let remotes = Set<String>()
-        settle(now: now, live: ports, remotes: remotes)
+        settle(now: now, live: ports)
         return true
     }
 
-    /// Loads the ports/addresses if they changed and kills the states towards servers not yet handled.
-    private func settle(now: Date, live ports: Set<Int>, remotes: Set<String> = []) {
-        for p in ports { portSeen[p] = now }
+    /// Loads the ports if they changed.
+    private func settle(now: Date, live ports: Set<Int>) {
+        // Ports named by Rat (sockets a rule denies) count while the file is fresh: Rat rewrites it every pass,
+        // so a crashed Rat cannot leave ports blocked for good.
+        let fresh = portsStamp.map { now.timeIntervalSince($0) < 10 } ?? false
+        for p in ports.union(fresh ? filePorts : []) { portSeen[p] = now }
         portSeen = portSeen.filter { now.timeIntervalSince($0.value) < settings.portHold }
-        let heldPorts = portSeen.keys.sorted()
-        if heldPorts != loadedPorts || blocklist != loadedAddresses {
-            apply(ports: heldPorts, addresses: blocklist)
-        }
-        for a in remotes.union(blocklist) where killed.insert(a).inserted { pendingKills.append(a) }
-        killStates()
+        let held = portSeen.keys.sorted()
+        if held != loadedPorts || !loaded { apply(ports: held) }
     }
 
-    private func apply(ports: [Int], addresses: [String]) {
-        let rules = PFRules.render(ports: ports, addresses: addresses)
+    private func apply(ports: [Int]) {
+        let rules = PFRules.render(ports: ports)
         let t0 = Date()
         defer { if trace { FileHandle.standardError.write(Data("apply \(ports.count) ports in \(Int(Date().timeIntervalSince(t0) * 1000)) ms\n".utf8)) } }
-        _ = run("/sbin/pfctl", ["-a", settings.anchor, "-f", "-"], rules)
+        if rules.isEmpty { _ = run("/sbin/pfctl", ["-a", settings.anchor, "-F", "all"], nil) }
+        else { _ = run("/sbin/pfctl", ["-a", settings.anchor, "-f", "-"], rules) }
         loadedPorts = ports
-        loadedAddresses = addresses
+        loaded = true
         reloads += 1
-    }
-
-    private let killQueue = DispatchQueue(label: "rat.enforcer.kill", qos: .utility)
-
-    /// Existing states survive new block rules, so each server address is killed once. This runs off the watch
-    /// loop: a slow pfctl must never delay the detection of the next process.
-    private func killStates() {
-        let batch = Array(pendingKills.prefix(50))
-        pendingKills.removeFirst(batch.count)
-        guard !batch.isEmpty else { return }
-        let run = self.run
-        killQueue.async {
-            for a in batch { _ = run("/sbin/pfctl", ["-k", a.contains(":") ? "::/0" : "0.0.0.0/0", "-k", a], nil) }
-        }
     }
 
     private func refreshFiles() {
@@ -214,10 +206,12 @@ public final class EnforcerDaemon {
             denied = DeniedApps(text: (try? String(contentsOfFile: settings.deniedFile, encoding: .utf8)) ?? "")
             verdictCache.removeAll()
         }
-        let b = stamp(settings.blocklistFile)
-        if b != blocklistStamp {
-            blocklistStamp = b
-            blocklist = PFRules.parseBlocklist((try? String(contentsOfFile: settings.blocklistFile, encoding: .utf8)) ?? "")
+        if let pf = settings.portsFile {
+            let f = stamp(pf)
+            if f != portsStamp {
+                portsStamp = f
+                filePorts = PFRules.parsePorts((try? String(contentsOfFile: pf, encoding: .utf8)) ?? "")
+            }
         }
     }
 }

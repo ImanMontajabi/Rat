@@ -1,11 +1,17 @@
 #!/bin/sh
-# Live check of the root enforcer: a denied process must transfer zero bytes, an allowed one must work.
-# Needs root (pfctl). Uses its own pf anchor ("com.apple/rat-verify") so a running Rat helper is left alone.
+# Live check of the root enforcer (rat-enforcerd). Needs root (pfctl) and network access:
 #
 #   sudo scripts/verify-blocking.sh [path-to-rat-enforcerd]
 #
-# It runs the real daemon against a throw-away deny list that names /usr/bin/curl, then fetches several
-# multi-address sites (Google, YouTube, ...) over IPv4, IPv6, HTTP/2 and HTTP/3-capable hosts with curl.
+# It runs the real daemon against a throw-away deny list and its own pf anchor ("com.apple/rat-verify"), so a
+# running Rat helper is left alone. /usr/bin/curl is the denied app, python3 and dig are the allowed ones.
+#
+#  1. Mid-stream: a denied curl and an allowed python3 download from the SAME server address. curl is denied after
+#     both are running. curl's stream must stop at once; python3 must keep downloading, and DNS to 1.1.1.1 and
+#     8.8.8.8 must keep working (dig). The anchor must hold no address table and no pass rule, and the legacy
+#     blocklist file must be gone.
+#  2. Fresh processes: brand-new curls to unknown servers. This is the hard case (the ports are loaded after the
+#     socket exists), so leaks are counted and reported, not hidden.
 set -u
 [ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 2; }
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,80 +21,92 @@ DAEMON="${1:-$(ls -d "$HOME"/Library/Developer/Xcode/DerivedData/Rat-*/Build/Pro
 
 ANCHOR="com.apple/rat-verify"
 WORK=$(mktemp -d)
-echo /usr/bin/curl > "$WORK/denied.txt"
-: > "$WORK/blocklist.txt"
-URLS="https://www.google.com https://www.youtube.com https://www.wikipedia.org https://www.cloudflare.com https://example.com"
+: > "$WORK/denied.txt"
+echo "1.1.1.1" > "$WORK/legacy-blocklist.txt"   # what 1.0.3 left behind; the daemon must delete it
 FAIL=0
+size() { /usr/bin/stat -f %z "$1" 2>/dev/null || echo 0; }
 
-fetch() { # url, extra curl args -> prints "code bytes"
-  /usr/bin/curl -s -o /dev/null --connect-timeout 3 --max-time 6 -w '%{http_code} %{size_download}' "$@" 2>/dev/null
+RAT_TRACE=${RAT_TRACE:-} "$DAEMON" --denied "$WORK/denied.txt" --blocklist "$WORK/legacy-blocklist.txt" --anchor "$ANCHOR" &
+DPID=$!
+cleanup() {
+  kill -9 $APID $BPID 2>/dev/null; kill $DPID 2>/dev/null
+  /sbin/pfctl -a "$ANCHOR" -F all >/dev/null 2>&1; rm -rf "$WORK"
 }
-
-echo "== baseline (no enforcer running): curl must work"
-for u in $URLS; do
-  r=$(fetch "$u"); echo "  $u -> $r"
-  case "$r" in 000*) echo "  (network unreachable here; cannot verify)"; rm -rf "$WORK"; exit 3;; esac
-done
-
-echo "== start enforcer ($DAEMON)"
-RAT_TRACE=${RAT_TRACE:-} "$DAEMON" --denied "$WORK/denied.txt" --blocklist "$WORK/blocklist.txt" --anchor "$ANCHOR" &
-PID=$!
-cleanup() { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; /sbin/pfctl -a "$ANCHOR" -F all >/dev/null 2>&1; rm -rf "$WORK"; }
+APID=; BPID=
 trap cleanup EXIT INT TERM
 sleep 1
 
-# Phase 1: nothing is known about the servers. Every curl is a brand-new process, which is the hardest case: the
-# daemon sees it within ~10 ms and must load its ports before the server's SYN-ACK arrives. Leaks here are counted,
-# not hidden; a long-running browser benefits from the address layer below after its first connections.
-echo "== phase 1, servers unknown, fresh process per request (port layer)"
+echo "== start-up cleanup"
+[ ! -e "$WORK/legacy-blocklist.txt" ] && echo "  ok legacy blocklist file deleted" || { echo "  FAIL legacy blocklist file still there"; FAIL=1; }
+
+HOST=proof.ovh.net
+IP=$(/usr/bin/dig +short +time=3 +tries=1 A $HOST | grep -E '^[0-9.]+$' | head -1)
+[ -n "$IP" ] || { echo "cannot resolve $HOST"; exit 3; }
+echo "== phase 1, mid-stream: denied curl and allowed python3 both download from $IP"
+/usr/bin/curl -s --limit-rate 400k --resolve "$HOST:443:$IP" -o "$WORK/a.out" "https://$HOST/files/1Gb.dat" &
+APID=$!
+/usr/bin/python3 - "$IP" "$HOST" "$WORK/b.out" <<'PY' &
+import socket, ssl, sys, time
+ip, host, out = sys.argv[1:4]
+c = ssl.create_default_context().wrap_socket(socket.create_connection((ip, 443), timeout=10), server_hostname=host)
+c.sendall(f"GET /files/1Gb.dat HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+with open(out, "wb") as f:
+    while True:
+        d = c.recv(16384)
+        if not d: break
+        f.write(d); f.flush(); time.sleep(0.04)
+PY
+BPID=$!
+sleep 4
+A1=$(size "$WORK/a.out"); B1=$(size "$WORK/b.out")
+echo "  before deny: curl $A1 bytes, python3 $B1 bytes"
+{ [ "$A1" -gt 0 ] && [ "$B1" -gt 0 ]; } || { echo "  could not start both downloads"; exit 3; }
+
+echo "/usr/bin/curl" > "$WORK/denied.txt"          # deny curl, mid-stream
+sleep 0.3
+AQ=$(size "$WORK/a.out")
+sleep 1.2
+A2=$(size "$WORK/a.out"); B2=$(size "$WORK/b.out")
+sleep 1.5
+AR=$(size "$WORK/a.out")
+sleep 1.5
+A3=$(size "$WORK/a.out"); B3=$(size "$WORK/b.out")
+echo "  curl bytes: 0.3 s after deny +$((AQ - A1)), at 1.5 s +$((A2 - A1)), at 3 s +$((AR - A1))  (curl keeps reading what was already in its socket buffer; the network side is cut at once)"
+echo "  1.5 s after deny: curl +$((A2 - A1)) bytes (trickle before the cut), python3 +$((B2 - B1))"
+echo "  next 3 s:        curl +$((A3 - A2)) bytes, python3 +$((B3 - B2)) bytes"
+[ "$A3" -eq "$A2" ] && echo "  ok denied curl stream is dead" || { echo "  FAIL denied curl kept downloading"; FAIL=1; }
+[ "$B3" -gt "$B2" ] && echo "  ok allowed python3 kept downloading from the same address" || { echo "  FAIL allowed python3 was interrupted (collateral)"; FAIL=1; }
+kill -0 $APID 2>/dev/null && echo "  note: curl is still running (waiting), not downloading" || echo "  curl exited (connection reset)"
+
+echo "== DNS for allowed apps while curl is denied (1.1.1.1, 8.8.8.8, 9.9.9.9)"
+for s in 1.1.1.1 8.8.8.8 9.9.9.9; do
+  ok=0
+  for i in 1 2 3; do /usr/bin/dig +short +time=2 +tries=1 @$s example.com | grep -qE '^[0-9.]+$' && ok=$((ok + 1)); done
+  [ "$ok" = 3 ] && echo "  ok @$s 3/3" || { echo "  FAIL @$s $ok/3"; FAIL=1; }
+done
+
+echo "== anchor contents: ports only, no address table, no pass rule"
+/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -v '^No ALTQ\|^ALTQ' | sed 's/^/  /'
+/sbin/pfctl -a "$ANCHOR" -s Tables 2>/dev/null | grep -q . && { echo "  FAIL anchor has a table"; FAIL=1; } || echo "  ok no tables"
+/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -qE '^pass|<' && { echo "  FAIL pass rule or table reference"; FAIL=1; } || echo "  ok no pass rules, no address rules"
+
+kill -9 $APID $BPID 2>/dev/null; APID=; BPID=
+
+echo "== phase 2, fresh curl processes to servers never seen (hard case)"
 TOTAL=0; LEAKS=0
-for u in $URLS; do
+for u in https://www.google.com https://www.youtube.com https://www.wikipedia.org https://www.cloudflare.com https://example.com; do
   for fam in -4 -6 ""; do
     TOTAL=$((TOTAL + 1))
-    r=$(fetch $fam "$u"); code=${r% *}; bytes=${r#* }
-    if [ "$bytes" != 0 ] || [ "$code" != 000 ]; then echo "  leak ${fam:--} $u -> $r"; LEAKS=$((LEAKS + 1)); fi
+    r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 3 --max-time 6 -w '%{http_code} %{size_download}' $fam "$u" 2>/dev/null)
+    [ "${r#* }" = 0 ] && [ "${r% *}" = 000 ] || LEAKS=$((LEAKS + 1))
   done
 done
-echo "  $((TOTAL - LEAKS))/$TOTAL requests blocked"
-
-# An allowed app must not suffer: python3 (another path) talks to the same sites while /usr/bin/curl is denied.
-echo "== other app, same sites, must work while curl is denied"
-for u in $URLS; do
-  r=$(/usr/bin/python3 -c 'import sys,urllib.request as r,urllib.error as e
-try: print(r.urlopen(sys.argv[1], timeout=6).status)
-except e.HTTPError as x: print(x.code)' "$u" 2>/dev/null)
-  case "$r" in [1-5][0-9][0-9]) echo "  ok $u -> $r";; *) echo "  COLLATERAL $u -> ${r:-failed}"; FAIL=1;; esac
-done
-
-# Phase 2: servers Rat has already seen are in the address table, so nothing may get through, deterministically.
-echo "== phase 2, servers known (address layer): zero bytes required"
-PIN=""
-: > "$WORK/blocklist.txt"
-for u in $URLS; do
-  h=${u#https://}
-  # all addresses go into the table; two per site (one IPv4, one IPv6) are then fetched with the address pinned
-  addrs=$(/usr/bin/dscacheutil -q host -a name "$h" 2>/dev/null | awk '/^(ip_address|ipv6_address):/ {print $2}' | sort -u)
-  for ip in $addrs; do
-    echo "$ip" >> "$WORK/blocklist.txt"
-  done
-  for ip in $(echo "$addrs" | grep -v : | head -1) $(echo "$addrs" | grep : | head -1); do
-    PIN="$PIN $h:$ip"
-  done
-done
-touch "$WORK/blocklist.txt"; sleep 1
-for pin in $PIN; do
-  h=${pin%%:*}; ip=${pin#*:}
-  r=$(fetch --resolve "$h:443:$ip" "https://$h"); code=${r% *}; bytes=${r#* }
-  if [ "$bytes" != 0 ] || [ "$code" != 000 ]; then echo "  LEAK $h via $ip -> $r"; FAIL=1; else echo "  blocked $h via $ip"; fi
-done
-
-echo "== rules in the anchor"
-/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | sed 's/^/  /' | head -8
+echo "  $((TOTAL - LEAKS))/$TOTAL fresh requests blocked completely"
 
 echo "== deny list emptied: curl must work again"
-: > "$WORK/denied.txt"; : > "$WORK/blocklist.txt"; sleep 7   # ports are held 5 s after their sockets close
-r=$(fetch https://example.com); echo "  example.com -> $r"
-case "$r" in 200*) ;; *) echo "  did not recover"; FAIL=1;; esac
+: > "$WORK/denied.txt"; sleep 7
+r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' https://example.com)
+[ "$r" = 200 ] && echo "  ok example.com -> 200" || { echo "  FAIL example.com -> $r"; FAIL=1; }
 
-[ "$FAIL" = 0 ] && echo "PASS: known servers are blocked completely; port layer blocked $((TOTAL - LEAKS))/$TOTAL fresh-process requests" || echo "FAIL"
+[ "$FAIL" = 0 ] && echo "PASS (fresh-process leak rate: $LEAKS/$TOTAL)" || echo "FAIL"
 exit "$FAIL"

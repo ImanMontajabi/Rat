@@ -1,14 +1,14 @@
 import Darwin
 import Foundation
 
-/// Entry point of the `rat-enforcerd` tool: `rat-enforcerd --denied <file> --blocklist <file> [--anchor <name>]`.
+/// Entry point of the `rat-enforcerd` tool: `rat-enforcerd --denied <file> [--ports <file>] [--blocklist <legacy file to delete>] [--anchor <name>]`.
 public func runEnforcerTool(_ args: [String]) -> Never {
     func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
-    guard let denied = value("--denied"), let blocklist = value("--blocklist") else {
-        FileHandle.standardError.write(Data("usage: rat-enforcerd --denied <file> --blocklist <file> [--anchor <name>]\n".utf8))
+    guard let denied = value("--denied") else {
+        FileHandle.standardError.write(Data("usage: rat-enforcerd --denied <file> [--ports <file>] [--anchor <name>]\n".utf8))
         exit(64)
     }
-    var s = EnforcerDaemon.Settings(deniedFile: denied, blocklistFile: blocklist)
+    var s = EnforcerDaemon.Settings(deniedFile: denied, portsFile: value("--ports"), legacyBlocklistFile: value("--blocklist"))
     if let a = value("--anchor") { s.anchor = a }
     let daemon = EnforcerDaemon(settings: s)
     daemon.start()

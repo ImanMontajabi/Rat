@@ -211,28 +211,28 @@ struct SecuritySettings: View {
             if enf.helperInstalled {
                 if enf.helperOutdated {
                     Label("Installed, but an older version", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
-                    Text("This helper only blocks server addresses. The current one also cuts every connection of a denied app (browsers, Steam, Safari’s helpers) the moment it opens.")
+                    Text("This helper still blocks server addresses for every app, which can break DNS and other apps. The current one only blocks the ports of denied apps.")
                         .font(.callout).foregroundStyle(.secondary)
                     Button(enf.busy ? "Updating…" : "Update Helper…") { enf.installHelper() }.disabled(enf.busy)
                 } else {
                     Label("Installed: blocking is applied automatically", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
                 }
-                SettingToggle(title: "Auto-apply firewall rules", detail: "Deny takes effect immediately. Turn off to apply blocking by hand.",
-                              isOn: Binding(get: { enf.autoApply }, set: { enf.autoApply = $0; ledger.refreshBlocklist() }))
+                SettingToggle(title: "Auto-apply firewall rules", detail: "Deny takes effect immediately. Turn off and nothing is blocked.",
+                              isOn: Binding(get: { enf.autoApply }, set: { enf.autoApply = $0; ledger.refreshEnforcement() }))
                 Label(ledger.systemWide ? "Seeing all processes system-wide" : "Waiting for the first system snapshot…", systemImage: "eye")
                     .foregroundStyle(.secondary)
                 Button("Remove Helper…", role: .destructive) { enf.removeHelper() }.disabled(enf.busy)
             } else {
                 Label("Not installed", systemImage: "shield.slash").foregroundStyle(.secondary)
-                Text("Deny blocks server addresses with the macOS packet filter. Without the helper you click “Apply blocking” each time, and Rat sees only your own processes.")
+                Text("Deny is enforced by the helper, which blocks the ports of a denied app’s connections with the macOS packet filter. Without it nothing is blocked and Rat sees only your own processes.")
                     .font(.callout).foregroundStyle(.secondary)
                 Button(enf.busy ? "Installing…" : "Install Helper…") { enf.installHelper() }.disabled(enf.busy)
-                Text("Installs two root LaunchDaemons after an administrator-password prompt: one blocks denied apps continuously, the other lists every process’s connections. “Remove Helper” uninstalls both and clears the firewall table.")
+                Text("Installs two root LaunchDaemons after an administrator-password prompt: one blocks denied apps continuously, the other lists every process’s connections. “Remove Helper” uninstalls both and clears the firewall rules.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let err = enf.lastError { Text(err).font(.caption).foregroundStyle(.red) }
             Divider()
-            Text("Denying an app blocks the ports of all its processes, so it is cut as soon as the helper sees a socket (about 50 ms). A connection can still start for a split second, and addresses on the blocklist are blocked for every app. Blocking before a connection opens, per process, needs Apple’s Network Extension entitlement.")
+            Text("Denying an app blocks the ports of all its processes as soon as the helper sees a socket (a few milliseconds). Server addresses are never blocked, so other apps are not affected. A first connection to a very close server can still get a few packets through; blocking before a connection opens needs Apple’s Network Extension entitlement.")
                 .font(.callout).foregroundStyle(.secondary)
         }
     }

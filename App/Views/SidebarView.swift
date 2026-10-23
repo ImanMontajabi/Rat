@@ -168,16 +168,9 @@ struct SidebarView: View {
                 Pill(kind: .down, text: formatBytes(ledger.sessionIn), label: "received")
             }
             if showChart { TrafficChart(range: range) }
-            if ledger.enforcer.helperInstalled && ledger.enforcer.autoApply {
-                if !ledger.wantedBlocklist.isEmpty {
-                    Label("Blocking \(ledger.wantedBlocklist.count) addresses automatically", systemImage: "shield.checkered").font(.caption).foregroundStyle(.secondary)
-                }
-            } else if ledger.enforcer.needsApply(for: ledger.wantedBlocklist) {
-                Button { ledger.applyBlocking() } label: {
-                    Label(ledger.enforcer.busy ? "Applying…" : "Apply blocking (\(ledger.wantedBlocklist.count) addresses)", systemImage: "shield.lefthalf.filled")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent).disabled(ledger.enforcer.busy)
+            if !(ledger.enforcer.helperInstalled && ledger.enforcer.autoApply) && !ledger.deniedAppPaths.isEmpty {
+                Label("Deny is not enforced: install the firewall helper (Settings > Security)", systemImage: "exclamationmark.shield")
+                    .font(.caption).foregroundStyle(.orange)
             }
             HStack {
                 Text(settings.groupBy == .process ? "\(rows.count) apps" : "\(groups.count) groups").font(.caption).foregroundStyle(.secondary)

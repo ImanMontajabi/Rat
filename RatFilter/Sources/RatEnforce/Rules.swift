@@ -20,59 +20,26 @@ public struct DeniedApps: Equatable {
     }
 }
 
-public enum Address {
-    /// Whether an address is worth putting in a firewall table: public unicast only. LAN, loopback, link-local and
-    /// multicast addresses (router, DNS, mDNS) are never blocked by address.
-    public static func isPublic(_ a: String) -> Bool {
-        var v4 = in_addr()
-        if inet_pton(AF_INET, a, &v4) == 1 {
-            let ip = UInt32(bigEndian: v4.s_addr)
-            let o1 = ip >> 24, o2 = (ip >> 16) & 0xff
-            if o1 == 0 || o1 == 10 || o1 == 127 || o1 >= 224 { return false }
-            if o1 == 169 && o2 == 254 { return false }
-            if o1 == 172 && (16...31).contains(o2) { return false }
-            if o1 == 192 && o2 == 168 { return false }
-            if o1 == 100 && (64...127).contains(o2) { return false }
-            return true
-        }
-        var v6 = in6_addr()
-        guard inet_pton(AF_INET6, a, &v6) == 1 else { return false }
-        let b = withUnsafeBytes(of: &v6) { Array($0) }
-        if b.allSatisfy({ $0 == 0 }) { return false }
-        if b[0] == 0xff || (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) || (b[0] & 0xfe) == 0xfc { return false }
-        if b.dropLast().allSatisfy({ $0 == 0 }) && b[15] == 1 { return false }
-        return true
-    }
-}
-
 public enum PFRules {
-    /// The anchor's ruleset. Blocks by address (rules that deny a server for everyone) and by local port (every
-    /// socket of a denied app). Outgoing TCP gets an immediate RST and outgoing UDP an ICMP unreachable, so the
-    /// app gives up at once instead of retransmitting; incoming packets are dropped. Loopback is never touched.
-    public static func render(ports: [Int], addresses: [String]) -> String {
-        var out = "table <rat_blocked> persist {\(addresses.sorted().joined(separator: " "))}\n"
-        out += "block drop out quick from any to <rat_blocked> no state\n"
-        out += "block drop in quick from <rat_blocked> to any no state\n"
+    /// The anchor's ruleset: only the local ports of sockets that belong to denied apps (or were denied by a rule).
+    /// Nothing is ever blocked by remote address, because an address is shared by every app on the Mac (DNS
+    /// resolvers, CDNs). Outgoing TCP gets an immediate RST and outgoing UDP an ICMP unreachable, so the app gives
+    /// up at once; incoming packets are dropped. All rules are stateless (`no state`), so a connection that was
+    /// already open is cut on its next packet, and there are no `pass` rules: nothing else is decided here.
+    /// Loopback is never touched.
+    public static func render(ports: [Int]) -> String {
+        guard !ports.isEmpty else { return "" }
         let list = ports.sorted().map(String.init).joined(separator: " ")
-        if !ports.isEmpty {
-            out += "block return-rst out quick on ! lo0 proto tcp from any port { \(list) } to any\n"
-            out += "block return-icmp out quick on ! lo0 proto udp from any port { \(list) } to any\n"
-            out += "block drop in quick on ! lo0 proto { tcp udp } from any to any port { \(list) }\n"
-        }
-        return out
+        return """
+        block return-rst out quick on ! lo0 proto tcp from any port { \(list) } to any no state
+        block return-icmp out quick on ! lo0 proto udp from any port { \(list) } to any no state
+        block drop in quick on ! lo0 proto { tcp udp } from any to any port { \(list) } no state
+
+        """
     }
 
-    /// Reads the address blocklist Rat writes (one IP per line), keeping only valid public addresses.
-    public static func parseBlocklist(_ text: String, limit: Int = 5000) -> [String] {
-        var seen = Set<String>()
-        var out: [String] = []
-        for line in text.split(whereSeparator: \.isNewline) {
-            let a = line.trimmingCharacters(in: .whitespaces)
-            var v4 = in_addr(), v6 = in6_addr()
-            guard inet_pton(AF_INET, a, &v4) == 1 || inet_pton(AF_INET6, a, &v6) == 1, seen.insert(a).inserted else { continue }
-            out.append(a)
-            if out.count >= limit { break }
-        }
-        return out
+    /// Reads a list of ports, one per line; anything else is ignored.
+    public static func parsePorts(_ text: String) -> [Int] {
+        Set(text.split(whereSeparator: \.isNewline).compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }.filter { (1...65535).contains($0) }).sorted()
     }
 }

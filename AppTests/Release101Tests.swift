@@ -138,7 +138,7 @@ final class Release101Tests: XCTestCase {
             PersistedApp(id: "pid 123", name: "pid 123", bundlePath: nil, isSystem: false, totalIn: 1, totalOut: 1, lastActive: Date()),
             PersistedApp(id: "/Users/x/.local/share/claude/versions/2.1.308", name: "2.1.308", bundlePath: nil, isSystem: false, totalIn: 10, totalOut: 5, lastActive: Date()),
             PersistedApp(id: "/Users/x/.local/share/claude/versions/2.1.309", name: "2.1.309", bundlePath: nil, isSystem: false, totalIn: 1, totalOut: 1, lastActive: Date()),
-        ], denied: [:], buckets: []))
+        ], buckets: []))
         let ledger = Ledger(directory: dir)
         XCTAssertEqual(ledger.apps.map(\.identity.name), ["claude"], "version numbers merge into the tool, ghost pids vanish")
         XCTAssertEqual(ledger.apps.first?.totalIn, 11)

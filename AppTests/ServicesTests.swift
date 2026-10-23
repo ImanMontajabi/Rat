@@ -12,19 +12,20 @@ final class ServicesTests: XCTestCase {
 
     func testStateStoreIsTolerantOfOlderFiles() throws {
         let dir = tempDir()
-        // v0.2 wrote `blocked` and no `denied`.
-        try #"{"apps":[],"blocked":{"x":["1.2.3.4"]},"buckets":[]}"#.write(to: dir.appendingPathComponent("state.json"), atomically: true, encoding: .utf8)
-        let s = StateStore.standard(base: dir).load()
-        XCTAssertTrue(s.denied.isEmpty)
+        // Before 1.0.4 the state held the server addresses of denied apps; they are dropped on the next save.
+        try #"{"apps":[],"blocked":{"x":["1.2.3.4"]},"denied":{"x":[{"address":"1.1.1.1","host":"h","port":443,"proto":"TCP"}]},"buckets":[]}"#.write(to: dir.appendingPathComponent("state.json"), atomically: true, encoding: .utf8)
+        let store = StateStore.standard(base: dir)
+        XCTAssertTrue(store.load().apps.isEmpty)
+        store.save(store.load())
+        XCTAssertFalse(try String(contentsOf: dir.appendingPathComponent("state.json"), encoding: .utf8).contains("1.1.1.1"))
     }
 
     func testStateStoreRoundTrip() {
         let store = StateStore.standard(base: tempDir())
         let app = PersistedApp(id: "a", name: "A", bundlePath: nil, isSystem: false, totalIn: 5, totalOut: 6, lastActive: Date(timeIntervalSince1970: 1_700_000_000))
-        store.save(PersistedState(apps: [app], denied: ["a": [DeniedEntry(address: "1.1.1.1", host: "h", port: 443, proto: "TCP")]], buckets: []))
+        store.save(PersistedState(apps: [app], buckets: []))
         let back = store.load()
         XCTAssertEqual(back.apps.first?.totalIn, 5)
-        XCTAssertEqual(back.denied["a"]?.first?.address, "1.1.1.1")
     }
 
     func testStorageIsConfinedToOneDirectory() {
@@ -38,39 +39,35 @@ final class ServicesTests: XCTestCase {
 
     func testEnforcerNeverTouchesFirewallWithoutHelper() {
         let dir = tempDir()
+        // A blocklist left by an earlier version is removed on start.
+        try? "1.1.1.1\n8.8.8.8\n".write(to: dir.appendingPathComponent("blocklist.txt"), atomically: true, encoding: .utf8)
         let e = Enforcer(supportDirectory: dir, helperInstalled: false, autoApply: true)
-        e.sync(["1.2.3.4"])
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("blocklist.txt").path))
-        XCTAssertTrue(e.needsApply(for: ["1.2.3.4"]))
-        XCTAssertFalse(e.needsApply(for: []))
+        e.syncApps(["/Applications/Foo.app"]); e.syncPorts([50000])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("denied-apps.txt").path), "nothing is written without the helper")
         XCTAssertNil(e.systemSnapshotText())
-        // With the helper present and auto-apply on, syncing writes the list the daemon watches.
+        // With the helper present and auto-apply on, the daemon is fed apps and ports, and never addresses.
         let installed = Enforcer(supportDirectory: dir, helperInstalled: true, autoApply: true)
-        installed.sync(["1.2.3.4", "5.6.7.8"])
-        XCTAssertEqual(try? String(contentsOf: dir.appendingPathComponent("blocklist.txt"), encoding: .utf8), "1.2.3.4\n5.6.7.8\n")
-        XCTAssertFalse(installed.needsApply(for: ["1.2.3.4", "5.6.7.8"]))
+        installed.syncApps(["/Applications/Foo.app", "/Applications/Bar.app"]); installed.syncPorts([50001, 50000])
+        XCTAssertEqual(try? String(contentsOf: dir.appendingPathComponent("denied-apps.txt"), encoding: .utf8), "/Applications/Bar.app\n/Applications/Foo.app\n")
+        XCTAssertEqual(try? String(contentsOf: dir.appendingPathComponent("denied-ports.txt"), encoding: .utf8), "50000\n50001\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("blocklist.txt").path))
+        installed.autoApply = false
+        XCTAssertEqual(try? String(contentsOf: dir.appendingPathComponent("denied-apps.txt"), encoding: .utf8), "", "turning auto-apply off unblocks everything")
     }
 
-    func testDeniedAppEntersWantedBlocklist() {
-        let ledger = Ledger(directory: tempDir(), helperInstalled: false)
-        ledger.installDemoData()
-        let chrome = ledger.apps.first { $0.identity.name == "Google Chrome" }!
-        XCTAssertTrue(ledger.wantedBlocklist.isEmpty)
-        ledger.setPolicy(.deny, for: chrome.id)
-        XCTAssertEqual(ledger.wantedBlocklist, Set(chrome.remotes.map(\.address)))
-        XCTAssertEqual(ledger.blockedAddresses(for: chrome.id), chrome.remotes.count)
-        ledger.setPolicy(nil, for: chrome.id)
-        XCTAssertTrue(ledger.wantedBlocklist.isEmpty, "removing the rule shrinks the blocklist")
-    }
-
-    /// With the enforcer running, a denied app is cut by its ports and its servers stay reachable for other apps.
-    func testDeniedAppDoesNotBlockItsServersGloballyWithEnforcer() {
-        let ledger = Ledger(directory: tempDir(), helperInstalled: true)
+    /// Deny hands the app to the helper, which blocks its ports; no server address is ever written anywhere.
+    func testDenyNeverBlocksServerAddresses() throws {
+        let dir = tempDir()
+        let ledger = Ledger(directory: dir, helperInstalled: true)
         ledger.installDemoData()
         let chrome = ledger.apps.first { $0.identity.name == "Google Chrome" }!
         ledger.setPolicy(.deny, for: chrome.id)
         XCTAssertTrue(ledger.deniedAppPaths.contains(chrome.identity.ruleKey))
-        XCTAssertTrue(ledger.wantedBlocklist.isEmpty)
+        XCTAssertEqual(try String(contentsOf: dir.appendingPathComponent("denied-apps.txt"), encoding: .utf8), chrome.identity.ruleKey + "\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("blocklist.txt").path))
+        ledger.setPolicy(nil, for: chrome.id)
+        XCTAssertFalse(ledger.deniedAppPaths.contains(chrome.identity.ruleKey), "removing the rule unblocks the app")
     }
 
     func testAlertCenterDedupesAndAnswers() {

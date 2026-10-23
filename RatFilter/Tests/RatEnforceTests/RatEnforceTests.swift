@@ -29,21 +29,18 @@ final class RatEnforceTests: XCTestCase {
         XCTAssertNil(ProcessGrouping.bundleRoot(of: "/usr/bin/curl"))
     }
 
-    func testRulesBlockPortsBothWaysAndSpareLoopback() {
-        let r = PFRules.render(ports: [51000, 50000], addresses: ["203.0.113.5", "2001:db8::1"])
-        XCTAssertTrue(r.contains("table <rat_blocked> persist {2001:db8::1 203.0.113.5}"))
-        XCTAssertTrue(r.contains("block return-rst out quick on ! lo0 proto tcp from any port { 50000 51000 } to any\n"))
-        XCTAssertTrue(r.contains("block return-icmp out quick on ! lo0 proto udp from any port { 50000 51000 } to any\n"))
-        XCTAssertTrue(r.contains("block drop in quick on ! lo0 proto { tcp udp } from any to any port { 50000 51000 }\n"))
-        XCTAssertFalse(PFRules.render(ports: [], addresses: []).contains("port"))
+    func testRulesAreStatelessPortRulesOnly() {
+        let r = PFRules.render(ports: [51000, 50000])
+        XCTAssertTrue(r.contains("block return-rst out quick on ! lo0 proto tcp from any port { 50000 51000 } to any no state\n"))
+        XCTAssertTrue(r.contains("block return-icmp out quick on ! lo0 proto udp from any port { 50000 51000 } to any no state\n"))
+        XCTAssertTrue(r.contains("block drop in quick on ! lo0 proto { tcp udp } from any to any port { 50000 51000 } no state\n"))
+        // Nothing about addresses, tables or pass rules: other apps and DNS are never touched.
+        for forbidden in ["table", "<", "pass", "to <", "from <"] { XCTAssertFalse(r.contains(forbidden), forbidden) }
+        XCTAssertEqual(PFRules.render(ports: []), "")
     }
 
-    func testBlocklistAndPublicAddresses() {
-        XCTAssertEqual(PFRules.parseBlocklist("1.1.1.1\nnot-an-ip\n1.1.1.1\n2606:4700::1111\n; rm -rf /\n"), ["1.1.1.1", "2606:4700::1111"])
-        for a in ["8.8.8.8", "2606:4700::1111"] { XCTAssertTrue(Address.isPublic(a), a) }
-        for a in ["127.0.0.1", "10.1.2.3", "192.168.1.1", "172.16.0.1", "169.254.1.1", "100.64.0.1", "224.0.0.251", "::1", "fe80::1", "fd00::1", "ff02::fb", "::"] {
-            XCTAssertFalse(Address.isPublic(a), a)
-        }
+    func testParsePorts() {
+        XCTAssertEqual(PFRules.parsePorts("443\n80\nabc\n0\n70000\n443\n; rm\n"), [80, 443])
     }
 
     func testDaemonLoadsRulesForItsOwnSocketsAndNothingElse() throws {
@@ -63,13 +60,14 @@ final class RatEnforceTests: XCTestCase {
         let port = Int(UInt16(bigEndian: bound.sin_port))
 
         var calls: [(String, [String], String?)] = []
-        var s = EnforcerDaemon.Settings(deniedFile: dir.appendingPathComponent("denied.txt").path, blocklistFile: dir.appendingPathComponent("none.txt").path)
+        var s = EnforcerDaemon.Settings(deniedFile: dir.appendingPathComponent("denied.txt").path, portsFile: dir.appendingPathComponent("ports.txt").path)
         s.anchor = "com.apple/rat-unittest"
         let d = EnforcerDaemon(settings: s, run: { calls.append(($0, $1, $2)); return 0 })
         XCTAssertTrue(d.tick())
         let rules = calls.compactMap { $0.2 }.last ?? ""
         XCTAssertTrue(rules.contains("\(port)"), rules)
-        XCTAssertTrue(calls.allSatisfy { $0.1.contains("com.apple/rat-unittest") || $0.1.first == "-k" })
+        XCTAssertTrue(calls.allSatisfy { $0.1.contains("com.apple/rat-unittest") }, "only the daemon's own anchor is touched")
+        XCTAssertFalse(calls.contains { $0.1.contains("-k") }, "no states are killed: they may belong to other apps")
 
         // Nothing denied: no ports are ever loaded.
         try "".write(to: dir.appendingPathComponent("denied.txt"), atomically: true, encoding: .utf8)
@@ -77,6 +75,20 @@ final class RatEnforceTests: XCTestCase {
         calls.removeAll()
         let idle = EnforcerDaemon(settings: s, run: { calls.append(($0, $1, $2)); return 0 })
         XCTAssertFalse(idle.tick())
-        XCTAssertFalse(calls.contains { ($0.2 ?? "").contains("port") })
+        XCTAssertFalse(calls.contains { ($0.2 ?? "").contains("port {") })
+    }
+
+    func testPortsNamedByRatAreBlockedEvenWithoutDeniedApps() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-enf-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "".write(to: dir.appendingPathComponent("denied.txt"), atomically: true, encoding: .utf8)
+        try "61234\n".write(to: dir.appendingPathComponent("ports.txt"), atomically: true, encoding: .utf8)
+        var calls: [(String, [String], String?)] = []
+        var s = EnforcerDaemon.Settings(deniedFile: dir.appendingPathComponent("denied.txt").path, portsFile: dir.appendingPathComponent("ports.txt").path)
+        s.anchor = "com.apple/rat-unittest"
+        let d = EnforcerDaemon(settings: s, run: { calls.append(($0, $1, $2)); return 0 })
+        XCTAssertFalse(d.tick())
+        XCTAssertTrue((calls.last?.2 ?? "").contains("61234"))
     }
 }

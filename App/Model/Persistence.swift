@@ -19,28 +19,18 @@ struct Bucket: Codable {
     var tx: Double
 }
 
-/// A connection the user denied; re-evaluated against the rules so the blocklist shrinks when a rule is removed.
-struct DeniedEntry: Codable {
-    var address: String
-    var host: String
-    var port: Int
-    var proto: String
-}
-
 struct PersistedState: Codable {
     var apps: [PersistedApp] = []
-    var denied: [String: [DeniedEntry]] = [:]
     var buckets: [Bucket] = []
 
-    init(apps: [PersistedApp] = [], denied: [String: [DeniedEntry]] = [:], buckets: [Bucket] = []) {
-        self.apps = apps; self.denied = denied; self.buckets = buckets
+    init(apps: [PersistedApp] = [], buckets: [Bucket] = []) {
+        self.apps = apps; self.buckets = buckets
     }
 
-    // Tolerant of state files written by earlier versions.
+    // Tolerant of state files written by earlier versions (their lists of denied server addresses are dropped).
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         apps = try c.decodeIfPresent([PersistedApp].self, forKey: .apps) ?? []
-        denied = try c.decodeIfPresent([String: [DeniedEntry]].self, forKey: .denied) ?? [:]
         buckets = try c.decodeIfPresent([Bucket].self, forKey: .buckets) ?? []
     }
 }

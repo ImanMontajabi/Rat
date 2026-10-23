@@ -5,29 +5,30 @@ private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "enfor
 
 /// Applies "deny" decisions with the macOS packet filter.
 ///
-/// Rat has no Network Extension entitlement, so it cannot intercept connections per process.
-/// Two layers, both loaded into the `com.apple/rat` pf anchor as root:
+/// Rat has no Network Extension entitlement, so it cannot intercept connections per process. The root daemon
+/// `rat-enforcerd` (a LaunchDaemon, installed once with the user's administrator password, opt-in) keeps the
+/// `com.apple/rat` pf anchor in step with two files Rat writes:
 ///
-/// * the server addresses of denied connections (`blocklist.txt`), which hold for every app, and
-/// * the local ports of every socket of a denied app (`denied-apps.txt`), which only the root daemon
-///   `rat-enforcerd` can keep current (it polls every ~50 ms), so new servers, IPv6 fallbacks and
-///   QUIC streams of that app are cut as they appear.
+/// * `denied-apps.txt`: apps that are denied outright. The daemon blocks the local ports of every socket of their
+///   processes (helpers included), polling every few milliseconds.
+/// * `denied-ports.txt`: local ports of sockets that a rule denied (for example one domain for all apps).
 ///
-/// Two ways to run it:
+/// Only local ports are ever blocked. Remote addresses are shared by every app on the Mac (DNS resolvers, CDNs),
+/// so Rat never puts them in the firewall. Without the helper nothing is enforced.
 ///
-/// * **Manual** (default): each click on "Apply blocking" runs `rat-pf-helper.sh` once behind the
-///   standard macOS password prompt (addresses only). Nothing stays installed.
-/// * **Automatic** (opt-in, explicitly approved by the user): installed once as two root
-///   LaunchDaemons. `rat-enforcerd` enforces both layers continuously; the other snapshots all
-///   processes' sockets so Rat can see system-wide traffic. "Remove Helper" uninstalls both and
-///   clears the pf anchor.
+/// A second LaunchDaemon snapshots all processes' sockets so Rat can see system-wide traffic.
+/// "Remove Helper" uninstalls both and clears the pf anchor.
 @MainActor
 final class Enforcer: ObservableObject {
-    @Published private(set) var applied: Set<String> = []
     @Published private(set) var busy = false
     @Published private(set) var helperInstalled: Bool
     @Published private(set) var helperOutdated = false
-    @Published var autoApply: Bool { didSet { UserDefaults.standard.set(autoApply, forKey: "autoApplyPF") } }
+    @Published var autoApply: Bool {
+        didSet {
+            UserDefaults.standard.set(autoApply, forKey: "autoApplyPF")
+            if !autoApply { clearFiles() }
+        }
+    }
     @Published var lastError: String?
 
     static let applyLabel = "com.imanmontajabi.rat.pf"
@@ -36,32 +37,25 @@ final class Enforcer: ObservableObject {
     static let enforcerPath = "/Library/PrivilegedHelperTools/com.imanmontajabi.rat.enforcer"
     static func plistPath(_ label: String) -> String { "/Library/LaunchDaemons/\(label).plist" }
 
-    let listURL: URL
     let snapshotURL: URL
     let appsURL: URL
-    private var lastWritten: Set<String>?
+    let portsURL: URL
     private var lastApps: Set<String>?
+    private var lastPorts: Set<Int>?
 
     /// `helperInstalled` and `autoApply` can be forced so tests do not depend on (or touch) the machine's real state.
     init(supportDirectory: URL, helperInstalled: Bool? = nil, autoApply: Bool? = nil) {
-        listURL = supportDirectory.appendingPathComponent("blocklist.txt")
+        // Earlier versions wrote the server addresses of denied apps here and blocked them for every app.
+        try? FileManager.default.removeItem(at: supportDirectory.appendingPathComponent("blocklist.txt"))
         snapshotURL = supportDirectory.appendingPathComponent("system-sockets.txt")
         appsURL = supportDirectory.appendingPathComponent("denied-apps.txt")
+        portsURL = supportDirectory.appendingPathComponent("denied-ports.txt")
         self.helperInstalled = helperInstalled ?? FileManager.default.fileExists(atPath: Self.plistPath(Self.applyLabel))
         self.autoApply = autoApply ?? UserDefaults.standard.bool(forKey: "autoApplyPF")
-        // Helpers installed by 1.0.x only apply the address list; the enforcer daemon came with 1.0.2.
+        // Helpers before 1.0.4 also loaded a list of server addresses, which blocked them for every app.
         if helperInstalled == nil, self.helperInstalled {
-            helperOutdated = !((try? String(contentsOfFile: Self.plistPath(Self.applyLabel), encoding: .utf8))?.contains("rat.enforcer") ?? false)
+            helperOutdated = !((try? String(contentsOfFile: Self.plistPath(Self.applyLabel), encoding: .utf8))?.contains("--ports") ?? false)
         }
-    }
-
-    func needsApply(for wanted: Set<String>) -> Bool { wanted != applied }
-
-    /// Called whenever the wanted blocklist may have changed. With the helper installed and auto-apply on,
-    /// writing the file is the whole job: the daemon watches it.
-    func sync(_ wanted: Set<String>) {
-        guard helperInstalled, autoApply, wanted != lastWritten else { return }
-        if writeList(wanted) { applied = wanted }
     }
 
     /// Apps that are denied outright (bundle or executable paths). The daemon blocks every socket of their processes.
@@ -76,16 +70,20 @@ final class Enforcer: ObservableObject {
         }
     }
 
-    /// One-off apply behind an admin prompt (used when the helper is not installed).
-    func applyOnce(_ wanted: Set<String>) {
-        guard !busy else { return }
-        guard let helper = Bundle.main.url(forResource: "rat-pf-helper", withExtension: "sh")?.path else {
-            lastError = "Helper script missing from the app bundle."
-            return
-        }
-        guard writeList(wanted) else { return }
-        let command = "/bin/sh \(Self.shellQuote(helper)) apply \(Self.shellQuote(listURL.path))"
-        runPrivileged(command) { ok in if ok { self.applied = wanted } }
+    /// With auto-apply off nothing may stay blocked: the daemon is told there is nothing to block.
+    private func clearFiles() {
+        guard helperInstalled else { return }
+        for url in [appsURL, portsURL] { try? "".write(to: url, atomically: true, encoding: .utf8) }
+        lastApps = nil; lastPorts = nil
+    }
+
+    /// Local ports of sockets that rules deny. Rewritten on every pass while non-empty, because the daemon only
+    /// trusts the file while it is fresh (a crashed Rat must not leave ports blocked).
+    func syncPorts(_ ports: Set<Int>) {
+        guard helperInstalled, autoApply else { return }
+        guard !ports.isEmpty || lastPorts?.isEmpty == false else { lastPorts = ports; return }
+        try? ports.sorted().map(String.init).joined(separator: "\n").appending("\n").write(to: portsURL, atomically: true, encoding: .utf8)
+        lastPorts = ports
     }
 
     func installHelper() {
@@ -110,7 +108,7 @@ final class Enforcer: ObservableObject {
             """
         }
         // The enforcer reads the user's files but only ever uses paths for matching and addresses for pf tables.
-        let apply = plist(Self.applyLabel, [Self.enforcerPath, "--denied", appsURL.path, "--blocklist", listURL.path],
+        let apply = plist(Self.applyLabel, [Self.enforcerPath, "--denied", appsURL.path, "--ports", portsURL.path],
                           extra: "<key>KeepAlive</key><true/><key>RunAtLoad</key><true/><key>ProcessType</key><string>Interactive</string>")
         let sampler = plist(Self.samplerLabel, [Self.helperPath, "snapshot", snapshotURL.path, owner],
                             extra: "<key>StartInterval</key><integer>5</integer><key>RunAtLoad</key><true/>")
@@ -134,7 +132,7 @@ final class Enforcer: ObservableObject {
         /bin/launchctl bootstrap system \(Self.shellQuote(Self.plistPath(Self.samplerLabel)))
         """
         runPrivilegedScript(script) { ok in
-            if ok { self.helperInstalled = true; self.helperOutdated = false; self.autoApply = true; self.lastWritten = nil; self.lastApps = nil }
+            if ok { self.helperInstalled = true; self.helperOutdated = false; self.autoApply = true; self.lastApps = nil; self.lastPorts = nil }
         }
     }
 
@@ -145,7 +143,7 @@ final class Enforcer: ObservableObject {
         rm -f \(Self.shellQuote(Self.plistPath(Self.applyLabel))) \(Self.shellQuote(Self.plistPath(Self.samplerLabel))) \(Self.shellQuote(Self.helperPath)) \(Self.shellQuote(Self.enforcerPath))
         """
         runPrivilegedScript(script) { ok in
-            if ok { self.helperInstalled = false; self.helperOutdated = false; self.autoApply = false; self.applied = []; self.lastWritten = nil; self.lastApps = nil }
+            if ok { self.helperInstalled = false; self.helperOutdated = false; self.autoApply = false; self.lastApps = nil; self.lastPorts = nil }
         }
     }
 
@@ -158,20 +156,6 @@ final class Enforcer: ObservableObject {
     }
 
     // MARK: plumbing
-
-    @discardableResult
-    private func writeList(_ ips: Set<String>) -> Bool {
-        do {
-            try ips.sorted().joined(separator: "\n").appending("\n").write(to: listURL, atomically: true, encoding: .utf8)
-            lastWritten = ips
-            logger.notice("blocklist written: \(ips.count, privacy: .public) addresses")
-            return true
-        } catch {
-            lastError = error.localizedDescription
-            logger.error("could not write blocklist: \(error.localizedDescription, privacy: .public)")
-            return false
-        }
-    }
 
     private func runPrivilegedScript(_ script: String, done: @escaping (Bool) -> Void) {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("rat-\(UUID().uuidString).sh")

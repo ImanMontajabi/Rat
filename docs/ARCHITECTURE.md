@@ -258,18 +258,26 @@ The first versions guessed at the UI from screenshots. v1.0.1 follows the app's 
 
 Behaviour fixes in this release: alerts re-validated against the rules every tick, so an app with a whole-app Allow or Deny never prompts; alert scope defaults to *This App (Any Server)*; IP addresses are never stored as "domains"; the traffic chart tiles its window and fits it to the data that exists; versioned binaries (`…/claude/versions/2.1.308`) resolve to their tool; app extensions (`.appex`) are listed separately like Little Snitch's EXT rows.
 
-## 10. Revision 4 (v1.0.2): blocking a denied app by its sockets
+## 10. Revision 4 (v1.0.2 to v1.0.4): blocking a denied app by its sockets
 
-Chasing the server addresses of a denied browser every 1.5 s cannot work: Chrome and Firefox rotate CDN addresses, fall back to IPv6 and move QUIC streams, so each new address downloads for a moment before it is blocked.
+Chasing the server addresses of a denied browser cannot work: Chrome and Firefox rotate CDN addresses, fall back to IPv6 and move QUIC streams. Worse, an address is shared by every app on the Mac. v1.0.2 and v1.0.3 still put the servers a denied app talked to into a global `<rat_blocked>` table, and one Deny on Chrome ended up blocking 1.1.1.1, 8.8.8.8 and 9.9.9.9 (DNS) for every app. **From v1.0.4 Rat never blocks a remote address, in any mode.** The code that recorded them is gone.
 
-Deny now has three layers. All are loaded into the `com.apple/rat` pf anchor by the root daemon `rat-enforcerd` (a LaunchDaemon with `KeepAlive`, installed with the helper):
+Deny is enforced by the root daemon `rat-enforcerd` (a `KeepAlive` LaunchDaemon installed with the helper), which owns the `com.apple/rat` anchor:
 
-1. **Grouping.** Every helper process is attributed to its app: the outermost `.app` or `.AppBundle` in the path (Chrome Helper variants, Firefox `plugin-container`, `Steam Helper`, `steam_osx`, `ipcserver` all live inside their app), and system XPC services such as `com.apple.WebKit.Networking` follow `responsibility_get_pid_responsible_for_pid` to Safari. Only system services borrow their client's identity, so `curl` run from a Terminal stays `curl`.
-2. **Ports.** Rat writes the apps that are denied outright (a whole-app Deny, no allow exceptions, or Silent Deny) to `denied-apps.txt`. The daemon reads the process list every 10 ms, reads the sockets of those processes every 50 ms (every 10 ms for the first 0.6 s of a new process) and blocks their local ports in both directions, TCP and UDP, IPv4 and IPv6, never on `lo0`. Ports stay blocked 5 s after the socket closes. Servers they reached have their pf states killed.
-3. **Addresses.** `blocklist.txt` is a table that blocks everyone, so it is only used for rules that deny a server for all apps. With the enforcer running, the servers a denied app used are *not* added: that would break the same site in an allowed app (v1.0.3).
+1. **Grouping.** Every helper process is attributed to its app: the outermost `.app` or `.AppBundle` in the path (Chrome Helper variants, Firefox `plugin-container`, `Steam Helper`, `steam_osx`, `ipcserver`), and system XPC services such as `com.apple.WebKit.Networking` follow `responsibility_get_pid_responsible_for_pid` to Safari. Only system services borrow their client's identity, so `curl` run from a Terminal stays `curl`.
+2. **Ports of denied apps.** Rat writes the apps that are denied outright (a whole-app Deny with no allow exceptions, or Silent Deny) to `denied-apps.txt`. The daemon reads the process list every 3 ms, and the sockets of those processes every 5 ms (only descriptors it has not seen, with a full refresh every 250 ms), and blocks their local ports.
+3. **Ports of denied sockets.** Sockets that a rule denies (for example one domain for all apps) are written by Rat to `denied-ports.txt` every pass; the daemon trusts the file for 10 s, so a crashed Rat cannot leave ports blocked.
 
-pf cannot match a process, so the port layer reacts to a socket after it exists. A SYN may leave before the ports are loaded; the server's answer is dropped when it arrives, so a connection to a distant server fails, but one to a server less than a few milliseconds away can complete its handshake first. `scripts/verify-blocking.sh` (needs `sudo`) measures this with fresh `curl` processes, the hardest case, and checks the address layer for zero bytes. Closing the gap needs a Network Extension.
+The anchor contains only these stateless rules (no table, no `pass`):
 
-### v1.0.3
+```
+block return-rst  out quick on ! lo0 proto tcp from any port { … } to any no state
+block return-icmp out quick on ! lo0 proto udp from any port { … } to any no state
+block drop        in  quick on ! lo0 proto { tcp udp } from any to any port { … } no state
+```
 
-Outgoing TCP from a denied app's ports gets `block return-rst` and outgoing UDP `block return-icmp`, so the app fails at once instead of retransmitting. The socket scan runs every 5 ms; it stays cheap (about 30% of a core with Chrome's 23 processes running) because only descriptors not seen before are read, with a full refresh every 250 ms. The map never zooms tighter than 15 degrees.
+Outgoing TCP gets an RST and UDP an ICMP unreachable, so the app gives up instead of retransmitting. Because the rules are stateless and there is no `pass` rule, a connection that is already open dies on its next packet, while other apps (even to the same server) are never evaluated against it. A `pass … no state` rule in the anchor was considered and rejected: a `quick` pass would end evaluation and override every later block rule on the Mac. `pfctl -k` (kill states by address) is not used either, because it would cut other apps' connections to the same server. On start the daemon flushes the anchor, and deletes a `blocklist.txt` left by an older version.
+
+pf cannot match a process, so the port layer reacts to a socket after it exists. A SYN may leave before the ports are loaded (about 8 ms); the server's answer is dropped when it arrives, so a connection to a distant server fails, but one to a server a few milliseconds away can complete its handshake first. `scripts/verify-blocking.sh` (needs `sudo`) checks the mid-stream case (a denied and an allowed process downloading from the same address, plus DNS to 1.1.1.1, 8.8.8.8 and 9.9.9.9) and measures the fresh-process case. Closing that gap needs a Network Extension.
+
+The map never zooms tighter than 15 degrees (v1.0.3).
