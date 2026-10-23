@@ -27,10 +27,62 @@ final class GeoService: @unchecked Sendable {
     var available: Bool { lock.withLock { db != nil } }
     var networksAvailable: Bool { lock.withLock { asn != nil } }
 
+    enum Kind: String, CaseIterable, Identifiable, Sendable {
+        case city, asn
+        var id: String { rawValue }
+        var bundledName: String { self == .city ? GeoService.databaseName : GeoService.asnDatabaseName }
+    }
+
+    /// The file each database was read from, with its metadata.
+    struct Loaded: Equatable { var path: String; var type: String; var built: Date? }
+    private var loaded: [Kind: Loaded] = [:]
+
     init() {
-        db = Self.bundledPath(Self.databaseName, env: "RAT_GEOIP_DB").flatMap { try? GeoIP(path: $0) }
-        asn = Self.bundledPath(Self.asnDatabaseName, env: "RAT_GEOIP_ASN_DB").flatMap { try? ASNDatabase(path: $0) }
+        for k in Kind.allCases {
+            if let p = Self.bundledPath(k.bundledName, env: k == .city ? "RAT_GEOIP_DB" : "RAT_GEOIP_ASN_DB") { try? use(k, path: p) }
+        }
         logger.notice("geoip city \(self.db == nil ? "missing" : "loaded", privacy: .public), asn \(self.asn == nil ? "missing" : "loaded", privacy: .public)")
+    }
+
+    func loadedFile(_ kind: Kind) -> Loaded? { lock.withLock { loaded[kind] } }
+
+    /// Switches one database to another file, without a restart. A file that does not open, or does not answer
+    /// like a database of that kind, throws and the current one stays in use.
+    func use(_ kind: Kind, path: String) throws {
+        let info = try Self.validate(kind, path: path)
+        switch kind {
+        case .city:
+            let g = try GeoIP(path: path)
+            lock.withLock { db = g; cache.removeAll(); loaded[.city] = info }
+        case .asn:
+            let a = try ASNDatabase(path: path)
+            lock.withLock { asn = a; asnCache.removeAll(); loaded[.asn] = info }
+        }
+    }
+
+    enum Invalid: LocalizedError {
+        case notADatabase, wrongKind(String)
+        var errorDescription: String? {
+            switch self {
+            case .notADatabase: return "This is not a MaxMind DB (.mmdb) file, or it is damaged."
+            case .wrongKind(let k): return "This file does not hold \(k) data for well-known addresses."
+            }
+        }
+    }
+
+    /// Opens a file and checks that it answers like a City (coordinates) or ASN (network number) database.
+    static func validate(_ kind: Kind, path: String) throws -> Loaded {
+        let probes = ["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"]
+        switch kind {
+        case .city:
+            guard let g = try? GeoIP(path: path) else { throw Invalid.notADatabase }
+            guard probes.contains(where: { g.locate($0) != nil }) else { throw Invalid.wrongKind("city and location") }
+            return Loaded(path: path, type: g.db.databaseType, built: g.db.buildDate)
+        case .asn:
+            guard let a = try? ASNDatabase(path: path) else { throw Invalid.notADatabase }
+            guard probes.contains(where: { a.owner($0) != nil }) else { throw Invalid.wrongKind("network (ASN)") }
+            return Loaded(path: path, type: a.db.databaseType, built: a.db.buildDate)
+        }
     }
 
     static func bundledPath(_ name: String, env: String) -> String? {

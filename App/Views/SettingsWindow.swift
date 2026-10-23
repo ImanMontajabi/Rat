@@ -14,6 +14,7 @@ struct SettingsView: View {
             MonitorSettings().tabItem { Label("Monitor", systemImage: "waveform.path.ecg.rectangle") }.tag("Monitor")
             ProfileSwitchingSettings().tabItem { Label("APS", systemImage: "arrow.triangle.2.circlepath.doc.on.clipboard") }.tag("APS")
             SecuritySettings().tabItem { Label("Security", systemImage: "lock") }.tag("Security")
+            GeoIPSettings().tabItem { Label("GeoIP", systemImage: "globe") }.tag("GeoIP")
             NotificationSettings().tabItem { Label("Notifications", systemImage: "bell.badge") }.tag("Notifications")
             UpdateSettings().tabItem { Label("Update", systemImage: "arrow.down.circle") }.tag("Update")
             AdvancedSettings().tabItem { Label("Advanced", systemImage: "gearshape.2") }.tag("Advanced")
@@ -200,6 +201,61 @@ struct ProfileSwitchingSettings: View {
 
     private func action(_ c: String, _ rules: RulesModel) -> UnknownNetworkAction {
         switch c { case "ask": return .ask; case "nothing": return .doNothing; default: return UUID(uuidString: c).map { .activate($0) } ?? .ask }
+    }
+}
+
+// MARK: - GeoIP databases (#3)
+
+struct GeoIPSettings: View {
+    @EnvironmentObject var ledger: Ledger
+    var body: some View {
+        GeoIPSettingsContent(dbs: ledger.geoDatabases)
+    }
+}
+
+private struct GeoIPSettingsContent: View {
+    @ObservedObject var dbs: GeoDatabases
+
+    var body: some View {
+        SettingsPane {
+            row(.city, title: "City database", detail: "Places servers on the map.")
+            row(.asn, title: "Network database (ASN)", detail: "Names who runs each server's network.")
+            if let err = dbs.lastError { Text(err).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+            Text("Lookups never leave this Mac. MaxMind GeoLite2 or GeoIP2 City and ASN files work too; download them with your own MaxMind account (their licence does not allow Rat to ship them). “Download Latest” fetches DB-IP's free monthly file (CC BY 4.0) from db-ip.com.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder private func row(_ kind: GeoService.Kind, title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(size: 15, weight: .semibold))
+            Text(detail).font(.callout).foregroundStyle(.secondary)
+            if let i = dbs.info[kind] {
+                Label("\(i.custom ? "Your file" : "Bundled with Rat"): \(i.type.isEmpty ? i.fileName : i.type)\(i.built.map { ", built \($0.formatted(date: .abbreviated, time: .omitted))" } ?? "")",
+                      systemImage: i.custom ? "doc.badge.gearshape" : "shippingbox")
+                if dbs.isStale(i) {
+                    Label("This data is more than three months old; DB-IP publishes a new file every month.", systemImage: "clock.badge.exclamationmark")
+                        .foregroundStyle(.orange)
+                }
+            } else {
+                Label("No database loaded", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            }
+            HStack {
+                Button("Choose File…") { pick(kind) }
+                Button(dbs.busy == kind ? "Downloading…" : "Download Latest DB-IP Lite") { Task { await dbs.downloadLatest(kind) } }
+                    .disabled(dbs.busy != nil)
+                if dbs.info[kind]?.custom == true { Button("Use Bundled") { dbs.useBundled(kind) } }
+            }
+        }
+    }
+
+    private func pick(_ kind: GeoService.Kind) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "mmdb") ?? .data]
+        panel.allowsMultipleSelection = false
+        panel.message = kind == .city ? "Choose a City .mmdb file (DB-IP City Lite, GeoLite2-City, GeoIP2-City)" : "Choose an ASN .mmdb file (DB-IP ASN Lite, GeoLite2-ASN)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try dbs.choose(kind, file: url) } catch { dbs.lastError = error.localizedDescription }
     }
 }
 

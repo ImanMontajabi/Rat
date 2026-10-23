@@ -2,6 +2,7 @@ import XCTest
 import RatFilterCore
 import RatMonitor
 import RatEnforce
+import RatGeo
 @testable import Rat
 
 /// 1.2.0: the five feature issues (#1 to #5).
@@ -72,5 +73,114 @@ final class Release120Tests: XCTestCase {
         let foo = try XCTUnwrap(ledger.apps.first { $0.id == "/Applications/Demo/Foo.app" })
         XCTAssertTrue(foo.remotes.first?.network?.hasPrefix("AS13335 ") ?? false)
         XCTAssertEqual(ledger.networks().first?.count, 1)
+    }
+
+    // MARK: #3 choose and update the GeoIP databases
+
+    /// A one-node IPv4 .mmdb whose every address maps to `record` (same layout as RatGeo's test fixture).
+    static func tinyMMDB(_ record: [UInt8], type: String, built: UInt64 = 1_790_000_000) -> Data {
+        func str(_ s: String) -> [UInt8] { (s.utf8.count < 29 ? [UInt8(0x40 | s.utf8.count)] : [0x40 | 29, UInt8(s.utf8.count - 29)]) + Array(s.utf8) }
+        var d = Data([0, 0, 17, 0, 0, 17]) + Data(count: 16) + Data(record)
+        d += [0xAB, 0xCD, 0xEF] + Array("MaxMind.com".utf8)
+        d += [0xe5] + str("node_count") + [0xc1, 1] + str("record_size") + [0xa1, 24] + str("ip_version") + [0xa1, 4]
+        d += str("database_type") + str(type) + str("build_epoch") + [0x08, 0x02] + withUnsafeBytes(of: built.bigEndian, Array.init)
+        return d
+    }
+
+    static func asnFixture(_ n: UInt32, _ org: String) -> Data {
+        func str(_ s: String) -> [UInt8] { (s.utf8.count < 29 ? [UInt8(0x40 | s.utf8.count)] : [0x40 | 29, UInt8(s.utf8.count - 29)]) + Array(s.utf8) }
+        return tinyMMDB([0xe2] + str("autonomous_system_number") + [0xc4] + withUnsafeBytes(of: n.bigEndian, Array.init)
+                        + str("autonomous_system_organization") + str(org), type: "Test-ASN")
+    }
+
+    static func cityFixture() -> Data {
+        func str(_ s: String) -> [UInt8] { [UInt8(0x40 | s.utf8.count)] + Array(s.utf8) }
+        func dbl(_ v: Double) -> [UInt8] { [0x68] + withUnsafeBytes(of: v.bitPattern.bigEndian, Array.init) }
+        let rec: [UInt8] = [0xe3]
+            + str("location") + [0xe2] + str("latitude") + dbl(48.85) + str("longitude") + dbl(2.35)
+            + str("city") + [0xe1] + str("names") + [0xe1] + str("en") + str("Testville")
+            + str("country") + [0xe2] + str("names") + [0xe1] + str("en") + str("Testland") + str("iso_code") + str("TL")
+        return tinyMMDB(rec, type: "Test-City")
+    }
+
+    private func geoSetup() throws -> (URL, GeoService, UserDefaults, () -> Void) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-120-geo-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let suite = "rat-120-geo-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        return (dir, GeoService(), defaults, { try? FileManager.default.removeItem(at: dir); UserDefaults.standard.removePersistentDomain(forName: suite) })
+    }
+
+    func testChosenDatabasesAreValidatedCopiedAndReloadedWithoutRestart() throws {
+        let (dir, geo, defaults, cleanup) = try geoSetup()
+        defer { cleanup() }
+        let dbs = GeoDatabases(directory: dir, geo: geo, defaults: defaults)
+        XCTAssertEqual(dbs.info[.asn]?.custom, false, "the bundled file is the default")
+
+        let asn = dir.appendingPathComponent("mine-asn.mmdb")
+        try Self.asnFixture(64500, "Test Networks").write(to: asn)
+        try dbs.choose(.asn, file: asn)
+        XCTAssertEqual(geo.network("8.8.8.8"), NetworkOwner(number: 64500, organization: "Test Networks"), "used at once, cache cleared")
+        XCTAssertEqual(dbs.info[.asn]?.custom, true)
+        XCTAssertEqual(dbs.info[.asn]?.type, "Test-ASN")
+        XCTAssertEqual(dbs.info[.asn]?.built, Date(timeIntervalSince1970: 1_790_000_000))
+        let stored = try XCTUnwrap(defaults.string(forKey: GeoDatabases.key(.asn)))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dbs.folder.appendingPathComponent(stored).path), "copied into the data folder")
+
+        // Rejected: garbage, and an ASN file offered as the city database. The current files stay in use.
+        let junk = dir.appendingPathComponent("junk.mmdb")
+        try Data("not a database".utf8).write(to: junk)
+        XCTAssertThrowsError(try dbs.choose(.asn, file: junk))
+        XCTAssertThrowsError(try dbs.choose(.city, file: asn))
+        XCTAssertEqual(geo.network("8.8.8.8")?.number, 64500)
+
+        let city = dir.appendingPathComponent("mine-city.mmdb")
+        try Self.cityFixture().write(to: city)
+        try dbs.choose(.city, file: city)
+        XCTAssertEqual(geo.lookup("8.8.8.8")?.city, "Testville")
+
+        // A second choice replaces the first file; "Use Bundled" deletes the copy.
+        try Self.asnFixture(64501, "Other").write(to: asn)
+        try dbs.choose(.asn, file: asn)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dbs.folder.appendingPathComponent(stored).path))
+        XCTAssertEqual(geo.network("8.8.8.8")?.number, 64501)
+        dbs.useBundled(.asn)
+        XCTAssertEqual(dbs.info[.asn]?.custom, false)
+        XCTAssertNil(defaults.string(forKey: GeoDatabases.key(.asn)))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dbs.folder.path).filter { $0.hasPrefix("asn-") }, [])
+    }
+
+    func testMissingChosenFileFallsBackToTheBundledOne() throws {
+        let (dir, geo, defaults, cleanup) = try geoSetup()
+        defer { cleanup() }
+        defaults.set("city-gone.mmdb", forKey: GeoDatabases.key(.city))
+        let dbs = GeoDatabases(directory: dir, geo: geo, defaults: defaults)
+        XCTAssertEqual(dbs.info[.city]?.custom, false)
+        XCTAssertNotNil(dbs.lastError)
+        XCTAssertTrue(geo.available)
+    }
+
+    func testDownloadLatestUnpacksAndSwitches() async throws {
+        let (dir, geo, defaults, cleanup) = try geoSetup()
+        defer { cleanup() }
+        var asked: [URL] = []
+        let dbs = GeoDatabases(directory: dir, geo: geo, defaults: defaults, download: { url in
+            asked.append(url)
+            guard asked.count == 2 else { throw URLError(.fileDoesNotExist) }   // this month's file is not out yet
+            let raw = FileManager.default.temporaryDirectory.appendingPathComponent("rat-dl-\(UUID()).mmdb")
+            try Self.asnFixture(64502, "Downloaded").write(to: raw)
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/gzip"); p.arguments = ["-f", raw.path]
+            try p.run(); p.waitUntilExit()
+            return URL(fileURLWithPath: raw.path + ".gz")
+        })
+        await dbs.downloadLatest(.asn)
+        XCTAssertNil(dbs.lastError)
+        XCTAssertEqual(geo.network("8.8.8.8")?.number, 64502)
+        XCTAssertEqual(asked.count, 2)
+        XCTAssertTrue(asked[0].absoluteString.hasPrefix("https://download.db-ip.com/free/dbip-asn-lite-"))
+        let now = ISO8601DateFormatter().date(from: "2026-01-15T00:00:00Z")!
+        XCTAssertEqual(GeoDatabases.dbipURLs(.city, now: now).map(\.lastPathComponent), ["dbip-city-lite-2026-01.mmdb.gz", "dbip-city-lite-2025-12.mmdb.gz"])
+        XCTAssertTrue(dbs.isStale(.init(custom: true, fileName: "x", type: "t", built: now), now: now.addingTimeInterval(100 * 86_400)))
+        XCTAssertFalse(dbs.isStale(.init(custom: true, fileName: "x", type: "t", built: now), now: now.addingTimeInterval(10 * 86_400)))
     }
 }

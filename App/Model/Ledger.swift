@@ -98,6 +98,8 @@ final class Ledger: ObservableObject {
     let rules: RulesModel
     let enforcer: Enforcer
     let geo = GeoService()
+    /// The database files the user chose in Settings > GeoIP (or the bundled ones).
+    let geoDatabases: GeoDatabases
     private(set) lazy var alerts: AlertCenter = {
         let center = AlertCenter(rules: rules) { [unowned self] alert, verdict in
             refreshEnforcement()
@@ -135,6 +137,7 @@ final class Ledger: ObservableObject {
         store = StateStore.standard(base: directory)
         #endif
         rules = RulesModel(directory: store.directory)
+        geoDatabases = GeoDatabases(directory: store.directory, geo: geo)
         enforcer = Enforcer(supportDirectory: store.directory, helperInstalled: helperInstalled,
                             statusPath: helperInstalled == nil ? nil : store.directory.appendingPathComponent("enforcer-status.json").path,
                             proxiedPath: helperInstalled == nil ? nil : store.directory.appendingPathComponent("proxied.json").path)
