@@ -13,6 +13,9 @@ A network monitor and application firewall for macOS, modelled on Little Snitch.
 
 - **Network Monitor** (toolbar: view options, traffic chart, inspector, as in Little Snitch): per-app list with activity sparklines, session totals, traffic chart (5m / 1h / 1d / 1w), inspector (path, code-signing ID, servers, locations), summary of top processes, domains and countries.
 - **Offline world map:** server IPs are resolved on-device from a bundled DB-IP Lite database (`Contents/Resources/Vendor`). Arcs and city pins appear immediately, no lookups, no network.
+- **Who runs the network:** each server shows its network owner (`AS13335 Cloudflare, Inc.`, offline, DB-IP ASN Lite), plus *Top Networks* in the Summary.
+- **Your own GeoIP files** (Settings > GeoIP): pick a newer DB-IP file or a MaxMind GeoLite2/GeoIP2 City or ASN file, or download the latest DB-IP Lite. Files are validated and loaded without a restart.
+- **Readable connections:** the usual service of a port (`TCP 443 · HTTPS`, `UDP 443 · QUIC`, `5223 · APN`), the process behind each connection (*via Google Chrome Helper (pid 812)*), the services in the macOS row by name (mDNSResponder, nsurlsessiond, … marked when they work for other apps), and *via VPN (Windscribe)* or *via System HTTPS Proxy* when a connection takes that path.
 - **Connection alerts:** **Silent Allow** is the default, so Rat never nags on first launch. Switch to **Alert Mode** for a floating panel on unknown connections: pick the scope (*This App (Any Server)* by default, domain, exact host, port) and the lifetime (once, until quit, forever), then Allow or Deny. An app with a process-wide Allow or Deny never raises an alert, and pending alerts for it vanish.
 - **Rules window** (⇧⌘R): sidebar of Rules / Unapproved / Profiles / Rule Groups / Known Networks / Invalid Rules and a table with Active, Process, Description and Status. Rules matched on app, team ID, signing ID, domain, host, IP, port range and protocol; the most specific rule wins and deny beats allow on a tie. Rule groups, profiles (Home / Work / Public Wi-Fi), **automatic profile switching** per network, **unapproved rules** with a review queue, JSON **import / export**.
 - **Local proxies and SSH tunnels unmasked:** a connection through `127.0.0.1:<port>` (an `ssh -D` SOCKS tunnel, an HTTP or SOCKS proxy) shows its real destination, read from the client's proxy request on lo0 by the helper (or from `curl -x … https://host` style command lines without it), with the hop: *via ssh proxy (127.0.0.1:1080 → your server)*. The map draws This Mac → proxy server → destination. A denied app cannot leave through a local proxy or forward: its loopback connections to other programs are cut too.
@@ -26,7 +29,7 @@ A network monitor and application firewall for macOS, modelled on Little Snitch.
 
 ## Install
 
-Download `Rat-v1.1.0-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
+Download `Rat-v1.2.0-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
 
 ## Build
 
@@ -45,8 +48,8 @@ Snapshot tests compare rendered SwiftUI views with goldens in `AppTests/Snapshot
 | Path | Contents |
 |---|---|
 | `RatFilter/Sources/RatFilterCore` | Rules, profiles, groups, network triggers, engine, import/export. Pure Swift. |
-| `RatFilter/Sources/RatMonitor` | `libproc` connection sampler, `nettop` traffic sampler, root-snapshot parser. |
-| `RatFilter/Sources/RatGeo` | MaxMind DB (`.mmdb`) reader and time-zone locator. |
+| `RatFilter/Sources/RatMonitor` | `libproc` connection sampler, `nettop` traffic sampler, root-snapshot parser, port names, VPN and system-proxy detection. |
+| `RatFilter/Sources/RatGeo` | MaxMind DB (`.mmdb`) reader (City and ASN, hardened for user-chosen files) and time-zone locator. |
 | `RatFilter/Sources/RatFilterExtension` | `NEFilterDataProvider` from the first prototype. Dormant: it needs the Network Extension entitlement. |
 | `App/` | SwiftUI app: monitor, rules window, alert panel, menu bar, pf enforcer. |
 | `App/Resources/rat-pf-helper.sh` | The helper that runs as root (`apply` / `snapshot`). Validates every address it reads. |
@@ -62,4 +65,4 @@ Static reverse-engineering of the installed Little Snitch (with [REA](https://gi
 
 ## Credits and license
 
-MIT, see [LICENSE](LICENSE). IP geolocation data by [DB-IP.com](https://db-ip.com), Lite database, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+MIT, see [LICENSE](LICENSE). IP geolocation and network data by [DB-IP.com](https://db-ip.com), IP to City Lite and IP to ASN Lite databases, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
