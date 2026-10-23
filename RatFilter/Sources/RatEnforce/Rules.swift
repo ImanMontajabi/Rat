@@ -46,16 +46,18 @@ public enum Address {
 }
 
 public enum PFRules {
-    /// The anchor's ruleset. Blocks by address (the server list Rat learned) and by local port (every socket of a
-    /// denied app, so new servers, IPv6 fallbacks and QUIC are cut at once). Loopback is never touched.
+    /// The anchor's ruleset. Blocks by address (rules that deny a server for everyone) and by local port (every
+    /// socket of a denied app). Outgoing TCP gets an immediate RST and outgoing UDP an ICMP unreachable, so the
+    /// app gives up at once instead of retransmitting; incoming packets are dropped. Loopback is never touched.
     public static func render(ports: [Int], addresses: [String]) -> String {
         var out = "table <rat_blocked> persist {\(addresses.sorted().joined(separator: " "))}\n"
         out += "block drop out quick from any to <rat_blocked> no state\n"
         out += "block drop in quick from <rat_blocked> to any no state\n"
         let list = ports.sorted().map(String.init).joined(separator: " ")
         if !ports.isEmpty {
-            out += "block drop out quick on ! lo0 proto { tcp udp } from any port { \(list) } to any no state\n"
-            out += "block drop in quick on ! lo0 proto { tcp udp } from any to any port { \(list) } no state\n"
+            out += "block return-rst out quick on ! lo0 proto tcp from any port { \(list) } to any\n"
+            out += "block return-icmp out quick on ! lo0 proto udp from any port { \(list) } to any\n"
+            out += "block drop in quick on ! lo0 proto { tcp udp } from any to any port { \(list) }\n"
         }
         return out
     }

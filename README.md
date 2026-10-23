@@ -25,7 +25,7 @@ A network monitor and application firewall for macOS, modelled on Little Snitch.
 
 ## Install
 
-Download `Rat-v1.0.2-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
+Download `Rat-v1.0.3-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
 
 ## Build
 

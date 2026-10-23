@@ -1,4 +1,5 @@
 import XCTest
+import MapKit
 import RatFilterCore
 @testable import Rat
 
@@ -256,5 +257,16 @@ final class Release102Tests: XCTestCase {
         ]
         ledger.rules.ruleSet.silentVerdict = .allow
         XCTAssertEqual(ledger.deniedAppPaths, ["/Applications/Google Chrome.app"])
+    }
+}
+
+final class Release103Tests: XCTestCase {
+    func testLonePinNeverZoomsBelowRegionalView() {
+        let r = MapPane.region(fitting: [CLLocationCoordinate2D(latitude: 35.7, longitude: 51.4)])
+        XCTAssertGreaterThanOrEqual(r.span.latitudeDelta, 15)
+        XCTAssertGreaterThanOrEqual(r.span.longitudeDelta, 15)
+        let two = MapPane.region(fitting: [CLLocationCoordinate2D(latitude: 35.7, longitude: 51.4), CLLocationCoordinate2D(latitude: 52.5, longitude: 13.4)])
+        XCTAssertGreaterThan(two.span.longitudeDelta, 15)
+        XCTAssertGreaterThanOrEqual(MapPane.region(fitting: []).span.latitudeDelta, 15)
     }
 }

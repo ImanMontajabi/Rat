@@ -116,7 +116,7 @@ final class Ledger: ObservableObject {
     private var lastTick = Date()
     private var startedAt = Date()
 
-    init(directory: URL? = nil) {
+    init(directory: URL? = nil, helperInstalled: Bool? = nil) {
         #if DEBUG
         // Demo mode never reads or writes the real data folder.
         let demoDir = ProcessInfo.processInfo.environment["RAT_DEMO_MAP"] != nil ? FileManager.default.temporaryDirectory.appendingPathComponent("rat-demo-\(UUID())") : nil
@@ -125,7 +125,7 @@ final class Ledger: ObservableObject {
         store = StateStore.standard(base: directory)
         #endif
         rules = RulesModel(directory: store.directory)
-        enforcer = Enforcer(supportDirectory: store.directory)
+        enforcer = Enforcer(supportDirectory: store.directory, helperInstalled: helperInstalled, autoApply: helperInstalled == nil ? nil : helperInstalled)
         myLocation = GeoService.localPoint()
         let saved = store.load()
         for a in saved.apps where !a.id.hasPrefix("pid ") {
@@ -339,7 +339,11 @@ final class Ledger: ObservableObject {
     /// Every address that should be blocked right now: remembered denied connections that the rules still deny.
     var wantedBlocklist: Set<String> {
         var out = Set<String>()
+        // With the enforcer running, an app that is denied outright is blocked by its own ports; its servers are
+        // not blocked for everyone (that would break the same site in an app that is allowed).
+        let byPort = enforcer.helperInstalled && enforcer.autoApply && !enforcer.helperOutdated ? deniedAppPaths : []
         for (appID, entries) in denied {
+            if byPort.contains(table[appID]?.identity.ruleKey ?? appID) { continue }
             let sig = table[appID].map { signing(for: $0.identity) } ?? (nil, nil)
             let key = table[appID]?.identity.ruleKey ?? appID
             for e in entries.values {

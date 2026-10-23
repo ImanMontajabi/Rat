@@ -4,7 +4,22 @@ import MapKit
 struct MapPane: View {
     @EnvironmentObject var ledger: Ledger
     let selection: String?
-    @State private var position: MapCameraPosition = .automatic
+    @State private var position: MapCameraPosition = .region(MapPane.region(fitting: []))
+
+    /// The visible region: every pin with some margin, never tighter than a regional view (15 degrees), so a lone
+    /// "This Mac" pin does not zoom into streets or open water.
+    static func region(fitting coords: [CLLocationCoordinate2D]) -> MKCoordinateRegion {
+        guard let first = coords.first else {
+            return MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 30, longitude: 10), span: MKCoordinateSpan(latitudeDelta: 100, longitudeDelta: 160))
+        }
+        var minLat = first.latitude, maxLat = first.latitude, minLon = first.longitude, maxLon = first.longitude
+        for c in coords { minLat = min(minLat, c.latitude); maxLat = max(maxLat, c.latitude); minLon = min(minLon, c.longitude); maxLon = max(maxLon, c.longitude) }
+        let lat = min(max((maxLat - minLat) * 1.5, 15), 150), lon = min(max((maxLon - minLon) * 1.5, 15), 340)
+        return MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2),
+                                  span: MKCoordinateSpan(latitudeDelta: lat, longitudeDelta: lon))
+    }
+
+    private var fitted: [CLLocationCoordinate2D] { nodes.map(\.point.coordinate) + (ledger.myLocation.map { [$0.coordinate] } ?? []) }
 
     private struct Arc: Identifiable { let id: String; let coords: [CLLocationCoordinate2D]; let highlighted: Bool }
     private struct Node: Identifiable { let id: String; let point: GeoPoint; let highlighted: Bool }
@@ -41,6 +56,10 @@ struct MapPane: View {
                     }
                 }
             }
+            .onChange(of: fitted.map { "\($0.latitude),\($0.longitude)" }) { _, _ in
+                withAnimation { position = .region(Self.region(fitting: fitted)) }
+            }
+            .onAppear { position = .region(Self.region(fitting: fitted)) }
             .mapStyle(.standard(elevation: .realistic, emphasis: .muted, pointsOfInterest: .excludingAll))
             .mapControls { MapZoomStepper() }
 

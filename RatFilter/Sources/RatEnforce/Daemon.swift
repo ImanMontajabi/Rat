@@ -32,8 +32,10 @@ public final class EnforcerDaemon {
         public var anchor = "com.apple/rat"
         /// How often the process list is checked while a denied app is running (new processes are caught within this).
         public var interval: TimeInterval = 0.003
+        /// Cached socket descriptors are trusted this long before every socket is read again.
+        public var refreshInterval: TimeInterval = 0.25
         /// How often the sockets of denied apps are re-read.
-        public var scanInterval: TimeInterval = 0.05
+        public var scanInterval: TimeInterval = 0.005
         public var idleInterval: TimeInterval = 0.25
         /// A process that just appeared is re-read on every pass for this long: it opens its first sockets right away.
         public var youngWindow: TimeInterval = 0.6
@@ -51,6 +53,8 @@ public final class EnforcerDaemon {
     private var verdictCache: [pid_t: Bool] = [:]
     private var lastScan = Date.distantPast
     private var deniedPIDs = Set<pid_t>()
+    private var fdCache: [pid_t: [Int32: ObservedConnection]] = [:]
+    private var lastRefresh = Date.distantPast
     private var young: [pid_t: Date] = [:]
     private var firstSeen: [pid_t: Date] = [:]
     public private(set) var lastTickDuration: TimeInterval = 0
@@ -142,15 +146,26 @@ public final class EnforcerDaemon {
         let scan = full ? deniedPIDs : Set(young.keys)
         guard !scan.isEmpty else { return true }
 
+        // Reading a socket is the expensive call, so only descriptors not seen before are read, except every
+        // `refreshInterval` when all are. Ports of a socket never change once it is bound.
+        let refresh = now.timeIntervalSince(lastRefresh) >= settings.refreshInterval
+        if refresh { lastRefresh = now; fdCache.removeAll() }
+        fdCache = fdCache.filter { deniedPIDs.contains($0.key) }
         var ports = Set<Int>()
-        var remotes = Set<String>()
         for pid in scan {
-            for c in ConnectionSampler.connections(of: pid) {
-                if c.tcpState == "LISTEN" || c.localPort == 0 { continue }
-                ports.insert(c.localPort)
-                if c.isOutbound, Address.isPublic(c.remoteAddress) { remotes.insert(c.remoteAddress) }
+            var known = fdCache[pid] ?? [:]
+            let fds = ConnectionSampler.socketFDs(of: pid)
+            let path = known.isEmpty ? ConnectionSampler.path(of: pid) : (known.values.first?.processPath ?? "")
+            for fd in fds where known[fd] == nil {
+                guard let c = ConnectionSampler.connection(pid: pid, fd: fd, processPath: path) else { continue }
+                if c.localPort != 0 { known[fd] = c }   // not yet bound: look again next pass
+                else { continue }
             }
+            known = known.filter { fds.contains($0.key) }
+            fdCache[pid] = known
+            for c in known.values where c.tcpState != "LISTEN" { ports.insert(c.localPort) }
         }
+        let remotes = Set<String>()
         settle(now: now, live: ports, remotes: remotes)
         return true
     }

@@ -43,43 +43,43 @@ public enum ConnectionSampler {
         return proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : "pid \(pid)"
     }
 
-    public static func connections(of pid: pid_t) -> [ObservedConnection] {
+    /// Socket descriptors of a process (empty if it cannot be inspected).
+    public static func socketFDs(of pid: pid_t) -> [Int32] {
         let listBytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
         guard listBytes > 0 else { return [] }
         var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(listBytes) / MemoryLayout<proc_fdinfo>.stride + 8)
         let got = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds, Int32(fds.count * MemoryLayout<proc_fdinfo>.stride))
         guard got > 0 else { return [] }
-        let count = Int(got) / MemoryLayout<proc_fdinfo>.stride
+        return fds.prefix(Int(got) / MemoryLayout<proc_fdinfo>.stride).filter { $0.proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) }.map(\.proc_fd)
+    }
 
-        var out: [ObservedConnection] = []
-        var processPath: String?
-        for fd in fds.prefix(count) where fd.proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) {
-            var info = socket_fdinfo()
-            let r = proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDSOCKETINFO, &info, Int32(MemoryLayout<socket_fdinfo>.size))
-            guard r == Int32(MemoryLayout<socket_fdinfo>.size) else { continue }
-            let kind = Int(info.psi.soi_kind)
-            let proto: ObservedConnection.Proto
-            let ini: in_sockinfo
-            var state: String?
-            switch kind {
-            case SOCKINFO_TCP:
-                proto = .tcp
-                ini = info.psi.soi_proto.pri_tcp.tcpsi_ini
-                state = tcpStateName(info.psi.soi_proto.pri_tcp.tcpsi_state)
-            case SOCKINFO_IN where info.psi.soi_protocol == IPPROTO_UDP:
-                proto = .udp
-                ini = info.psi.soi_proto.pri_in
-            default:
-                continue
-            }
-            let fport = Int(UInt16(truncatingIfNeeded: ini.insi_fport).bigEndian)
-            let lport = Int(UInt16(truncatingIfNeeded: ini.insi_lport).bigEndian)
-            if processPath == nil { processPath = path(of: pid) }
-            out.append(ObservedConnection(pid: pid, processPath: processPath!, proto: proto,
-                                          remoteAddress: foreignAddress(ini), remotePort: fport,
-                                          localPort: lport, tcpState: state))
+    public static func connections(of pid: pid_t) -> [ObservedConnection] {
+        let path = path(of: pid)
+        return socketFDs(of: pid).compactMap { connection(pid: pid, fd: $0, processPath: path) }
+    }
+
+    /// One TCP or UDP socket, or nil for other kinds.
+    public static func connection(pid: pid_t, fd: Int32, processPath: String) -> ObservedConnection? {
+        var info = socket_fdinfo()
+        let r = proc_pidfdinfo(pid, fd, PROC_PIDFDSOCKETINFO, &info, Int32(MemoryLayout<socket_fdinfo>.size))
+        guard r == Int32(MemoryLayout<socket_fdinfo>.size) else { return nil }
+        let proto: ObservedConnection.Proto
+        let ini: in_sockinfo
+        var state: String?
+        switch Int(info.psi.soi_kind) {
+        case SOCKINFO_TCP:
+            proto = .tcp
+            ini = info.psi.soi_proto.pri_tcp.tcpsi_ini
+            state = tcpStateName(info.psi.soi_proto.pri_tcp.tcpsi_state)
+        case SOCKINFO_IN where info.psi.soi_protocol == IPPROTO_UDP:
+            proto = .udp
+            ini = info.psi.soi_proto.pri_in
+        default:
+            return nil
         }
-        return out
+        return ObservedConnection(pid: pid, processPath: processPath, proto: proto,
+                                  remoteAddress: foreignAddress(ini), remotePort: Int(UInt16(truncatingIfNeeded: ini.insi_fport).bigEndian),
+                                  localPort: Int(UInt16(truncatingIfNeeded: ini.insi_lport).bigEndian), tcpState: state)
     }
 
     private static func foreignAddress(_ ini: in_sockinfo) -> String {

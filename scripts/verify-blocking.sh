@@ -51,6 +51,15 @@ for u in $URLS; do
 done
 echo "  $((TOTAL - LEAKS))/$TOTAL requests blocked"
 
+# An allowed app must not suffer: python3 (another path) talks to the same sites while /usr/bin/curl is denied.
+echo "== other app, same sites, must work while curl is denied"
+for u in $URLS; do
+  r=$(/usr/bin/python3 -c 'import sys,urllib.request as r,urllib.error as e
+try: print(r.urlopen(sys.argv[1], timeout=6).status)
+except e.HTTPError as x: print(x.code)' "$u" 2>/dev/null)
+  case "$r" in [1-5][0-9][0-9]) echo "  ok $u -> $r";; *) echo "  COLLATERAL $u -> ${r:-failed}"; FAIL=1;; esac
+done
+
 # Phase 2: servers Rat has already seen are in the address table, so nothing may get through, deterministically.
 echo "== phase 2, servers known (address layer): zero bytes required"
 PIN=""

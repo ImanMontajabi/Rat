@@ -32,8 +32,9 @@ final class RatEnforceTests: XCTestCase {
     func testRulesBlockPortsBothWaysAndSpareLoopback() {
         let r = PFRules.render(ports: [51000, 50000], addresses: ["203.0.113.5", "2001:db8::1"])
         XCTAssertTrue(r.contains("table <rat_blocked> persist {2001:db8::1 203.0.113.5}"))
-        XCTAssertTrue(r.contains("block drop out quick on ! lo0 proto { tcp udp } from any port { 50000 51000 } to any no state"))
-        XCTAssertTrue(r.contains("block drop in quick on ! lo0 proto { tcp udp } from any to any port { 50000 51000 } no state"))
+        XCTAssertTrue(r.contains("block return-rst out quick on ! lo0 proto tcp from any port { 50000 51000 } to any\n"))
+        XCTAssertTrue(r.contains("block return-icmp out quick on ! lo0 proto udp from any port { 50000 51000 } to any\n"))
+        XCTAssertTrue(r.contains("block drop in quick on ! lo0 proto { tcp udp } from any to any port { 50000 51000 }\n"))
         XCTAssertFalse(PFRules.render(ports: [], addresses: []).contains("port"))
     }
 

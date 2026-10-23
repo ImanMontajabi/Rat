@@ -52,7 +52,7 @@ final class ServicesTests: XCTestCase {
     }
 
     func testDeniedAppEntersWantedBlocklist() {
-        let ledger = Ledger(directory: tempDir())
+        let ledger = Ledger(directory: tempDir(), helperInstalled: false)
         ledger.installDemoData()
         let chrome = ledger.apps.first { $0.identity.name == "Google Chrome" }!
         XCTAssertTrue(ledger.wantedBlocklist.isEmpty)
@@ -61,6 +61,16 @@ final class ServicesTests: XCTestCase {
         XCTAssertEqual(ledger.blockedAddresses(for: chrome.id), chrome.remotes.count)
         ledger.setPolicy(nil, for: chrome.id)
         XCTAssertTrue(ledger.wantedBlocklist.isEmpty, "removing the rule shrinks the blocklist")
+    }
+
+    /// With the enforcer running, a denied app is cut by its ports and its servers stay reachable for other apps.
+    func testDeniedAppDoesNotBlockItsServersGloballyWithEnforcer() {
+        let ledger = Ledger(directory: tempDir(), helperInstalled: true)
+        ledger.installDemoData()
+        let chrome = ledger.apps.first { $0.identity.name == "Google Chrome" }!
+        ledger.setPolicy(.deny, for: chrome.id)
+        XCTAssertTrue(ledger.deniedAppPaths.contains(chrome.identity.ruleKey))
+        XCTAssertTrue(ledger.wantedBlocklist.isEmpty)
     }
 
     func testAlertCenterDedupesAndAnswers() {
