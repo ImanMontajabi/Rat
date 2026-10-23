@@ -41,19 +41,23 @@ final class ServicesTests: XCTestCase {
         let dir = tempDir()
         // A blocklist left by an earlier version is removed on start.
         try? "1.1.1.1\n8.8.8.8\n".write(to: dir.appendingPathComponent("blocklist.txt"), atomically: true, encoding: .utf8)
-        let e = Enforcer(supportDirectory: dir, helperInstalled: false, autoApply: true)
+        let e = Enforcer(supportDirectory: dir, helperInstalled: false, statusPath: dir.appendingPathComponent("status.json").path)
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("blocklist.txt").path))
         e.syncApps(["/Applications/Foo.app"]); e.syncPorts([50000])
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("denied-apps.txt").path), "nothing is written without the helper")
         XCTAssertNil(e.systemSnapshotText())
         // With the helper present and auto-apply on, the daemon is fed apps and ports, and never addresses.
-        let installed = Enforcer(supportDirectory: dir, helperInstalled: true, autoApply: true)
+        let installed = Enforcer(supportDirectory: dir, helperInstalled: true, statusPath: dir.appendingPathComponent("status.json").path)
         installed.syncApps(["/Applications/Foo.app", "/Applications/Bar.app"]); installed.syncPorts([50001, 50000])
         XCTAssertEqual(try? String(contentsOf: dir.appendingPathComponent("denied-apps.txt"), encoding: .utf8), "/Applications/Bar.app\n/Applications/Foo.app\n")
         XCTAssertEqual(try? String(contentsOf: dir.appendingPathComponent("denied-ports.txt"), encoding: .utf8), "50000\n50001\n")
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("blocklist.txt").path))
-        installed.autoApply = false
-        XCTAssertEqual(try? String(contentsOf: dir.appendingPathComponent("denied-apps.txt"), encoding: .utf8), "", "turning auto-apply off unblocks everything")
+        // A deleted (or edited) file is rewritten on the next pass: the enforcer compares with the file, not a cache.
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("denied-apps.txt"))
+        installed.syncApps(["/Applications/Foo.app", "/Applications/Bar.app"])
+        XCTAssertEqual(try? String(contentsOf: dir.appendingPathComponent("denied-apps.txt"), encoding: .utf8), "/Applications/Bar.app\n/Applications/Foo.app\n")
+        installed.syncApps([])
+        XCTAssertEqual(try? String(contentsOf: dir.appendingPathComponent("denied-apps.txt"), encoding: .utf8), "", "removing the deny unblocks the app")
     }
 
     /// Deny hands the app to the helper, which blocks its ports; no server address is ever written anywhere.

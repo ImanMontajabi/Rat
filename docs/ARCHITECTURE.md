@@ -265,7 +265,7 @@ Chasing the server addresses of a denied browser cannot work: Chrome and Firefox
 Deny is enforced by the root daemon `rat-enforcerd` (a `KeepAlive` LaunchDaemon installed with the helper), which owns the `com.apple/rat` anchor:
 
 1. **Grouping.** Every helper process is attributed to its app: the outermost `.app` or `.AppBundle` in the path (Chrome Helper variants, Firefox `plugin-container`, `Steam Helper`, `steam_osx`, `ipcserver`), and system XPC services such as `com.apple.WebKit.Networking` follow `responsibility_get_pid_responsible_for_pid` to Safari. Only system services borrow their client's identity, so `curl` run from a Terminal stays `curl`.
-2. **Ports of denied apps.** Rat writes the apps that are denied outright (a whole-app Deny with no allow exceptions, or Silent Deny) to `denied-apps.txt`. The daemon reads the process list every 3 ms, and the sockets of those processes every 5 ms (only descriptors it has not seen, with a full refresh every 250 ms), and blocks their local ports.
+2. **Ports of denied apps.** Rat writes the apps that are denied outright to `denied-apps.txt`: a Deny from the process list (it wins over the app's narrower allow rules, v1.0.5), or Silent Deny for apps without allow rules. The daemon reads the process list every 3 ms and **every socket of every denied process on every pass** (Chrome's ~35 processes take about 0.05 ms; descriptors are reused and a socket only gets its port when it connects, so nothing read earlier is trusted), and blocks their local ports. Entries are matched by path prefix after resolving symlinks (`/Applications/Safari.app` points into the Safari cryptex).
 3. **Ports of denied sockets.** Sockets that a rule denies (for example one domain for all apps) are written by Rat to `denied-ports.txt` every pass; the daemon trusts the file for 10 s, so a crashed Rat cannot leave ports blocked.
 
 The anchor contains only these stateless rules (no table, no `pass`):
@@ -281,3 +281,14 @@ Outgoing TCP gets an RST and UDP an ICMP unreachable, so the app gives up instea
 pf cannot match a process, so the port layer reacts to a socket after it exists. A SYN may leave before the ports are loaded (about 8 ms); the server's answer is dropped when it arrives, so a connection to a distant server fails, but one to a server a few milliseconds away can complete its handshake first. `scripts/verify-blocking.sh` (needs `sudo`) checks the mid-stream case (a denied and an allowed process downloading from the same address, plus DNS to 1.1.1.1, 8.8.8.8 and 9.9.9.9) and measures the fresh-process case. Closing that gap needs a Network Extension.
 
 The map never zooms tighter than 15 degrees (v1.0.3).
+
+### v1.0.5: why Deny did nothing in 1.0.4
+
+Two bugs, both between the UI and the daemon; the daemon itself worked (the scripted test passed).
+
+1. **A test changed the real preferences.** `Enforcer.autoApply` was persisted in `UserDefaults.standard`, and a unit test (which runs inside the app as test host) set it to false. From then on Rat wrote no deny list. The switch is gone (with the helper installed, Deny is always enforced), and all preferences go through `Preferences.store`, a separate suite under XCTest.
+2. **Old allow rules hid the Deny.** Chrome had narrow allow rules from 1.0.0 alerts (`1e100.net`, a few addresses). `deniedAppPaths` skipped any app with an allow rule, so the list showed Chrome as denied while nothing was blocked. A process-list Deny now wins; the narrow rules are kept but overridden, and the inspector says so.
+
+To make such failures visible, the daemon publishes `/var/run/com.imanmontajabi.rat.enforcer.json` (pf enabled, anchor evaluated, per denied app: processes matched and connections cut) every second; Rat shows it in Settings > Security, the inspector and the list footer, and `scripts/rat-status.sh` prints it. A watchdog re-enables pf if another tool disables it. If another ruleset keeps state for a connection that becomes denied, that state is killed (`pfctl -k local -k remote`; macOS' pfctl cannot kill by port).
+
+Verified live on the real app: Chrome (35 processes) and Steam (13) denied by Rat's own rules, Safari denied through the same rule the red X creates; the anchor held 124 stateless port rules and no table, pf held 0 states; a fresh Chrome instance failed with `net::ERR_CONNECTION_RESET` and Safari could not open example.com (and could again once allowed), while curl, python3 and DNS to 1.1.1.1, 8.8.8.8 and 9.9.9.9 kept working. The daemon uses about 14% of one core while denied apps with ~50 processes run (3 ms pass).

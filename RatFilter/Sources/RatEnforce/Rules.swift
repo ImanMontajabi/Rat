@@ -6,17 +6,33 @@ public struct DeniedApps: Equatable {
     public private(set) var paths: [String]
 
     public init(text: String) {
-        paths = text.split(whereSeparator: \.isNewline).map(String.init).filter { $0.hasPrefix("/") && !$0.contains("\0") }
+        var out: [String] = []
+        for p in text.split(whereSeparator: \.isNewline).map(String.init) where p.hasPrefix("/") && !p.contains("\0") {
+            out.append(p)
+            // "/Applications/Safari.app" is a symlink into the Safari cryptex; running processes report the real path.
+            let real = (p as NSString).resolvingSymlinksInPath
+            if real != p { out.append(real) }
+            if let r = realpath(p, nil) {
+                let s = String(cString: r); free(r)
+                if s != p && s != real { out.append(s) }
+            }
+        }
+        paths = out
     }
 
     public var isEmpty: Bool { paths.isEmpty }
 
     /// A process belongs to a denied app when its own path, or the path of the app it works for, is inside an entry.
     public func matches(path: String, responsiblePath: () -> String?) -> Bool {
-        func inside(_ p: String) -> Bool { paths.contains { p == $0 || p.hasPrefix($0 + "/") } }
-        if inside(path) { return true }
+        entry(for: path, responsiblePath: responsiblePath) != nil
+    }
+
+    /// The entry a process belongs to, if any.
+    public func entry(for path: String, responsiblePath: () -> String?) -> String? {
+        func inside(_ p: String) -> String? { paths.first { p == $0 || p.hasPrefix($0 + "/") } }
+        if let e = inside(path) { return e }
         if ProcessGrouping.actsForOthers(path), let r = responsiblePath() { return inside(r) }
-        return false
+        return nil
     }
 }
 

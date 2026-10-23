@@ -2,6 +2,7 @@ import SwiftUI
 import CoreLocation
 import RatMonitor
 import RatFilterCore
+import RatEnforce
 import os
 
 private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "ledger")
@@ -124,7 +125,8 @@ final class Ledger: ObservableObject {
         store = StateStore.standard(base: directory)
         #endif
         rules = RulesModel(directory: store.directory)
-        enforcer = Enforcer(supportDirectory: store.directory, helperInstalled: helperInstalled, autoApply: helperInstalled == nil ? nil : helperInstalled)
+        enforcer = Enforcer(supportDirectory: store.directory, helperInstalled: helperInstalled,
+                            statusPath: helperInstalled == nil ? nil : store.directory.appendingPathComponent("enforcer-status.json").path)
         myLocation = GeoService.localPoint()
         let saved = store.load()
         for a in saved.apps where !a.id.hasPrefix("pid ") {
@@ -251,6 +253,7 @@ final class Ledger: ObservableObject {
         buckets[minute] = b
 
         var denyCount = 0, askCount = 0, listenCount = 0
+        let wholeAppDenied = deniedAppPaths
         var portsNow = Set<Int>()
         for id in table.keys {
             var e = table[id]!
@@ -274,7 +277,8 @@ final class Ledger: ObservableObject {
                                 let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), host: host == c.remoteAddress ? nil : host,
                                       address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp)
                 let matched = rules.engine.matchingRule(conn)
-                let verdict = matched?.verdict ?? rules.engine.defaultVerdict
+                // Matches what is enforced: an app denied from the process list is denied for every server.
+                let verdict = wholeAppDenied.contains(e.identity.ruleKey) ? .deny : (matched?.verdict ?? rules.engine.defaultVerdict)
                 if matched == nil, verdict != .ask, warmedUp { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
                 switch verdict {
                 case .deny:
@@ -328,16 +332,27 @@ final class Ledger: ObservableObject {
     func refreshEnforcement() {
         enforcer.syncApps(deniedAppPaths)
         enforcer.syncPorts(deniedPorts)
+        enforcer.refreshStatus()
+    }
+
+    /// What the helper is doing for one app: its processes and blocked ports, or nil if the helper sees none.
+    func enforcement(for appID: String) -> EnforcerStatus.App? {
+        enforcer.status?.deniedApps[table[appID]?.identity.ruleKey ?? appID]
     }
 
     /// Apps denied outright. The root daemon blocks every socket of their processes (helpers included), by local
-    /// port, so it does not matter which server they try next. An app with any allow rule is not blocked as a whole.
+    /// port, so it does not matter which server they try next. A Deny from the process list wins over the app's
+    /// narrower allow rules; under Silent Deny an app with any allow rule is not blocked as a whole.
     var deniedAppPaths: Set<String> {
         var candidates = Set(table.values.map(\.identity.ruleKey))
         for r in rules.ruleSet.rules { if let p = r.processPath { candidates.insert(p) } }
         let active = rules.ruleSet.activeProfileID
         var out = Set<String>()
         for key in candidates where key.hasPrefix("/") && key != Bundle.main.bundlePath {
+            // The red X in the process list denies the whole app, whatever narrower allow rules it has
+            // (alerts in 1.0.0 created many: one domain, one address). Otherwise the list shows Deny and nothing
+            // is blocked.
+            if rules.policy(for: key) == .deny { out.insert(key); continue }
             let mine = rules.rules(for: key).filter { $0.enabled && ($0.profileID == nil || $0.profileID == active) }
             if mine.contains(where: { $0.verdict == .allow }) { continue }
             let probe = Connection(process: ProcessIdentity(path: key), address: "203.0.113.9", port: 443, proto: .tcp)

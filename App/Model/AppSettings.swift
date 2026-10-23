@@ -2,6 +2,21 @@ import SwiftUI
 import UserNotifications
 import RatFilterCore
 
+/// Where preferences live. Under XCTest this is a throw-away suite, so a test can never change the user's real
+/// settings: in 1.0.4 a test that switched enforcement off wrote into the real defaults and Deny stopped working.
+enum Preferences {
+    static let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        || ProcessInfo.processInfo.environment["XCTestSessionIdentifier"] != nil
+        || NSClassFromString("XCTestCase") != nil
+
+    static let store: UserDefaults = {
+        guard isTesting else { return UserDefaults.standard }
+        let name = "com.imanmontajabi.Rat.tests"
+        UserDefaults.standard.removePersistentDomain(forName: name)   // every test run starts from defaults
+        return UserDefaults(suiteName: name) ?? UserDefaults.standard
+    }()
+}
+
 /// User-facing preferences (the Settings window), stored in UserDefaults.
 @MainActor
 final class AppSettings: ObservableObject {
@@ -12,7 +27,7 @@ final class AppSettings: ObservableObject {
     enum GroupBy: String, CaseIterable, Identifiable { case process = "Process", domain = "Domain", country = "Country"; var id: String { rawValue } }
     enum SortKey: String, CaseIterable, Identifiable { case recent = "Recent Activity", name = "Name", traffic = "Traffic"; var id: String { rawValue } }
 
-    private let defaults = UserDefaults.standard
+    private let defaults = Preferences.store
 
     // Menu bar (Control Center)
     @Published var showInMenuBar: Bool { didSet { defaults.set(showInMenuBar, forKey: "showInMenuBar") } }
@@ -51,27 +66,27 @@ final class AppSettings: ObservableObject {
     @Published var approveRulesAutomatically: Bool { didSet { defaults.set(approveRulesAutomatically, forKey: "approveRulesAutomatically") } }
 
     private init() {
-        func bool(_ k: String, _ d: Bool) -> Bool { UserDefaults.standard.object(forKey: k) as? Bool ?? d }
+        func bool(_ k: String, _ d: Bool) -> Bool { Preferences.store.object(forKey: k) as? Bool ?? d }
         showInMenuBar = bool("showInMenuBar", true)
         numericRates = bool("numericRates", true)
         silentModeSymbol = bool("silentModeSymbol", true)
-        trafficRateUnit = RateUnit(rawValue: UserDefaults.standard.string(forKey: "trafficRateUnit") ?? "") ?? .bytes
+        trafficRateUnit = RateUnit(rawValue: Preferences.store.string(forKey: "trafficRateUnit") ?? "") ?? .bytes
         confirmWithReturn = bool("confirmWithReturn", true)
-        alertTimeout = UserDefaults.standard.integer(forKey: "alertTimeout")
+        alertTimeout = Preferences.store.integer(forKey: "alertTimeout")
         alertTimeoutAllows = bool("alertTimeoutAllows", false)
         includeLocalNetwork = bool("includeLocalNetwork", false)
         includeNetworkExtensions = bool("includeNetworkExtensions", false)
         includeOtherUsers = bool("includeOtherUsers", false)
-        groupBy = GroupBy(rawValue: UserDefaults.standard.string(forKey: "groupBy") ?? "") ?? .process
-        sortKey = SortKey(rawValue: UserDefaults.standard.string(forKey: "sortKey") ?? "") ?? .recent
+        groupBy = GroupBy(rawValue: Preferences.store.string(forKey: "groupBy") ?? "") ?? .process
+        sortKey = SortKey(rawValue: Preferences.store.string(forKey: "sortKey") ?? "") ?? .recent
         floatOnTop = bool("floatOnTop", false)
-        additionalLocalRanges = UserDefaults.standard.string(forKey: "additionalLocalRanges") ?? ""
+        additionalLocalRanges = Preferences.store.string(forKey: "additionalLocalRanges") ?? ""
         notifySilentConnections = bool("notifySilentConnections", true)
         notifyProfileSwitch = bool("notifyProfileSwitch", true)
         notifyAlertTimeout = bool("notifyAlertTimeout", true)
         autoCheckUpdates = bool("autoCheckUpdates", true)
         showPreReleases = bool("showPreReleases", false)
-        lastUpdateCheck = UserDefaults.standard.object(forKey: "lastUpdateCheck") as? Date
+        lastUpdateCheck = Preferences.store.object(forKey: "lastUpdateCheck") as? Date
         lastUpdateCheckFailed = bool("lastUpdateCheckFailed", false)
         approveRulesAutomatically = bool("approveRulesAutomatically", true)
         LocalRanges.shared.set(additionalLocalRanges)
