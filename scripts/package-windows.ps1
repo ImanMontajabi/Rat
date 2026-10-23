@@ -7,6 +7,7 @@ try {
     New-Item -ItemType Directory -Force -Path 'dist\Rat' | Out-Null
     Copy-Item -LiteralPath 'target\release\rat-desktop.exe' -Destination 'dist\Rat\Rat.exe'
     Copy-Item -LiteralPath 'LICENSE' -Destination 'dist\Rat\LICENSE.txt'
+    Copy-Item -LiteralPath 'crates\rat-desktop\UNICODE-LICENSE.txt' -Destination 'dist\Rat\UNICODE-LICENSE.txt'
     Copy-Item -LiteralPath 'docs\RUST_REWRITE.md' -Destination 'dist\Rat\README.md'
     if ($IncludeGeoIP) {
         if (!(Test-Path -LiteralPath 'geoip\dbip-city-lite.mmdb')) { throw 'Run scripts/fetch-geoip.ps1 first' }

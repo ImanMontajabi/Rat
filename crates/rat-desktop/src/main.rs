@@ -1,5 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod glass;
+mod layout;
+mod motion;
+mod origin;
+mod tiles;
 mod visuals;
 use gpui_kit::base::Disableable;
 use gpui_kit::component::button::ButtonVariants;
@@ -19,18 +24,18 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
-const BG: u32 = 0x0c111b;
-const PANEL: u32 = 0x121a27;
-const BORDER: u32 = 0x253247;
+const BG: u32 = 0x202020;
+const PANEL: u32 = 0x292929;
+const BORDER: u32 = 0x3b3b3b;
 const TEXT: u32 = 0xe5edf7;
-const MUTED: u32 = 0x9cacc2;
-const ACCENT: u32 = 0x5ee2b5;
+const MUTED: u32 = 0xababaf;
 
 enum Command {
     Set(BlockRule, bool),
     Refresh,
 }
 enum Event {
+    Origin(Option<origin::Origin>),
     Sample(Result<Snapshot, String>),
     Rules(Result<Vec<BlockRule>, String>),
     Changed(Result<(), String>),
@@ -40,6 +45,7 @@ fn worker() -> (mpsc::Sender<Command>, mpsc::Receiver<Event>) {
     let (events, outgoing) = mpsc::channel();
     let samples = events.clone();
     std::thread::spawn(move || {
+        let _ = samples.send(Event::Origin(origin::locate()));
         let mut monitor = rat_platform::Monitor::default();
         loop {
             if samples
@@ -93,10 +99,33 @@ struct Rat {
     snapshot: Snapshot,
     rules: Vec<BlockRule>,
     selected: Option<Connection>,
+    selected_app: Option<String>,
+    expanded_apps: BTreeSet<String>,
+    app_history: std::collections::BTreeMap<String, VecDeque<f64>>,
+    show_chart: bool,
+    glass_inspector: bool,
+    glass: glass::Glass,
+    sort_order: motion::SortOrder,
+    animate_rows: bool,
+    row_motions: std::collections::BTreeMap<String, motion::RowMotion>,
+    recent_connections: std::collections::BTreeMap<String, u64>,
+    sample_sequence: u64,
+    collapsed_sections: BTreeSet<&'static str>,
+    browse_locations: bool,
+    settings_tab: usize,
+    map_zoom: f32,
+    origin: Option<origin::Origin>,
+    show_routes: bool,
+    map_input: std::rc::Rc<std::cell::RefCell<visuals::MapInput>>,
+    map_needs_fit: bool,
+    tiles: tiles::TileStore,
+    map_pan: (f32, f32),
     selected_destination: Option<LocationKey>,
     hovered_destination: Option<LocationKey>,
     search: Entity<InputState>,
     address: Entity<InputState>,
+    rules_search: Entity<InputState>,
+    rules_query: String,
     query: String,
     paused: bool,
     blocked_only: bool,
@@ -119,9 +148,18 @@ impl Rat {
         let subscription = cx.subscribe_in(&search, window, |this, state, event, _, cx| {
             if matches!(event, InputEvent::Change) {
                 this.query = state.read(cx).value().to_string();
+                this.map_needs_fit = true;
                 cx.notify();
             }
         });
+        let rules_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search IP rules…"));
+        let rule_subscription =
+            cx.subscribe_in(&rules_search, window, |this, state, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.rules_query = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+            });
         let (commands, events) = worker();
         let poll = cx.spawn(async |view, cx| {
             loop {
@@ -144,10 +182,33 @@ impl Rat {
             snapshot: Snapshot::default(),
             rules: vec![],
             selected: None,
+            selected_app: None,
+            expanded_apps: BTreeSet::new(),
+            app_history: Default::default(),
+            show_chart: true,
+            glass_inspector: true,
+            glass: glass::Glass::new(),
+            sort_order: Default::default(),
+            animate_rows: true,
+            row_motions: Default::default(),
+            recent_connections: Default::default(),
+            sample_sequence: 0,
+            collapsed_sections: Default::default(),
+            browse_locations: false,
+            settings_tab: 0,
+            map_zoom: 1.6,
+            origin: None,
+            show_routes: true,
+            map_input: Default::default(),
+            map_needs_fit: true,
+            tiles: tiles::TileStore::new(),
+            map_pan: (0., 0.),
             selected_destination: None,
             hovered_destination: None,
             search,
             address,
+            rules_search,
+            rules_query: String::new(),
             query: String::new(),
             paused: false,
             blocked_only: false,
@@ -159,13 +220,17 @@ impl Rat {
             history: VecDeque::new(),
             commands,
             events,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![subscription, rule_subscription],
             _poll: poll,
         }
     }
     fn poll(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
+                Event::Origin(origin) => {
+                    self.origin = origin;
+                    self.map_needs_fit = true;
+                }
                 Event::Sample(Ok(snapshot)) if !self.paused => {
                     self.history
                         .push_back((snapshot.received_per_sec, snapshot.sent_per_sec));
@@ -179,6 +244,31 @@ impl Rat {
                             .find(|c| c.key() == selected.key())
                     {
                         self.selected = Some(current.clone());
+                    }
+                    self.sample_sequence += 1;
+                    let old_connections = self
+                        .snapshot
+                        .connections
+                        .iter()
+                        .map(Connection::key)
+                        .collect::<BTreeSet<_>>();
+                    for c in &snapshot.connections {
+                        if !old_connections.contains(&c.key()) {
+                            self.recent_connections
+                                .insert(c.process.clone(), self.sample_sequence);
+                        }
+                    }
+                    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+                    for c in &snapshot.connections {
+                        *counts.entry(c.process.clone()).or_default() += 1;
+                    }
+                    self.app_history.retain(|name, _| counts.contains_key(name));
+                    for (name, count) in counts {
+                        let history = self.app_history.entry(name).or_default();
+                        history.push_back(count as f64);
+                        if history.len() > 60 {
+                            history.pop_front();
+                        }
                     }
                     self.snapshot = snapshot;
                     self.updated = Some(Instant::now());
@@ -206,6 +296,34 @@ impl Rat {
                 _ => {}
             }
         }
+        if self.map_needs_fit && !self.snapshot.connections.is_empty() {
+            self.fit_map_to_destinations();
+        }
+    }
+    fn fit_map_to_destinations(&mut self) {
+        let bounds = self.map_input.borrow().bounds;
+        if let Some(bounds) = bounds {
+            let camera = rat_core::map::Camera {
+                width: f32::from(bounds.size.width),
+                height: f32::from(bounds.size.height),
+                zoom: self.map_zoom,
+                pan: self.map_pan,
+            };
+            let mut points = self
+                .visible_destinations()
+                .iter()
+                .map(|d| (d.location.longitude, d.location.latitude))
+                .collect::<Vec<_>>();
+            if self.show_routes
+                && let Some(origin) = &self.origin
+            {
+                points.push((origin.longitude, origin.latitude));
+            }
+            let fitted = camera.fitted(&points);
+            self.map_zoom = fitted.zoom;
+            self.map_pan = fitted.pan;
+            self.map_needs_fit = false;
+        }
     }
     fn blocked(&self, connection: &Connection) -> bool {
         self.rules.iter().any(|r| r.ip == connection.remote.ip())
@@ -232,69 +350,45 @@ impl Rat {
     }
     fn sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
-            .w(px(192.))
+            .w(px(250.))
             .h_full()
-            .flex()
-            .flex_col()
             .flex_shrink_0()
             .p_4()
+            .flex()
+            .flex_col()
             .gap_3()
             .bg(rgb(PANEL))
             .border_r_1()
             .border_color(rgb(BORDER))
-            .child(div().text_3xl().font_weight(FontWeight::BOLD).child("rat"))
             .child(
                 div()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child("YOUR NETWORK, REVEALED"),
-            )
-            .child(div().h(px(24.)))
-            .child(self.nav(Page::Monitor, "Network monitor", cx))
-            .child(self.nav(Page::Rules, "IP block rules", cx))
-            .child(self.nav(Page::About, "Settings & about", cx))
-            .child(div().flex_1())
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(ACCENT))
-                    .child("Windows Firewall"),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child("IP blocks apply to every app. Rules persist after Rat closes."),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .mt_3()
-                    .text_color(rgb(MUTED))
-                    .child("RUST + GPUI KIT  /  0.1"),
-            )
-    }
-    fn metric(label: &'static str, value: String, note: &'static str) -> impl IntoElement {
-        div()
-            .flex_1()
-            .p_4()
-            .rounded_lg()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .child(div().text_xs().text_color(rgb(MUTED)).child(label))
-            .child(
-                div()
-                    .text_2xl()
+                    .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .mt_2()
-                    .child(value),
+                    .child("Rules"),
             )
-            .child(div().text_xs().mt_1().text_color(rgb(MUTED)).child(note))
+            .child(div().mt_3().text_xs().text_color(rgb(MUTED)).child("RULES"))
+            .child(self.nav(Page::Rules, "All IP Rules", cx))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(format!("{} active Windows rules", self.rules.len())),
+            )
+            .child(div().mt_4().text_xs().text_color(rgb(MUTED)).child("SCOPE"))
+            .child(div().child("All applications"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child("Remote IP blocks across all Windows profiles"),
+            )
+            .child(div().flex_1())
+            .child(self.nav(Page::Monitor, "Network Monitor", cx))
+            .child(self.nav(Page::About, "Settings", cx))
     }
     fn inspector(&self, cx: &Context<Self>) -> AnyElement {
         let mut pane = div()
-            .w(px(270.))
+            .w(px(310.))
             .flex_shrink_0()
             .h_full()
             .id("inspector-scroll")
@@ -303,7 +397,11 @@ impl Rat {
             .flex()
             .flex_col()
             .gap_3()
-            .bg(rgb(PANEL))
+            .bg(if self.glass_inspector {
+                rgba(0x172132b8)
+            } else {
+                rgba(0x292929ff)
+            })
             .border_l_1()
             .border_color(rgb(BORDER))
             .child(
@@ -318,78 +416,106 @@ impl Rat {
         if let Some(c) = &self.selected {
             let live = self.snapshot.connections.iter().any(|v| v.key() == c.key());
             pane = pane
-                .child(div().text_lg().child(c.process.clone()))
-                .child(detail("PROCESS ID", c.pid.to_string()))
-                .child(detail("REMOTE ADDRESS", c.remote.ip().to_string()))
-                .child(detail(
-                    "REMOTE PORT / PROTOCOL",
-                    format!("{} / TCP", c.remote.port()),
-                ))
-                .child(detail("LOCAL ENDPOINT", c.local.to_string()))
-                .child(detail(
-                    "STATE",
-                    if live {
-                        c.state.clone()
-                    } else {
-                        "No longer in latest sample".into()
-                    },
-                ))
-                .child(detail(
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(c.process.clone()),
+                )
+                .child(
+                    Button::new("inspector-summary")
+                        .ghost()
+                        .label("Back to summary")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.selected = None;
+                            this.selected_destination = None;
+                            this.browse_locations = false;
+                            cx.notify();
+                        })),
+                )
+                .child(self.section("connection-process", "Process", cx))
+                .children(
+                    (!self.collapsed_sections.contains("connection-process")).then(|| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .py_2()
+                            .child(detail("APPLICATION", c.process.clone()))
+                            .child(detail("PROCESS ID", c.pid.to_string()))
+                    }),
+                )
+                .child(self.section("connection-details", "Connection Details", cx))
+                .children(
+                    (!self.collapsed_sections.contains("connection-details")).then(|| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .py_2()
+                            .child(detail("REMOTE ADDRESS", c.remote.ip().to_string()))
+                            .child(detail(
+                                "REMOTE PORT / PROTOCOL",
+                                format!("{} / TCP", c.remote.port()),
+                            ))
+                            .child(detail("LOCAL ENDPOINT", c.local.to_string()))
+                            .child(detail(
+                                "STATE",
+                                if live {
+                                    c.state.clone()
+                                } else {
+                                    "No longer in latest sample".into()
+                                },
+                            ))
+                    }),
+                )
+                .child(self.section("connection-geography", "Geographic Information", cx));
+            if !self.collapsed_sections.contains("connection-geography") {
+                pane = pane.child(detail(
                     "LOCATION",
                     c.location
                         .as_ref()
                         .map(|l| l.label.clone())
                         .unwrap_or("Unresolved / private address".into()),
-                ))
-                .children(c.location.as_ref().map(|location| {
+                ));
+                if let Some(location) = &c.location {
                     let key = location.key();
-                    Button::new("view-location")
-                        .label("All apps at this location")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.selected = None;
-                            this.selected_destination = Some(key);
-                            cx.notify();
-                        }))
-                }))
-                .child(
-                    Button::new("filter-app")
-                        .label("Show this app on map")
-                        .on_click(cx.listener({
-                            let process = c.process.clone();
-                            move |this, _, window, cx| {
-                                this.search.update(cx, |state, cx| {
-                                    state.set_value(process.clone(), window, cx)
-                                });
-                                this.query = process.clone();
+                    pane = pane.child(
+                        Button::new("view-location")
+                            .ghost()
+                            .label("All apps at this location")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.selected = None;
+                                this.selected_destination = Some(key);
                                 cx.notify();
-                            }
-                        })),
-                )
-                .child(div().h(px(8.)))
-                .child(div().text_sm().child("Control this IP address"));
-            for direction in [Direction::Outbound, Direction::Inbound] {
-                let rule = BlockRule {
-                    ip: c.remote.ip(),
-                    direction,
-                };
-                let blocked = self.rules.contains(&rule);
-                pane = pane.child(
-                    Button::new(direction.label())
-                        .label(format!(
-                            "{} {}",
-                            if blocked { "Unblock" } else { "Block" },
-                            direction.label().to_lowercase()
-                        ))
-                        .disabled(self.busy || self.rule_error.is_some())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.change(rule.clone(), !blocked);
-                            cx.notify();
-                        })),
-                );
+                            })),
+                    );
+                }
             }
-            pane = pane.child(div().text_xs().text_color(rgb(MUTED)).child(
-                "Blocking affects all apps using this IP. Administrator rights are required.",
-            ));
+            pane = pane.child(self.section("connection-firewall", "IP Rules", cx));
+            if !self.collapsed_sections.contains("connection-firewall") {
+                for direction in [Direction::Outbound, Direction::Inbound] {
+                    let rule = BlockRule {
+                        ip: c.remote.ip(),
+                        direction,
+                    };
+                    let blocked = self.rules.contains(&rule);
+                    pane = pane.child(
+                        Button::new(direction.label())
+                            .label(format!(
+                                "{} {}",
+                                if blocked { "Unblock" } else { "Block" },
+                                direction.label().to_lowercase()
+                            ))
+                            .disabled(self.busy || self.rule_error.is_some())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.change(rule.clone(), !blocked);
+                                cx.notify();
+                            })),
+                    );
+                }
+                pane=pane.child(div().text_xs().text_color(rgb(MUTED)).child("IP blocks affect every application using this address. Administrator rights are required."));
+            }
         } else {
             let groups = self.visible_destinations();
             if let Some(key) = self.selected_destination {
@@ -430,7 +556,11 @@ impl Rat {
                         let mut app = div()
                             .p_3()
                             .rounded_lg()
-                            .bg(rgb(BG))
+                            .bg(if self.glass_inspector {
+                                rgba(0x17213270)
+                            } else {
+                                rgba(0x202020ff)
+                            })
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -522,295 +652,17 @@ impl Rat {
                 .snapshot
                 .connections
                 .iter()
-                .filter(|c| c.matches(&self.query) && (!self.blocked_only || self.blocked(c)))
+                .filter(|c| {
+                    c.matches(&self.query)
+                        && self
+                            .selected_app
+                            .as_ref()
+                            .is_none_or(|app| &c.process == app)
+                        && (!self.blocked_only || self.blocked(c))
+                })
                 .cloned()
                 .collect::<Vec<_>>(),
         )
-    }
-    fn monitor(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
-        let groups = self.visible_destinations();
-        let selected_location = self
-            .selected
-            .as_ref()
-            .and_then(|c| c.location.as_ref().map(|l| l.key()))
-            .or(self.selected_destination);
-        let focus = self.hovered_destination.or(selected_location);
-        let map_hint = groups
-            .iter()
-            .find(|d| Some(d.location.key()) == focus)
-            .map(Destination::summary)
-            .unwrap_or_else(|| {
-                "Hover a point for location details · Click to explore connected apps".into()
-            });
-        let viewport = window.viewport_size();
-        let map_width = (f32::from(viewport.width) - 192. - 270. - 40. - 12. - 210.).max(100.);
-        let atlas_height = (map_width / 2. + 100.)
-            .clamp(250., (f32::from(viewport.height) - 550.).clamp(250., 500.));
-        let apps: BTreeSet<_> = self.snapshot.connections.iter().map(|c| c.pid).collect();
-        let visible: Vec<_> = self
-            .snapshot
-            .connections
-            .iter()
-            .filter(|c| c.matches(&self.query) && (!self.blocked_only || self.blocked(c)))
-            .cloned()
-            .collect();
-        let count = visible.len();
-        let row_data = std::rc::Rc::new(visible);
-        let selected = self.selected.as_ref().map(Connection::key);
-        let rules = self.rules.clone();
-        let rows = uniform_list(
-            "connections",
-            count,
-            cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
-                range
-                    .map(|index| {
-                        let c = row_data[index].clone();
-                        let is_selected = selected.as_ref() == Some(&c.key());
-                        let blocked = rules.iter().any(|r| r.ip == c.remote.ip());
-                        Button::new(("connection", index))
-                            .ghost()
-                            .accessibility_label(format!(
-                                "Inspect {}, PID {}, remote {}",
-                                c.process, c.pid, c.remote
-                            ))
-                            .w_full()
-                            .h(px(46.))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .bg(rgb(if is_selected { 0x21364a } else { PANEL }))
-                            .cursor_pointer()
-                            .child(div().w(px(150.)).overflow_hidden().child(c.process.clone()))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .text_color(rgb(MUTED))
-                                    .child(c.remote.to_string()),
-                            )
-                            .child(
-                                div().w(px(160.)).text_xs().overflow_hidden().child(
-                                    c.location
-                                        .as_ref()
-                                        .map(|l| l.label.clone())
-                                        .unwrap_or("Unresolved / private".into()),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .w(px(90.))
-                                    .text_xs()
-                                    .text_color(rgb(if blocked { 0xff9b9b } else { ACCENT }))
-                                    .child(if blocked {
-                                        "IP rule set"
-                                    } else {
-                                        "No IP block"
-                                    }),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.selected = Some(c.clone());
-                                this.selected_destination = None;
-                                cx.notify();
-                            }))
-                    })
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .flex_1()
-        .min_h(px(80.));
-        let center = div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .p_5()
-            .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(Self::metric(
-                        "TCP CONNECTIONS",
-                        self.snapshot.connections.len().to_string(),
-                        "Current system snapshot",
-                    ))
-                    .child(Self::metric(
-                        "ACTIVE PROCESSES",
-                        apps.len().to_string(),
-                        "With remote TCP sockets",
-                    ))
-                    .child(Self::metric(
-                        "DOWNLOAD",
-                        rate(self.snapshot.received_per_sec),
-                        "All network interfaces",
-                    ))
-                    .child(Self::metric(
-                        "UPLOAD",
-                        rate(self.snapshot.sent_per_sec),
-                        "All network interfaces",
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .h(px(atlas_height))
-                    .flex_shrink_0()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .rounded_lg()
-                            .overflow_hidden()
-                            .bg(rgb(PANEL))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .px_4()
-                                    .pt_3()
-                                    .pb_2()
-                                    .flex()
-                                    .justify_between()
-                                    .child(div().text_sm().child("Destination atlas"))
-                                    .child(
-                                        Button::new("browse-locations")
-                                            .ghost()
-                                            .label(format!("{} locations", groups.len()))
-                                            .tooltip("Browse locations and connected apps")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.selected = None;
-                                                this.selected_destination = None;
-                                                cx.notify();
-                                            })),
-                                    ),
-                            )
-                            .child(visuals::map(
-                                groups,
-                                selected_location,
-                                self.hovered_destination,
-                                cx.listener(|this, key: &LocationKey, _, cx| {
-                                    this.selected_destination = Some(*key);
-                                    this.selected = None;
-                                    cx.notify();
-                                }),
-                                cx.listener(|this, key: &Option<LocationKey>, _, cx| {
-                                    if this.hovered_destination != *key {
-                                        this.hovered_destination = *key;
-                                        cx.notify();
-                                    }
-                                }),
-                            ))
-                            .child(
-                                div()
-                                    .px_4()
-                                    .pt_2()
-                                    .min_h(px(34.))
-                                    .text_xs()
-                                    .text_color(rgb(ACCENT))
-                                    .child(map_hint),
-                            )
-                            .child(div().px_4().pb_3().text_xs().text_color(rgb(MUTED)).child(
-                                if self.snapshot.geo_available {
-                                    "Offline GeoIP by DB-IP · approximate locations · CC BY 4.0"
-                                } else {
-                                    "Run scripts/fetch-geoip.ps1 or set RAT_GEOIP_DB, then restart"
-                                },
-                            )),
-                    )
-                    .child(
-                        div()
-                            .w(px(210.))
-                            .p_4()
-                            .rounded_lg()
-                            .bg(rgb(PANEL))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(div().text_sm().child("Network activity"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child("Last 60 samples · system-wide"),
-                            )
-                            .child(visuals::chart(self.history.iter().copied().collect()))
-                            .child(div().text_xs().text_color(rgb(ACCENT)).child("Download"))
-                            .child(div().text_xs().text_color(rgb(0x79a9ff)).child("Upload")),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().flex_1().child(Input::new(&self.search)))
-                    .child(
-                        Button::new("clear-search")
-                            .ghost()
-                            .label("Clear search")
-                            .disabled(self.query.is_empty())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.search
-                                    .update(cx, |state, cx| state.set_value("", window, cx));
-                                this.query.clear();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("filter")
-                            .label(if self.blocked_only {
-                                "Show all"
-                            } else {
-                                "IP blocks only"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.blocked_only = !this.blocked_only;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .px_3()
-                    .gap_3()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child(
-                        div()
-                            .w(px(150.))
-                            .child(format!("PROCESS · {count} sockets")),
-                    )
-                    .child(div().flex_1().child("REMOTE ENDPOINT"))
-                    .child(div().w(px(160.)).child("CITY / COUNTRY"))
-                    .child(div().w(px(90.)).child("RAT RULE")),
-            )
-            .child(if count == 0 {
-                div()
-                    .flex_1()
-                    .p_4()
-                    .text_color(rgb(MUTED))
-                    .child("No connections match. Waiting for the next sample…")
-                    .into_any_element()
-            } else {
-                rows.into_any_element()
-            });
-        div()
-            .flex()
-            .flex_1()
-            .min_h_0()
-            .child(center)
-            .child(self.inspector(cx))
-            .into_any_element()
     }
     fn rules_page(&self, cx: &Context<Self>) -> AnyElement {
         let mut list = div()
@@ -820,21 +672,64 @@ impl Rat {
             .flex()
             .flex_col()
             .gap_2();
-        for (index, rule) in self.rules.iter().enumerate() {
+        list = list.child(
+            div()
+                .flex()
+                .px_3()
+                .py_2()
+                .gap_4()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child(div().w(px(64.)).child("ACTIVE"))
+                .child(div().w(px(150.)).child("PROCESS"))
+                .child(div().flex_1().child("DESCRIPTION"))
+                .child(div().w(px(130.)).child("STATUS")),
+        );
+        for (index, rule) in self
+            .rules
+            .iter()
+            .filter(|rule| {
+                format!("{} {}", rule.ip, rule.direction.label())
+                    .to_lowercase()
+                    .contains(&self.rules_query.to_lowercase())
+            })
+            .enumerate()
+        {
             let rule = rule.clone();
             list = list.child(
                 div()
+                    .h(px(64.))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .gap_4()
-                    .p_4()
-                    .bg(rgb(PANEL))
+                    .px_3()
                     .rounded_lg()
-                    .child(div().flex_1().child(rule.ip.to_string()))
-                    .child(div().w(px(120.)).child(rule.direction.label()))
-                    .child(div().text_color(rgb(0xff9b9b)).child("Block"))
+                    .bg(rgb(if index % 2 == 0 { 0x2c2c2c } else { BG }))
+                    .child(div().w(px(64.)).text_color(rgb(0x73bf8a)).child("Active"))
+                    .child(div().w(px(150.)).child("Any Process"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(format!(
+                                "Block {} to {}",
+                                rule.direction.label().to_lowercase(),
+                                rule.ip
+                            ))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child("All profiles · All protocols and ports"),
+                            ),
+                    )
                     .child(
                         Button::new(("remove", index))
+                            .ghost()
+                            .w(px(130.))
                             .label("Remove rule")
                             .disabled(self.busy)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -850,7 +745,7 @@ impl Rat {
             ));
         }
         div().p_6().flex_1().min_h_0().flex().flex_col().gap_4()
-            .child(div().text_2xl().child("IP block rules"))
+            .child(div().flex().items_center().gap_4().child(div().flex_1().text_2xl().child(format!("All Rules  ·  {}",self.rules.len()))).child(div().w(px(320.)).child(Input::new(&self.rules_search))))
             .child(div().text_color(rgb(MUTED)).child("Persistent Windows Defender Firewall rules. Each rule covers every app and every port for its IP address."))
             .child(div().flex().gap_3().items_center().child(div().w(px(340.)).child(Input::new(&self.address)))
                 .children([Direction::Outbound, Direction::Inbound].map(|direction| {
@@ -883,24 +778,16 @@ impl Rat {
 }
 impl Render for Rat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = if self.paused {
-            "PAUSED"
-        } else if self.monitor_error.is_some() {
-            "MONITOR ERROR"
-        } else if self
-            .updated
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(5))
-        {
-            "LIVE"
-        } else if self.updated.is_some() {
-            "STALE"
-        } else {
-            "CONNECTING"
-        };
-        let page = match self.page {
-            Page::Monitor => self.monitor(window, cx),
-            Page::Rules => self.rules_page(cx),
-            Page::About => self.about(),
+        let content = match self.page {
+            Page::Monitor => self.reference_monitor(window, cx),
+            Page::Rules => div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .child(self.sidebar(cx))
+                .child(self.rules_page(cx))
+                .into_any_element(),
+            Page::About => self.settings_view(cx),
         };
         let feedback = self
             .monitor_error
@@ -912,62 +799,24 @@ impl Render for Rat {
         div()
             .size_full()
             .flex()
+            .flex_col()
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
             .text_sm()
             .font_family("Segoe UI")
-            .child(self.sidebar(cx))
+            .child(content)
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
+                    .h(px(28.))
+                    .flex_shrink_0()
+                    .px_3()
                     .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .h(px(70.))
-                            .flex_shrink_0()
-                            .px_5()
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .flex()
-                            .items_center()
-                            .gap_4()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_xl()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Network observatory"),
-                            )
-                            .child(div().text_xs().text_color(rgb(ACCENT)).child(status))
-                            .child(
-                                Button::new("pause")
-                                    .label(if self.paused {
-                                        "Resume monitor"
-                                    } else {
-                                        "Pause monitor"
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.paused = !this.paused;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(page)
-                    .child(
-                        div()
-                            .min_h(px(42.))
-                            .flex_shrink_0()
-                            .px_5()
-                            .py_2()
-                            .border_t_1()
-                            .border_color(rgb(BORDER))
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(feedback),
-                    ),
+                    .items_center()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(feedback),
             )
     }
 }
@@ -987,7 +836,7 @@ fn rate(bytes: f64) -> String {
     }
 }
 fn main() {
-    application().with_assets(assets::Assets).run(|cx| {
+    application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         cx.on_window_closed(|cx, _| {

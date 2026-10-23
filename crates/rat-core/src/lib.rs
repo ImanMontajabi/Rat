@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+pub mod map;
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::{IpAddr, SocketAddr},
@@ -130,6 +131,15 @@ pub struct MapViewport {
     pub height: f32,
 }
 impl MapViewport {
+    pub fn camera(mut self, zoom: f32, pan: (f32, f32)) -> Self {
+        let old_width = self.width;
+        let old_height = self.height;
+        self.width *= zoom;
+        self.height *= zoom;
+        self.x += (old_width - self.width) / 2. + pan.0 * old_width;
+        self.y += (old_height - self.height) / 2. + pan.1 * old_height;
+        self
+    }
     pub fn fit(width: f32, height: f32) -> Self {
         let world_width = width.max(0.).min(height.max(0.) * 2.);
         let world_height = world_width / 2.;
