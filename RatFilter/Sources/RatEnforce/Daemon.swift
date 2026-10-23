@@ -22,9 +22,47 @@ public func runCommand(_ executable: String, _ arguments: [String], _ stdin: Str
     return p.terminationStatus
 }
 
-/// Root daemon. Polls every ~50 ms; for every process that belongs to a denied app it reads all sockets and loads
-/// their local ports into the pf anchor, so connections to servers Rat has never seen (CDN rotation, IPv6 fallback,
-/// QUIC migration) are cut as well. Only ports are ever blocked, never remote addresses.
+/// Runs a command and returns its standard output (for `pfctl -s …`). Injectable like `CommandRunner`.
+public typealias CommandCapture = (_ executable: String, _ arguments: [String]) -> String
+
+public func captureCommand(_ executable: String, _ arguments: [String]) -> String {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: executable)
+    p.arguments = arguments
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = out
+    do { try p.run() } catch { return "" }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return String(decoding: data, as: UTF8.self)
+}
+
+/// What the daemon is doing, published for Rat (which runs as the user) in a world-readable file.
+public struct EnforcerStatus: Codable, Equatable {
+    public struct App: Codable, Equatable {
+        public var processes: Int
+        public var ports: Int
+        public init(processes: Int, ports: Int) { self.processes = processes; self.ports = ports }
+    }
+    public var pid: Int32
+    public var updated: Date
+    public var pfEnabled: Bool
+    /// The main ruleset evaluates `com.apple/*` anchors, so the rules in ours are seen at all.
+    public var anchorHooked: Bool
+    public var deniedApps: [String: App]
+    public var blockedPorts: Int
+
+    public init(pid: Int32, updated: Date, pfEnabled: Bool, anchorHooked: Bool, deniedApps: [String: App], blockedPorts: Int) {
+        self.pid = pid; self.updated = updated; self.pfEnabled = pfEnabled; self.anchorHooked = anchorHooked
+        self.deniedApps = deniedApps; self.blockedPorts = blockedPorts
+    }
+}
+
+/// Root daemon. For every process that belongs to a denied app it reads all sockets on every pass (every 3 ms while
+/// such a process runs) and loads their local ports into the pf anchor, so connections to servers Rat has never
+/// seen (CDN rotation, IPv6 fallback, QUIC migration) are cut as well. Only ports are ever blocked, never remote
+/// addresses.
 public final class EnforcerDaemon {
     public struct Settings {
         public var deniedFile: String
@@ -32,63 +70,57 @@ public final class EnforcerDaemon {
         public var portsFile: String?
         /// Older versions kept a list of server addresses here. It is deleted: addresses are never blocked.
         public var legacyBlocklistFile: String?
+        /// Where the daemon publishes `EnforcerStatus` as JSON; optional.
+        public var statusFile: String?
         public var anchor = "com.apple/rat"
-        /// How often the process list is checked while a denied app is running (new processes are caught within this).
+        /// Pass interval while a denied app has processes. Every pass reads the process list and every socket of
+        /// every denied process (reading Chrome's ~30 processes takes about 0.05 ms).
         public var interval: TimeInterval = 0.003
-        /// Cached socket descriptors are trusted this long before every socket is read again.
-        public var refreshInterval: TimeInterval = 0.25
-        /// How often the sockets of denied apps are re-read.
-        public var scanInterval: TimeInterval = 0.005
         public var idleInterval: TimeInterval = 0.25
-        /// A process that just appeared is re-read on every pass for this long: it opens its first sockets right away.
-        public var youngWindow: TimeInterval = 0.6
         /// Ports stay blocked this long after their socket disappears, to cover packets still in flight.
         public var portHold: TimeInterval = 5
-        public init(deniedFile: String, portsFile: String? = nil, legacyBlocklistFile: String? = nil) {
-            self.deniedFile = deniedFile; self.portsFile = portsFile; self.legacyBlocklistFile = legacyBlocklistFile
+        /// How often pf is checked to still be enabled (another tool may disable it).
+        public var watchdogInterval: TimeInterval = 5
+        public init(deniedFile: String, portsFile: String? = nil, legacyBlocklistFile: String? = nil, statusFile: String? = nil) {
+            self.deniedFile = deniedFile; self.portsFile = portsFile; self.legacyBlocklistFile = legacyBlocklistFile; self.statusFile = statusFile
         }
     }
 
     private let settings: Settings
     private let run: CommandRunner
+    private let capture: CommandCapture
+    private let background = DispatchQueue(label: "rat.enforcer.background", qos: .utility)
     private var denied = DeniedApps(text: "")
     private var deniedStamp: Date?
     private var filePorts: [Int] = []
     private var portsStamp: Date?
-    private var verdictCache: [pid_t: Bool] = [:]
-    private var lastScan = Date.distantPast
-    private var deniedPIDs = Set<pid_t>()
-    private var fdCache: [pid_t: [Int32: ObservedConnection]] = [:]
-    private var lastRefresh = Date.distantPast
-    private var young: [pid_t: Date] = [:]
+    /// pid -> the denied entry it belongs to ("" = not denied).
+    private var verdictCache: [pid_t: String] = [:]
     private var firstSeen: [pid_t: Date] = [:]
+    private var lastCleanup = Date.distantPast
+    public private(set) var deniedPIDs = Set<pid_t>()
+    private var portsByApp: [String: (processes: Int, ports: Set<Int>)] = [:]
     public private(set) var lastTickDuration: TimeInterval = 0
     private var portSeen: [Int: Date] = [:]
-    private var loadedPorts: [Int] = []
+    public private(set) var loadedPorts: [Int] = []
     private var loaded = false
     private var token: String?
+    private var lastWatchdog = Date.distantPast
+    private var lastStatus = Date.distantPast
+    private var pfEnabled = false
+    private var anchorHooked = false
     public private(set) var reloads = 0
-    private let trace = ProcessInfo.processInfo.environment["RAT_TRACE"] != nil
+    private let trace = !(ProcessInfo.processInfo.environment["RAT_TRACE"] ?? "").isEmpty
     private var traceTicks = 0, traceTime = 0.0
 
-    public init(settings: Settings, run: @escaping CommandRunner = runCommand) {
+    public init(settings: Settings, run: @escaping CommandRunner = runCommand, capture: @escaping CommandCapture = captureCommand) {
         self.settings = settings
         self.run = run
+        self.capture = capture
     }
 
     public func start() {
-        // Take a reference on pf so it is enabled while we run (and put back when we stop).
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/sbin/pfctl")
-        p.arguments = ["-E"]
-        let err = Pipe()
-        p.standardError = err
-        p.standardOutput = FileHandle.nullDevice
-        if (try? p.run()) != nil {
-            p.waitUntilExit()
-            let text = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            token = text.components(separatedBy: "Token : ").dropFirst().first?.split(whereSeparator: \.isNewline).first.map(String.init)
-        }
+        enablePF()
         // Start clean: whatever an earlier version left in the anchor (address tables, old ports) is removed.
         _ = run("/sbin/pfctl", ["-a", settings.anchor, "-F", "all"], nil)
         if let legacy = settings.legacyBlocklistFile { try? FileManager.default.removeItem(atPath: legacy) }
@@ -99,6 +131,15 @@ public final class EnforcerDaemon {
     public func stop() {
         _ = run("/sbin/pfctl", ["-a", settings.anchor, "-F", "all"], nil)
         if let token { _ = run("/sbin/pfctl", ["-X", token], nil) }
+        if let f = settings.statusFile { try? FileManager.default.removeItem(atPath: f) }
+    }
+
+    /// Takes a reference on pf so it is enabled while we run (released in `stop`).
+    private func enablePF() {
+        let text = capture("/sbin/pfctl", ["-E"])
+        if let t = text.components(separatedBy: "Token : ").dropFirst().first?.split(whereSeparator: \.isNewline).first {
+            token = String(t)
+        }
     }
 
     public func loop() {
@@ -110,68 +151,61 @@ public final class EnforcerDaemon {
     }
 
     /// One pass. Returns whether a denied app currently has processes (so the loop should run fast).
-    ///
-    /// The process list is cheap and read every pass; the sockets of denied processes are re-read every
-    /// `scanInterval`, or at once when a new process of a denied app appears.
     @discardableResult
     public func tick(now: Date = Date()) -> Bool {
         let began = Date()
         defer { lastTickDuration = Date().timeIntervalSince(began) }
-        refreshFiles()
+        refreshFiles(now: now)
+        watchdog(now: now)
+        defer { publishStatus(now: now) }
         guard !denied.isEmpty else {
-            verdictCache.removeAll(); deniedPIDs.removeAll()
+            verdictCache.removeAll(); deniedPIDs.removeAll(); portsByApp.removeAll()
             settle(now: now, live: [])
             return false
         }
         let pids = ConnectionSampler.allPIDs()
-        var current = Set<pid_t>()
-        var newlyDenied: [pid_t] = []
         for pid in pids {
-            current.insert(pid)
             let known = verdictCache[pid]
             if known == nil { firstSeen[pid] = now }
             // A new process is first a fork of its parent (a shell) and only then the program: until it is a second
             // old, its path is read again every pass so the exec is noticed.
-            guard known == nil || (known == false && now.timeIntervalSince(firstSeen[pid] ?? now) < 1) else { continue }
+            guard known == nil || (known == "" && now.timeIntervalSince(firstSeen[pid] ?? now) < 1) else { continue }
             let path = ConnectionSampler.path(of: pid)
-            let verdict = !path.hasPrefix("pid ") && denied.matches(path: path, responsiblePath: { ProcessGrouping.responsiblePath(of: pid) })
-            verdictCache[pid] = verdict
-            if verdict {
-                newlyDenied.append(pid)
-                if trace { FileHandle.standardError.write(Data("new denied pid \(pid) \(Int(Date().timeIntervalSince1970 * 1000) % 100000)\n".utf8)) }
+            let entry = path.hasPrefix("pid ") ? nil : denied.entry(for: path, responsiblePath: { ProcessGrouping.responsiblePath(of: pid) })
+            verdictCache[pid] = entry ?? ""
+            if entry != nil {
+                deniedPIDs.insert(pid)
+                if trace { FileHandle.standardError.write(Data("denied pid \(pid) (\(entry!))\n".utf8)) }
             }
         }
-        verdictCache = verdictCache.filter { current.contains($0.key) }
-        firstSeen = firstSeen.filter { current.contains($0.key) }
-        deniedPIDs = Set(verdictCache.filter(\.value).keys)
-        for pid in newlyDenied { young[pid] = now }
-        young = young.filter { current.contains($0.key) && now.timeIntervalSince($0.value) < settings.youngWindow }
+        // Forgetting processes that exited is the costly part (hundreds of entries), so it runs a few times a second;
+        // reading the sockets of a process that just exited returns nothing in the meantime.
+        if now.timeIntervalSince(lastCleanup) >= 0.25 {
+            lastCleanup = now
+            let current = Set(pids)
+            verdictCache = verdictCache.filter { current.contains($0.key) }
+            firstSeen = firstSeen.filter { current.contains($0.key) }
+            deniedPIDs = deniedPIDs.filter { current.contains($0) }
+        }
+        guard !deniedPIDs.isEmpty else { portsByApp.removeAll(); settle(now: now, live: []); return false }
 
-        guard !deniedPIDs.isEmpty else { settle(now: now, live: []); return false }
-        let full = now.timeIntervalSince(lastScan) >= settings.scanInterval
-        if full { lastScan = now }
-        let scan = full ? deniedPIDs : Set(young.keys)
-        guard !scan.isEmpty else { return true }
-
-        // Reading a socket is the expensive call, so only descriptors not seen before are read, except every
-        // `refreshInterval` when all are. Ports of a socket never change once it is bound.
-        let refresh = now.timeIntervalSince(lastRefresh) >= settings.refreshInterval
-        if refresh { lastRefresh = now; fdCache.removeAll() }
-        fdCache = fdCache.filter { deniedPIDs.contains($0.key) }
+        // Every socket of every denied process, every pass: descriptors are reused and a socket gets its port only
+        // when it connects, so nothing read earlier can be trusted.
         var ports = Set<Int>()
-        for pid in scan {
-            var known = fdCache[pid] ?? [:]
-            let fds = ConnectionSampler.socketFDs(of: pid)
-            let path = known.isEmpty ? ConnectionSampler.path(of: pid) : (known.values.first?.processPath ?? "")
-            for fd in fds where known[fd] == nil {
-                guard let c = ConnectionSampler.connection(pid: pid, fd: fd, processPath: path) else { continue }
-                if c.localPort != 0 { known[fd] = c }   // not yet bound: look again next pass
-                else { continue }
+        var byApp: [String: (processes: Int, ports: Set<Int>)] = [:]
+        for pid in deniedPIDs {
+            let entry = verdictCache[pid] ?? ""
+            var app = byApp[entry] ?? (0, [])
+            app.processes += 1
+            for fd in ConnectionSampler.socketFDs(of: pid) {
+                guard let c = ConnectionSampler.connection(pid: pid, fd: fd, processPath: ""),
+                      c.localPort != 0, c.tcpState != "LISTEN" else { continue }
+                ports.insert(c.localPort)
+                app.ports.insert(c.localPort)
             }
-            known = known.filter { fds.contains($0.key) }
-            fdCache[pid] = known
-            for c in known.values where c.tcpState != "LISTEN" { ports.insert(c.localPort) }
+            byApp[entry] = app
         }
+        portsByApp = byApp
         settle(now: now, live: ports)
         return true
     }
@@ -184,7 +218,11 @@ public final class EnforcerDaemon {
         for p in ports.union(fresh ? filePorts : []) { portSeen[p] = now }
         portSeen = portSeen.filter { now.timeIntervalSince($0.value) < settings.portHold }
         let held = portSeen.keys.sorted()
-        if held != loadedPorts || !loaded { apply(ports: held) }
+        if held != loadedPorts || !loaded {
+            let added = Set(held).subtracting(loadedPorts)
+            apply(ports: held)
+            if !added.isEmpty { killStates(localPorts: added) }
+        }
     }
 
     private func apply(ports: [Int]) {
@@ -198,13 +236,65 @@ public final class EnforcerDaemon {
         reloads += 1
     }
 
-    private func refreshFiles() {
-        func stamp(_ path: String) -> Date? { (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date }
+    /// pf looks up its state table before any rule. Rat's rules create no state, but another ruleset with
+    /// `keep state` could hold one for a connection that is now denied; such a state is killed (between this Mac's
+    /// address and that server, the narrowest kill macOS' pfctl offers). Runs off the watch loop.
+    private func killStates(localPorts: Set<Int>) {
+        let capture = self.capture, run = self.run
+        background.async {
+            let pairs = PFStates.pairs(in: capture("/sbin/pfctl", ["-s", "states"]), localPorts: localPorts)
+            for (local, remote) in pairs { _ = run("/sbin/pfctl", ["-k", local, "-k", remote], nil) }
+        }
+    }
+
+    /// pf must stay enabled and our anchor must be evaluated, or the rules do nothing.
+    private func watchdog(now: Date) {
+        guard now.timeIntervalSince(lastWatchdog) >= settings.watchdogInterval else { return }
+        lastWatchdog = now
+        let info = capture("/sbin/pfctl", ["-s", "info"])
+        pfEnabled = info.contains("Status: Enabled")
+        if !pfEnabled, !info.isEmpty {
+            enablePF()
+            pfEnabled = capture("/sbin/pfctl", ["-s", "info"]).contains("Status: Enabled")
+        }
+        let main = capture("/sbin/pfctl", ["-s", "rules"])
+        anchorHooked = PFStates.hooksAnchor(main, anchor: settings.anchor)
+    }
+
+    private func publishStatus(now: Date) {
+        guard let file = settings.statusFile, now.timeIntervalSince(lastStatus) >= 1 else { return }
+        lastStatus = now
+        let status = EnforcerStatus(pid: getpid(), updated: now, pfEnabled: pfEnabled, anchorHooked: anchorHooked,
+                                    deniedApps: portsByApp.mapValues { EnforcerStatus.App(processes: $0.processes, ports: $0.ports.count) },
+                                    blockedPorts: loadedPorts.count)
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .secondsSince1970
+        guard let data = try? enc.encode(status) else { return }
+        let tmp = file + ".tmp"
+        if FileManager.default.createFile(atPath: tmp, contents: data, attributes: [.posixPermissions: 0o644]) {
+            _ = rename(tmp, file)
+        }
+    }
+
+    private var lastFileCheck = Date.distantPast
+
+    /// Re-reads the deny list and port list when they changed. Checked every 50 ms with one `stat` each
+    /// (FileManager's attribute lookup costs three system calls and showed up in profiles at a 3 ms pass rate).
+    private func refreshFiles(now: Date) {
+        guard now.timeIntervalSince(lastFileCheck) >= 0.05 else { return }
+        lastFileCheck = now
+        func stamp(_ path: String) -> Date? {
+            var st = stat()
+            guard stat(path, &st) == 0 else { return nil }
+            return Date(timeIntervalSince1970: Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9)
+        }
         let d = stamp(settings.deniedFile)
         if d != deniedStamp {
             deniedStamp = d
             denied = DeniedApps(text: (try? String(contentsOfFile: settings.deniedFile, encoding: .utf8)) ?? "")
+            // Every running process is classified again, so an app that was just denied is scanned on this pass.
             verdictCache.removeAll()
+            deniedPIDs.removeAll()
         }
         if let pf = settings.portsFile {
             let f = stamp(pf)
@@ -213,5 +303,37 @@ public final class EnforcerDaemon {
                 filePorts = PFRules.parsePorts((try? String(contentsOfFile: pf, encoding: .utf8)) ?? "")
             }
         }
+    }
+}
+
+/// Parsing of `pfctl -s states` / `-s rules` output.
+public enum PFStates {
+    /// (local address, remote address) of states whose local side uses one of `localPorts`.
+    /// Lines look like `ALL tcp 192.168.1.5:54104 -> 141.95.207.211:443 ESTABLISHED:ESTABLISHED` (IPv6: `addr[port]`).
+    public static func pairs(in text: String, localPorts: Set<Int>) -> [(String, String)] {
+        var out: [(String, String)] = []
+        var seen = Set<String>()
+        for line in text.split(whereSeparator: \.isNewline) {
+            let t = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+            guard t.count >= 5, ["tcp", "udp"].contains(t[1]), t[3] == "->" || t[3] == "<-",
+                  let local = endpoint(t[2]), let remote = endpoint(t[4]), localPorts.contains(local.port) else { continue }
+            if seen.insert(local.address + " " + remote.address).inserted { out.append((local.address, remote.address)) }
+        }
+        return out
+    }
+
+    static func endpoint(_ s: String) -> (address: String, port: Int)? {
+        if s.hasSuffix("]"), let open = s.lastIndex(of: "[") {
+            guard let port = Int(s[s.index(after: open)..<s.index(before: s.endIndex)]) else { return nil }
+            return (String(s[..<open]), port)
+        }
+        guard let colon = s.lastIndex(of: ":"), let port = Int(s[s.index(after: colon)...]) else { return nil }
+        return (String(s[..<colon]), port)
+    }
+
+    /// Whether the main ruleset evaluates the anchor (macOS ships `anchor "com.apple/*"` in /etc/pf.conf).
+    public static func hooksAnchor(_ mainRules: String, anchor: String) -> Bool {
+        let parent = anchor.split(separator: "/").first.map(String.init) ?? anchor
+        return mainRules.contains("anchor \"\(anchor)\"") || mainRules.contains("anchor \"\(parent)/*\"")
     }
 }

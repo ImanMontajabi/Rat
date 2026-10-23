@@ -99,14 +99,22 @@ struct ProcessInspector: View {
                         if !r.approved { Circle().fill(.blue).frame(width: 7, height: 7) }
                     }.font(.callout).padding(.leading, 6)
                 }
+                if ledger.rules.policy(for: app.identity.ruleKey) == .deny, appRules.contains(where: { $0.verdict == .allow }) {
+                    Text("The allow rules above are overridden while the whole app is denied.")
+                        .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
+                }
                 if ledger.rules.policy(for: app.identity.ruleKey) == .deny {
-                    if ledger.enforcer.helperInstalled && ledger.enforcer.autoApply {
-                        Text("Blocked by the firewall helper: every connection of this app and its helpers.")
-                            .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
-                    } else {
-                        Text("Not enforced yet: this needs the firewall helper (Settings > Security).")
-                            .font(.caption).foregroundStyle(.orange).padding(.leading, 6)
-                    }
+                    Group {
+                        if !ledger.enforcer.helperInstalled {
+                            Text("Not enforced: this needs the firewall helper (Settings > Security).").foregroundStyle(.orange)
+                        } else if ledger.enforcer.status == nil {
+                            Text("Not enforced: the firewall helper is not running (Settings > Security).").foregroundStyle(.orange)
+                        } else if let e = ledger.enforcement(for: app.id) {
+                            Text("Blocked by the firewall helper: \(e.processes) processes, \(e.ports) open connections cut.").foregroundStyle(.secondary)
+                        } else {
+                            Text("Blocked by the firewall helper as soon as the app runs.").foregroundStyle(.secondary)
+                        }
+                    }.font(.caption).padding(.leading, 6)
                 }
                 Button("Manage Rules…") { openWindow(id: "rules") }.padding(.leading, 6)
                 if let err = ledger.enforcer.lastError { Text(err).font(.caption).foregroundStyle(.red).padding(.leading, 6) }

@@ -1,6 +1,7 @@
 import XCTest
 import MapKit
 import RatFilterCore
+import RatEnforce
 @testable import Rat
 
 @MainActor
@@ -256,7 +257,8 @@ final class Release102Tests: XCTestCase {
             Rule(verdict: .deny, processPath: "/Applications/Steam.app", remoteDomain: "ads.example"),
         ]
         ledger.rules.ruleSet.silentVerdict = .allow
-        XCTAssertEqual(ledger.deniedAppPaths, ["/Applications/Google Chrome.app"])
+        // A whole-app Deny wins over narrower allow rules (1.0.5); a deny limited to one domain is not a whole-app deny.
+        XCTAssertEqual(ledger.deniedAppPaths, ["/Applications/Google Chrome.app", "/Applications/Firefox.app"])
     }
 }
 
@@ -268,5 +270,72 @@ final class Release103Tests: XCTestCase {
         let two = MapPane.region(fitting: [CLLocationCoordinate2D(latitude: 35.7, longitude: 51.4), CLLocationCoordinate2D(latitude: 52.5, longitude: 13.4)])
         XCTAssertGreaterThan(two.span.longitudeDelta, 15)
         XCTAssertGreaterThanOrEqual(MapPane.region(fitting: []).span.latitudeDelta, 15)
+    }
+}
+
+/// 1.0.5: a test once turned enforcement off in the user's real preferences; Deny then did nothing.
+final class Release105Tests: XCTestCase {
+    func testTestsNeverWriteTheRealPreferences() {
+        XCTAssertTrue(Preferences.isTesting)
+        XCTAssertFalse(Preferences.store === UserDefaults.standard)
+        let key = "rat-test-probe-\(UUID())"
+        Preferences.store.set(true, forKey: key)
+        XCTAssertNil(UserDefaults.standard.object(forKey: key))
+    }
+
+    @MainActor func testEnforcerStatusIsReadAndGoesStale() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-105-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("status.json").path
+        let e = Enforcer(supportDirectory: dir, helperInstalled: true, statusPath: path)
+        e.refreshStatus()
+        XCTAssertNil(e.status, "no daemon, no status")
+        let now = Date()
+        let st = EnforcerStatus(pid: 1, updated: now, pfEnabled: true, anchorHooked: true,
+                                deniedApps: ["/Applications/Google Chrome.app": .init(processes: 28, ports: 8)], blockedPorts: 8)
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .secondsSince1970
+        try enc.encode(st).write(to: URL(fileURLWithPath: path))
+        e.refreshStatus(now: now)
+        XCTAssertEqual(e.status?.deniedApps["/Applications/Google Chrome.app"]?.processes, 28)
+        e.refreshStatus(now: now.addingTimeInterval(30))
+        XCTAssertNil(e.status, "a status that is not refreshed means the daemon stopped")
+    }
+
+    /// The red X in the process list calls `setPolicy(.deny)`; that alone must hand the app to the daemon.
+    @MainActor func testDenyButtonWritesTheDenyList() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-105-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ledger = Ledger(directory: dir, helperInstalled: true)
+        ledger.installDemoData()
+        for name in ["Google Chrome", "Steam"] {
+            let app = try XCTUnwrap(ledger.apps.first { $0.identity.name == name })
+            ledger.setPolicy(.deny, for: app.id)
+        }
+        let text = try String(contentsOf: dir.appendingPathComponent("denied-apps.txt"), encoding: .utf8)
+        XCTAssertEqual(text, "/Applications/Demo/Google Chrome.app\n/Applications/Demo/Steam.app\n", "Steam's UDP allow rule does not keep it off the list")
+    }
+}
+
+extension Release105Tests {
+    /// Chrome had narrow allow rules from 1.0.0 alerts (one domain, a few addresses); Deny from the list must still
+    /// deny the whole app.
+    @MainActor func testListDenyOverridesNarrowAllowRules() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-105-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ledger = Ledger(directory: dir, helperInstalled: true)
+        let chrome = "/Applications/Google Chrome.app"
+        ledger.rules.ruleSet.rules = [
+            Rule(verdict: .allow, processPath: chrome, remoteDomain: "1e100.net", profileID: ledger.rules.ruleSet.activeProfileID),
+            Rule(verdict: .allow, processPath: chrome, remoteAddress: "2001:4860:4828:200::", profileID: ledger.rules.ruleSet.activeProfileID),
+        ]
+        XCTAssertFalse(ledger.deniedAppPaths.contains(chrome))
+        ledger.rules.setPolicy(.deny, for: chrome)
+        XCTAssertTrue(ledger.deniedAppPaths.contains(chrome))
+        XCTAssertEqual(ledger.rules.ruleSet.rules.filter { $0.verdict == .allow }.count, 2, "the narrow rules are kept, only overridden")
+        ledger.rules.setPolicy(nil, for: chrome)
+        XCTAssertFalse(ledger.deniedAppPaths.contains(chrome))
     }
 }

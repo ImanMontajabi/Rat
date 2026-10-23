@@ -211,14 +211,24 @@ struct SecuritySettings: View {
             if enf.helperInstalled {
                 if enf.helperOutdated {
                     Label("Installed, but an older version", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
-                    Text("This helper still blocks server addresses for every app, which can break DNS and other apps. The current one only blocks the ports of denied apps.")
+                    Text("This helper is from an older version: before 1.0.4 it blocked server addresses for every app (which can break DNS), and it does not report its status. Update it.")
                         .font(.callout).foregroundStyle(.secondary)
                     Button(enf.busy ? "Updating…" : "Update Helper…") { enf.installHelper() }.disabled(enf.busy)
                 } else {
                     Label("Installed: blocking is applied automatically", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
                 }
-                SettingToggle(title: "Auto-apply firewall rules", detail: "Deny takes effect immediately. Turn off and nothing is blocked.",
-                              isOn: Binding(get: { enf.autoApply }, set: { enf.autoApply = $0; ledger.refreshEnforcement() }))
+                if let st = enf.status {
+                    Label(st.pfEnabled ? "Packet filter enabled" : "Packet filter is disabled", systemImage: st.pfEnabled ? "checkmark.circle" : "xmark.octagon")
+                        .foregroundStyle(st.pfEnabled ? Color.secondary : Color.red)
+                    if !st.anchorHooked {
+                        Label("/etc/pf.conf does not load the com.apple anchors, so the rules are not evaluated", systemImage: "xmark.octagon").foregroundStyle(.red)
+                    }
+                    Label("Denied apps running: \(st.deniedApps.count), blocked connections: \(st.blockedPorts)", systemImage: "shield.checkered")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label("The enforcer daemon is not running, so nothing is blocked", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Button(enf.busy ? "Reinstalling…" : "Reinstall Helper…") { enf.installHelper() }.disabled(enf.busy)
+                }
                 Label(ledger.systemWide ? "Seeing all processes system-wide" : "Waiting for the first system snapshot…", systemImage: "eye")
                     .foregroundStyle(.secondary)
                 Button("Remove Helper…", role: .destructive) { enf.removeHelper() }.disabled(enf.busy)

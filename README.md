@@ -16,7 +16,7 @@ A network monitor and application firewall for macOS, modelled on Little Snitch.
 - **Connection alerts:** **Silent Allow** is the default, so Rat never nags on first launch. Switch to **Alert Mode** for a floating panel on unknown connections: pick the scope (*This App (Any Server)* by default, domain, exact host, port) and the lifetime (once, until quit, forever), then Allow or Deny. An app with a process-wide Allow or Deny never raises an alert, and pending alerts for it vanish.
 - **Rules window** (⇧⌘R): sidebar of Rules / Unapproved / Profiles / Rule Groups / Known Networks / Invalid Rules and a table with Active, Process, Description and Status. Rules matched on app, team ID, signing ID, domain, host, IP, port range and protocol; the most specific rule wins and deny beats allow on a tie. Rule groups, profiles (Home / Work / Public Wi-Fi), **automatic profile switching** per network, **unapproved rules** with a review queue, JSON **import / export**.
 - **Menu bar:** live up/down throughput, profile selector, mode switch, shortcuts.
-- **Firewall enforcement:** Deny is enforced by an opt-in **background helper** (Security tab): a root LaunchDaemon, `rat-enforcerd`, that blocks the local ports of every connection of a denied app and its helpers (Chrome/Firefox/Steam helpers, Safari's WebKit networking), plus a second daemon that lists *every* process's connections so Rat also sees other users' and system processes. Rat never blocks server addresses, so other apps and DNS are never affected. *Remove Helper* uninstalls both. Without the helper nothing is blocked and Rat sees only your own processes.
+- **Firewall enforcement:** Deny is enforced by an opt-in **background helper** (Security tab): a root LaunchDaemon, `rat-enforcerd`, that blocks the local ports of every connection of a denied app and its helpers (Chrome/Firefox/Steam helpers, Safari's WebKit networking), plus a second daemon that lists *every* process's connections so Rat also sees other users' and system processes. Rat never blocks server addresses, so other apps and DNS are never affected. Settings > Security shows what the helper is enforcing; `scripts/rat-status.sh` prints the same from a terminal. *Remove Helper* uninstalls both. Without the helper nothing is blocked and Rat sees only your own processes.
 - **Updates:** *Rat menu → Check for Updates…* reads GitHub Releases.
 
 ![Rules](docs/screenshots/rat-rules.jpg)
@@ -25,7 +25,7 @@ A network monitor and application firewall for macOS, modelled on Little Snitch.
 
 ## Install
 
-Download `Rat-v1.0.4-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
+Download `Rat-v1.0.5-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
 
 ## Build
 

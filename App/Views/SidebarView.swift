@@ -168,9 +168,17 @@ struct SidebarView: View {
                 Pill(kind: .down, text: formatBytes(ledger.sessionIn), label: "received")
             }
             if showChart { TrafficChart(range: range) }
-            if !(ledger.enforcer.helperInstalled && ledger.enforcer.autoApply) && !ledger.deniedAppPaths.isEmpty {
-                Label("Deny is not enforced: install the firewall helper (Settings > Security)", systemImage: "exclamationmark.shield")
-                    .font(.caption).foregroundStyle(.orange)
+            if !ledger.deniedAppPaths.isEmpty {
+                if !ledger.enforcer.helperInstalled {
+                    Label("Deny is not enforced: install the firewall helper (Settings > Security)", systemImage: "exclamationmark.shield")
+                        .font(.caption).foregroundStyle(.orange)
+                } else if ledger.enforcer.status == nil {
+                    Label("Deny is not enforced: the firewall helper is not running", systemImage: "exclamationmark.shield")
+                        .font(.caption).foregroundStyle(.orange)
+                } else if let st = ledger.enforcer.status, st.blockedPorts > 0 {
+                    Label("Blocking \(st.blockedPorts) connections of denied apps", systemImage: "shield.checkered")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             HStack {
                 Text(settings.groupBy == .process ? "\(rows.count) apps" : "\(groups.count) groups").font(.caption).foregroundStyle(.secondary)
