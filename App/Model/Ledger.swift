@@ -491,6 +491,17 @@ final class Ledger: ObservableObject {
     #endif
 }
 
+/// The service usually on a port, for display: "HTTPS" for TCP 443, "QUIC" for UDP 443. A hint only: any program
+/// can use any port.
+func usualService(proto: String, port: Int) -> String? {
+    PortNames.name(port: port, proto: proto.uppercased() == "UDP" ? .udp : .tcp)
+}
+
+/// " · HTTPS" after a port, or nothing.
+func serviceSuffix(proto: String, port: Int) -> String {
+    usualService(proto: proto, port: port).map { " · \($0)" } ?? ""
+}
+
 func formatBytes(_ n: UInt64) -> String {
     let f = ByteCountFormatter()
     f.countStyle = .file

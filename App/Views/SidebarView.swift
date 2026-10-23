@@ -223,7 +223,7 @@ struct ProcessRow: View {
                                 Text("via \(via.process)").foregroundStyle(.orange).lineLimit(1).help(via.label)
                             }
                             Spacer()
-                            Text("\(r.proto) \(r.port)").foregroundStyle(.secondary).monospacedDigit()
+                            Text("\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).foregroundStyle(.secondary).monospacedDigit()
                         }
                     }
                 }

@@ -128,11 +128,11 @@ struct ProcessInspector: View {
                         Text(r.host).lineLimit(1)
                         if let via = r.via {
                             // The real destination first, then the proxy hop it went through.
-                            Text(r.address.isEmpty || r.address == r.host ? "\(r.proto) port \(r.port)" : "\(r.proto) \(r.address):\(r.port)")
-                                .font(.caption).foregroundStyle(.secondary)
+                            Text((r.address.isEmpty || r.address == r.host ? "\(r.proto) port \(r.port)" : "\(r.proto) \(r.address):\(r.port)") + serviceSuffix(proto: r.proto, port: r.port))
+                                .font(.caption).foregroundStyle(.secondary).help(serviceHelp)
                             ProxyBadge(hop: via)
                         } else {
-                            Text("\(r.proto) \(r.address):\(r.port)").font(.caption).foregroundStyle(.secondary)
+                            Text("\(r.proto) \(r.address):\(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).font(.caption).foregroundStyle(.secondary).help(serviceHelp)
                         }
                     }.padding(.leading, 6)
                 }
@@ -146,6 +146,8 @@ struct ProcessInspector: View {
             }
         }
     }
+
+    private var serviceHelp: String { "The name is the service usually on this port. The port alone does not prove what the connection carries." }
 
     private func kv(_ k: String, _ v: String) -> some View {
         HStack(alignment: .top) {

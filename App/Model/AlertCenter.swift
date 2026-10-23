@@ -153,7 +153,8 @@ struct AlertView: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(target).font(.headline).textSelection(.enabled)
-                Text(alert.address.isEmpty ? "\(alert.proto) port \(alert.port)" : "\(alert.proto) port \(alert.port) · \(alert.address)").font(.caption).foregroundStyle(.secondary)
+                Text("\(alert.proto) port \(alert.port)" + (usualService(proto: alert.proto, port: alert.port).map { " (usually \($0))" } ?? "") + (alert.address.isEmpty ? "" : " · \(alert.address)"))
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Divider()
             Picker("Applies to", selection: $scope) { ForEach(RulesModel.Scope.allCases) { Text($0.rawValue).tag($0) } }
