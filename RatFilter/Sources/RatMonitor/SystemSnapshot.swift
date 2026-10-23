@@ -27,7 +27,8 @@ public enum SystemSnapshot {
             guard let name, let arrow = name.range(of: "->") else { return }
             guard let l = splitEndpoint(String(name[..<arrow.lowerBound])), let r = splitEndpoint(String(name[arrow.upperBound...])) else { return }
             out.append(ObservedConnection(pid: pid, processPath: paths[pid] ?? "pid \(pid)", proto: proto,
-                                          remoteAddress: r.host, remotePort: r.port, localPort: l.port, tcpState: proto == .tcp ? state : nil))
+                                          remoteAddress: r.host, remotePort: r.port, localPort: l.port, tcpState: proto == .tcp ? state : nil,
+                                          localAddress: l.host))
         }
 
         for line in lsofLines {

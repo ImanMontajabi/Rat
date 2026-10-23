@@ -15,6 +15,8 @@ struct ConnectionAlert: Identifiable, Equatable {
     let proto: String
     /// Who runs the server's network (`AS13335 Cloudflare, Inc.`), when the ASN database knows.
     var network: String? = nil
+    /// "via VPN (…)" or "via System … Proxy (…)" when the connection takes that path.
+    var route: String? = nil
     var key: String { "\(appID)|\(registrableDomain(host))" }
 }
 
@@ -157,6 +159,9 @@ struct AlertView: View {
                 Text(target).font(.headline).textSelection(.enabled)
                 Text("\(alert.proto) port \(alert.port)" + (usualService(proto: alert.proto, port: alert.port).map { " (usually \($0))" } ?? "") + (alert.address.isEmpty ? "" : " · \(alert.address)"))
                     .font(.caption).foregroundStyle(.secondary)
+                if let route = alert.route {
+                    Label(route, systemImage: route.hasPrefix("via VPN") ? "lock.shield" : "arrow.triangle.branch").font(.caption).foregroundStyle(.secondary)
+                }
                 if let network = alert.network {
                     Text("Network: \(network)").font(.caption).foregroundStyle(.secondary).help("The organization that runs the server's network (often a cloud or hosting provider), not necessarily who runs the service.")
                 }

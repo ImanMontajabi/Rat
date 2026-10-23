@@ -43,6 +43,8 @@ struct RemoteHost: Identifiable, Hashable {
     var process: String? = nil
     /// Who runs the server's network (`AS13335 Cloudflare, Inc.`), from the offline ASN database.
     var network: String? = nil
+    /// "via VPN (Windscribe)" or "via System HTTPS Proxy (…)" when the connection takes that path.
+    var route: String? = nil
 }
 
 struct AppEntry: Identifiable {
@@ -121,6 +123,7 @@ final class Ledger: ObservableObject {
     private var deniedPorts = Set<Int>()
     private var deniedLoopbackPorts = Set<Int>()
     private let proxyResolver = ProxyResolver()
+    let routes = RouteMarker()
     private var signingCache: [String: (identifier: String?, team: String?)] = [:]
     private var running = false
     private var demo = false
@@ -239,6 +242,7 @@ final class Ledger: ObservableObject {
             table[ident.id]!.pids.insert(c.pid)
         }
 
+        routes.refresh(now: now, helperTunnels: enforcer.status?.tunnels)
         // Connections through a local proxy: the destination the client asked for replaces its loopback socket.
         let unmasked = ProxyUnmasking.unmask(flows: enforcer.proxiedFlows(), conns: conns, now: now, arguments: { ProcessArguments.read(pid: $0) })
         var proxiedByApp: [String: [ProxiedRemote]] = [:]
@@ -294,7 +298,7 @@ final class Ledger: ObservableObject {
             let sig = e.remotes.isEmpty && perApp[id] == nil && proxiedByApp[id] == nil ? (nil as String?, nil as String?) : signing(for: e.identity)
             /// The verdict for one remote, counted and (for `.ask`) reported as an alert.
             /// `host` is the name shown (the address itself when there is none); a name that is an IP literal is no name.
-            func judge(host: String, address: String, port: Int, proto: Connection.Proto) -> Verdict {
+            func judge(host: String, address: String, port: Int, proto: Connection.Proto, route: String? = nil) -> Verdict {
                 let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), host: host == address || isIPLiteral(host) ? nil : host,
                                       address: address, port: port, proto: proto)
                 let matched = rules.engine.matchingRule(conn)
@@ -307,7 +311,7 @@ final class Ledger: ObservableObject {
                     askCount += 1
                     if warmedUp {
                         alerts.report(ConnectionAlert(appID: e.identity.ruleKey, appName: e.identity.name, host: host, address: address, port: port, proto: proto.rawValue.uppercased(),
-                                                      network: address.isEmpty || isLocalAddress(address) ? nil : geo.network(address)?.label))
+                                                      network: address.isEmpty || isLocalAddress(address) ? nil : geo.network(address)?.label, route: route))
                     }
                 case .allow: break
                 }
@@ -319,10 +323,11 @@ final class Ledger: ObservableObject {
                 let geoPoint = isLocalAddress(c.remoteAddress) ? nil : geo.lookup(c.remoteAddress)
                 remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint,
                                           pid: c.pid, process: c.processName,
-                                          network: isLocalAddress(c.remoteAddress) ? nil : geo.network(c.remoteAddress)?.label))
+                                          network: isLocalAddress(c.remoteAddress) ? nil : geo.network(c.remoteAddress)?.label,
+                                          route: routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort)))
 
                 guard !isLocalAddress(c.remoteAddress) else { continue }
-                if judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp) == .deny, c.localPort != 0 {
+                if judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp, route: remotes.last?.route) == .deny, c.localPort != 0 {
                     portsNow.insert(c.localPort)
                 }
             }

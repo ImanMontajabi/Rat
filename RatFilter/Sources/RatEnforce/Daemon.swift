@@ -56,12 +56,14 @@ public struct EnforcerStatus: Codable, Equatable {
     public var blockedLoopbackPorts: Int?
     /// Whether the daemon reads proxy requests on lo0 (nil from daemons before 1.1.0).
     public var proxyCapture: Bool?
+    /// VPN tunnel interface → path of the process that opened it (root sees VPN daemons Rat cannot; 1.2.0).
+    public var tunnels: [String: String]?
 
     public init(pid: Int32, updated: Date, pfEnabled: Bool, anchorHooked: Bool, deniedApps: [String: App], blockedPorts: Int,
-                blockedLoopbackPorts: Int? = nil, proxyCapture: Bool? = nil) {
+                blockedLoopbackPorts: Int? = nil, proxyCapture: Bool? = nil, tunnels: [String: String]? = nil) {
         self.pid = pid; self.updated = updated; self.pfEnabled = pfEnabled; self.anchorHooked = anchorHooked
         self.deniedApps = deniedApps; self.blockedPorts = blockedPorts
-        self.blockedLoopbackPorts = blockedLoopbackPorts; self.proxyCapture = proxyCapture
+        self.blockedLoopbackPorts = blockedLoopbackPorts; self.proxyCapture = proxyCapture; self.tunnels = tunnels
     }
 }
 
@@ -123,6 +125,8 @@ public final class EnforcerDaemon {
     private var lastStatus = Date.distantPast
     private var pfEnabled = false
     private var anchorHooked = false
+    private let tunnelLock = NSLock()
+    private var tunnels: [String: String] = [:]
     public private(set) var reloads = 0
     private let trace = !(ProcessInfo.processInfo.environment["RAT_TRACE"] ?? "").isEmpty
     private var traceTicks = 0, traceTime = 0.0
@@ -301,6 +305,11 @@ public final class EnforcerDaemon {
         }
         let main = capture("/sbin/pfctl", ["-s", "rules"])
         anchorHooked = PFStates.hooksAnchor(main, anchor: settings.anchor)
+        // Which process opened each VPN tunnel: a scan of every socket, so it runs off the watch loop.
+        background.async { [self] in
+            let t = NetworkRoutes.tunnelOwners()
+            tunnelLock.withLock { tunnels = t }
+        }
     }
 
     private func publishStatus(now: Date) {
@@ -309,7 +318,8 @@ public final class EnforcerDaemon {
         let status = EnforcerStatus(pid: getpid(), updated: now, pfEnabled: pfEnabled, anchorHooked: anchorHooked,
                                     deniedApps: portsByApp.mapValues { EnforcerStatus.App(processes: $0.processes, ports: $0.ports.count) },
                                     blockedPorts: loadedPorts.count, blockedLoopbackPorts: loadedLoopbackPorts.count,
-                                    proxyCapture: settings.proxiedFile == nil ? nil : proxyWatch?.capturing ?? false)
+                                    proxyCapture: settings.proxiedFile == nil ? nil : proxyWatch?.capturing ?? false,
+                                    tunnels: tunnelLock.withLock { tunnels })
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .secondsSince1970
         guard let data = try? enc.encode(status) else { return }

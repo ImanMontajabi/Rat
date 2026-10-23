@@ -183,4 +183,38 @@ final class Release120Tests: XCTestCase {
         XCTAssertTrue(dbs.isStale(.init(custom: true, fileName: "x", type: "t", built: now), now: now.addingTimeInterval(100 * 86_400)))
         XCTAssertFalse(dbs.isStale(.init(custom: true, fileName: "x", type: "t", built: now), now: now.addingTimeInterval(10 * 86_400)))
     }
+
+    // MARK: #2 connections through a VPN or a system proxy
+
+    func testVPNAndSystemProxyRoutesAreMarkedPerSocket() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-120-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ledger = Ledger(directory: dir, helperInstalled: true)
+        ledger.routes.set(tunnelAddresses: ["10.64.0.2": "utun4"], tunnelNames: ["utun4": "Windscribe"],
+                          proxies: [.init(kind: .https, host: "proxy.corp.example", port: 3128), .init(kind: .socks, host: "127.0.0.1", port: 7890)],
+                          proxyAddresses: ["proxy.corp.example": ["198.51.100.7"]])
+        let app = "/Applications/Demo/Foo.app/Contents/MacOS/Foo"
+        func c(_ local: String, _ remote: String, _ port: Int, _ lport: Int) -> ObservedConnection {
+            ObservedConnection(pid: 900, processPath: app, proto: .tcp, remoteAddress: remote, remotePort: port, localPort: lport, tcpState: "ESTABLISHED", localAddress: local)
+        }
+        await ledger.ingest([c("10.64.0.2", "203.0.113.30", 443, 60100),      // through the tunnel
+                             c("192.168.178.39", "203.0.113.31", 443, 60101), // split tunnel: outside it
+                             c("192.168.178.39", "198.51.100.7", 3128, 60102),
+                             c("127.0.0.1", "127.0.0.1", 7890, 60103)], [])
+        let foo = try XCTUnwrap(ledger.apps.first { $0.id == "/Applications/Demo/Foo.app" })
+        func route(_ a: String) -> String? { foo.remotes.first { $0.address == a }?.route }
+        XCTAssertEqual(route("203.0.113.30"), "via VPN (Windscribe)")
+        XCTAssertNil(route("203.0.113.31"), "a split tunnel is told apart per socket")
+        XCTAssertEqual(route("198.51.100.7"), "via System HTTPS Proxy (proxy.corp.example:3128)")
+        XCTAssertEqual(route("127.0.0.1"), "via System SOCKS Proxy (127.0.0.1:7890)")
+    }
+
+    func testVPNNames() {
+        let ext = "/Library/SystemExtensions/AB/com.windscribe.client.networkextension.systemextension/Contents/MacOS/com.windscribe.client.networkextension"
+        XCTAssertEqual(RouteMarker.name(interface: "utun4", service: "My VPN", owner: ext), "Windscribe")
+        XCTAssertEqual(RouteMarker.name(interface: "utun4", service: "Office", owner: "/usr/sbin/racoon"), "Office")
+        XCTAssertEqual(RouteMarker.name(interface: "utun4", service: nil, owner: "/Applications/Calculator.app/Contents/MacOS/Calculator"), "Calculator")
+        XCTAssertEqual(RouteMarker.name(interface: "utun7", service: nil, owner: nil), "utun7")
+    }
 }

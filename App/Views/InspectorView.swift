@@ -169,6 +169,11 @@ struct ProcessInspector: View {
             } else {
                 Text("\(r.proto) \(r.address):\(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).font(.caption).foregroundStyle(.secondary).help(serviceHelp)
             }
+            if let route = r.route {
+                Label(route, systemImage: route.hasPrefix("via VPN") ? "lock.shield" : "arrow.triangle.branch")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    .help(route.hasPrefix("via VPN") ? "This connection leaves through the VPN tunnel." : "This app talks to the system proxy, not to the server itself: the address and location shown are the proxy's, and a rule for a domain cannot match.")
+            }
             if let n = r.network {
                 Text(n).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                     .help("The organization that runs this server's network (often a cloud or hosting provider), not necessarily who runs the service.")

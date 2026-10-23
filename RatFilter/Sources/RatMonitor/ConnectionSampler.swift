@@ -15,10 +15,13 @@ public struct ObservedConnection: Hashable, Sendable {
     public var remotePort: Int
     public var localPort: Int
     public var tcpState: String?
+    /// The socket's own address: on a VPN tunnel interface (utun, ipsec) when its traffic goes through the VPN.
+    public var localAddress: String
 
-    public init(pid: Int32, processPath: String, proto: Proto, remoteAddress: String, remotePort: Int, localPort: Int, tcpState: String?) {
+    public init(pid: Int32, processPath: String, proto: Proto, remoteAddress: String, remotePort: Int, localPort: Int, tcpState: String?,
+                localAddress: String = "") {
         self.pid = pid; self.processPath = processPath; self.proto = proto; self.remoteAddress = remoteAddress
-        self.remotePort = remotePort; self.localPort = localPort; self.tcpState = tcpState
+        self.remotePort = remotePort; self.localPort = localPort; self.tcpState = tcpState; self.localAddress = localAddress
     }
 
     public var processName: String { (processPath as NSString).lastPathComponent }
@@ -83,19 +86,20 @@ public enum ConnectionSampler {
             return nil
         }
         return ObservedConnection(pid: pid, processPath: processPath, proto: proto,
-                                  remoteAddress: foreignAddress(ini), remotePort: Int(UInt16(truncatingIfNeeded: ini.insi_fport).bigEndian),
-                                  localPort: Int(UInt16(truncatingIfNeeded: ini.insi_lport).bigEndian), tcpState: state)
+                                  remoteAddress: address(ini, local: false), remotePort: Int(UInt16(truncatingIfNeeded: ini.insi_fport).bigEndian),
+                                  localPort: Int(UInt16(truncatingIfNeeded: ini.insi_lport).bigEndian), tcpState: state,
+                                  localAddress: address(ini, local: true))
     }
 
-    private static func foreignAddress(_ ini: in_sockinfo) -> String {
+    private static func address(_ ini: in_sockinfo, local: Bool) -> String {
         var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
         if Int32(ini.insi_vflag) & INI_IPV4 != 0 {
-            var a = ini.insi_faddr.ina_46.i46a_addr4
+            var a = local ? ini.insi_laddr.ina_46.i46a_addr4 : ini.insi_faddr.ina_46.i46a_addr4
             guard a.s_addr != 0 else { return "" }
             return inet_ntop(AF_INET, &a, &buf, socklen_t(buf.count)).map { String(cString: $0) } ?? ""
         }
         if Int32(ini.insi_vflag) & INI_IPV6 != 0 {
-            var a = ini.insi_faddr.ina_6
+            var a = local ? ini.insi_laddr.ina_6 : ini.insi_faddr.ina_6
             let isAny = withUnsafeBytes(of: &a) { $0.allSatisfy { $0 == 0 } }
             guard !isAny else { return "" }
             return inet_ntop(AF_INET6, &a, &buf, socklen_t(buf.count)).map { String(cString: $0) } ?? ""
