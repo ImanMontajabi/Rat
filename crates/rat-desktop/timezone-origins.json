@@ -1,0 +1,637 @@
+{
+  "Aleutian Standard Time": [
+    51.88,
+    -176.65805555555556,
+    "Adak"
+  ],
+  "Hawaiian Standard Time": [
+    21.306944444444444,
+    -157.85833333333332,
+    "Honolulu"
+  ],
+  "Marquesas Standard Time": [
+    -9.0,
+    -139.5,
+    "Marquesas"
+  ],
+  "Alaskan Standard Time": [
+    61.21805555555556,
+    -149.90027777777777,
+    "Anchorage"
+  ],
+  "Pacific Standard Time (Mexico)": [
+    32.53333333333333,
+    -117.01666666666667,
+    "Tijuana"
+  ],
+  "Pacific Standard Time": [
+    34.05222222222222,
+    -118.24277777777777,
+    "Los Angeles"
+  ],
+  "US Mountain Standard Time": [
+    33.44833333333333,
+    -112.07333333333332,
+    "Phoenix"
+  ],
+  "Mountain Standard Time (Mexico)": [
+    23.216666666666665,
+    -106.41666666666667,
+    "Mazatlan"
+  ],
+  "Mountain Standard Time": [
+    39.73916666666667,
+    -104.98416666666667,
+    "Denver"
+  ],
+  "British Columbia Standard Time": [
+    49.266666666666666,
+    -123.11666666666666,
+    "Vancouver"
+  ],
+  "Yukon Standard Time": [
+    60.71666666666667,
+    -135.05,
+    "Whitehorse"
+  ],
+  "Alberta Standard Time": [
+    53.55,
+    -113.46666666666667,
+    "Edmonton"
+  ],
+  "Central America Standard Time": [
+    14.633333333333333,
+    -90.51666666666667,
+    "Guatemala"
+  ],
+  "Central Standard Time": [
+    41.85,
+    -87.65,
+    "Chicago"
+  ],
+  "Easter Island Standard Time": [
+    -27.15,
+    -109.43333333333334,
+    "Easter"
+  ],
+  "Central Standard Time (Mexico)": [
+    19.4,
+    -99.15,
+    "Mexico City"
+  ],
+  "Canada Central Standard Time": [
+    50.4,
+    -104.65,
+    "Regina"
+  ],
+  "Manitoba Standard Time": [
+    49.88333333333333,
+    -97.15,
+    "Winnipeg"
+  ],
+  "SA Pacific Standard Time": [
+    4.6,
+    -74.08333333333333,
+    "Bogota"
+  ],
+  "Eastern Standard Time (Mexico)": [
+    21.083333333333332,
+    -86.76666666666667,
+    "Cancun"
+  ],
+  "Eastern Standard Time": [
+    40.71416666666667,
+    -74.00638888888889,
+    "New York"
+  ],
+  "Haiti Standard Time": [
+    18.533333333333335,
+    -72.33333333333333,
+    "Port-au-Prince"
+  ],
+  "Cuba Standard Time": [
+    23.133333333333333,
+    -82.36666666666666,
+    "Havana"
+  ],
+  "Turks And Caicos Standard Time": [
+    21.466666666666665,
+    -71.13333333333334,
+    "Grand Turk"
+  ],
+  "Paraguay Standard Time": [
+    -25.266666666666666,
+    -57.666666666666664,
+    "Asuncion"
+  ],
+  "Atlantic Standard Time": [
+    44.65,
+    -63.6,
+    "Halifax"
+  ],
+  "Venezuela Standard Time": [
+    10.5,
+    -66.93333333333334,
+    "Caracas"
+  ],
+  "Central Brazilian Standard Time": [
+    -15.583333333333334,
+    -56.083333333333336,
+    "Cuiaba"
+  ],
+  "SA Western Standard Time": [
+    -16.5,
+    -68.15,
+    "La Paz"
+  ],
+  "Pacific SA Standard Time": [
+    -33.45,
+    -70.66666666666667,
+    "Santiago"
+  ],
+  "Newfoundland Standard Time": [
+    47.56666666666667,
+    -52.71666666666667,
+    "St Johns"
+  ],
+  "Tocantins Standard Time": [
+    -7.2,
+    -48.2,
+    "Araguaina"
+  ],
+  "E. South America Standard Time": [
+    -23.533333333333335,
+    -46.61666666666667,
+    "Sao Paulo"
+  ],
+  "SA Eastern Standard Time": [
+    4.933333333333334,
+    -52.333333333333336,
+    "Cayenne"
+  ],
+  "Montevideo Standard Time": [
+    -34.909166666666664,
+    -56.212500000000006,
+    "Montevideo"
+  ],
+  "Magallanes Standard Time": [
+    -53.15,
+    -70.91666666666667,
+    "Punta Arenas"
+  ],
+  "Saint Pierre Standard Time": [
+    47.05,
+    -56.333333333333336,
+    "Miquelon"
+  ],
+  "Bahia Standard Time": [
+    -12.983333333333333,
+    -38.516666666666666,
+    "Bahia"
+  ],
+  "Azores Standard Time": [
+    37.733333333333334,
+    -25.666666666666668,
+    "Azores"
+  ],
+  "Cape Verde Standard Time": [
+    14.916666666666666,
+    -23.516666666666666,
+    "Cape Verde"
+  ],
+  "GMT Standard Time": [
+    51.50833333333333,
+    -0.12527777777777777,
+    "London"
+  ],
+  "Greenwich Standard Time": [
+    64.15,
+    -21.85,
+    "Reykjavik"
+  ],
+  "Sao Tome Standard Time": [
+    0.3333333333333333,
+    6.733333333333333,
+    "Sao Tome"
+  ],
+  "Morocco Standard Time": [
+    33.65,
+    -7.583333333333333,
+    "Casablanca"
+  ],
+  "W. Europe Standard Time": [
+    52.5,
+    13.366666666666667,
+    "Berlin"
+  ],
+  "Central Europe Standard Time": [
+    47.5,
+    19.083333333333332,
+    "Budapest"
+  ],
+  "Romance Standard Time": [
+    48.86666666666667,
+    2.3333333333333335,
+    "Paris"
+  ],
+  "Central European Standard Time": [
+    52.25,
+    21.0,
+    "Warsaw"
+  ],
+  "W. Central Africa Standard Time": [
+    6.45,
+    3.4,
+    "Lagos"
+  ],
+  "Jordan Standard Time": [
+    31.95,
+    35.93333333333333,
+    "Amman"
+  ],
+  "GTB Standard Time": [
+    44.43333333333333,
+    26.1,
+    "Bucharest"
+  ],
+  "Middle East Standard Time": [
+    33.88333333333333,
+    35.5,
+    "Beirut"
+  ],
+  "Egypt Standard Time": [
+    30.05,
+    31.25,
+    "Cairo"
+  ],
+  "E. Europe Standard Time": [
+    47.0,
+    28.833333333333332,
+    "Chisinau"
+  ],
+  "Syria Standard Time": [
+    33.5,
+    36.3,
+    "Damascus"
+  ],
+  "West Bank Standard Time": [
+    31.533333333333335,
+    35.095,
+    "Hebron"
+  ],
+  "South Africa Standard Time": [
+    -26.25,
+    28.0,
+    "Johannesburg"
+  ],
+  "Israel Standard Time": [
+    31.780555555555555,
+    35.223888888888894,
+    "Jerusalem"
+  ],
+  "South Sudan Standard Time": [
+    4.85,
+    31.616666666666667,
+    "Juba"
+  ],
+  "Kaliningrad Standard Time": [
+    54.71666666666667,
+    20.5,
+    "Kaliningrad"
+  ],
+  "Sudan Standard Time": [
+    15.6,
+    32.53333333333333,
+    "Khartoum"
+  ],
+  "Libya Standard Time": [
+    32.9,
+    13.183333333333334,
+    "Tripoli"
+  ],
+  "Namibia Standard Time": [
+    -22.566666666666666,
+    17.1,
+    "Windhoek"
+  ],
+  "Arabic Standard Time": [
+    33.35,
+    44.416666666666664,
+    "Baghdad"
+  ],
+  "Turkey Standard Time": [
+    41.016666666666666,
+    28.966666666666665,
+    "Istanbul"
+  ],
+  "Arab Standard Time": [
+    24.633333333333333,
+    46.71666666666667,
+    "Riyadh"
+  ],
+  "Belarus Standard Time": [
+    53.9,
+    27.566666666666666,
+    "Minsk"
+  ],
+  "Russian Standard Time": [
+    55.755833333333335,
+    37.617777777777775,
+    "Moscow"
+  ],
+  "E. Africa Standard Time": [
+    -1.2833333333333332,
+    36.81666666666667,
+    "Nairobi"
+  ],
+  "Iran Standard Time": [
+    35.666666666666664,
+    51.43333333333333,
+    "Tehran"
+  ],
+  "Arabian Standard Time": [
+    25.3,
+    55.3,
+    "Dubai"
+  ],
+  "Astrakhan Standard Time": [
+    46.35,
+    48.05,
+    "Astrakhan"
+  ],
+  "Azerbaijan Standard Time": [
+    40.38333333333333,
+    49.85,
+    "Baku"
+  ],
+  "Russia Time Zone 3": [
+    53.2,
+    50.15,
+    "Samara"
+  ],
+  "Mauritius Standard Time": [
+    -20.166666666666668,
+    57.5,
+    "Mauritius"
+  ],
+  "Saratov Standard Time": [
+    51.56666666666667,
+    46.03333333333333,
+    "Saratov"
+  ],
+  "Georgian Standard Time": [
+    41.71666666666667,
+    44.81666666666667,
+    "Tbilisi"
+  ],
+  "Volgograd Standard Time": [
+    48.733333333333334,
+    44.416666666666664,
+    "Volgograd"
+  ],
+  "Caucasus Standard Time": [
+    40.18333333333333,
+    44.5,
+    "Yerevan"
+  ],
+  "Afghanistan Standard Time": [
+    34.516666666666666,
+    69.2,
+    "Kabul"
+  ],
+  "West Asia Standard Time": [
+    41.333333333333336,
+    69.3,
+    "Tashkent"
+  ],
+  "Ekaterinburg Standard Time": [
+    56.85,
+    60.6,
+    "Yekaterinburg"
+  ],
+  "Pakistan Standard Time": [
+    24.866666666666667,
+    67.05,
+    "Karachi"
+  ],
+  "Qyzylorda Standard Time": [
+    44.8,
+    65.46666666666667,
+    "Qyzylorda"
+  ],
+  "Sri Lanka Standard Time": [
+    6.933333333333334,
+    79.85,
+    "Colombo"
+  ],
+  "Central Asia Standard Time": [
+    42.9,
+    74.6,
+    "Bishkek"
+  ],
+  "Bangladesh Standard Time": [
+    23.716666666666665,
+    90.41666666666667,
+    "Dhaka"
+  ],
+  "Omsk Standard Time": [
+    55.0,
+    73.4,
+    "Omsk"
+  ],
+  "SE Asia Standard Time": [
+    13.75,
+    100.51666666666667,
+    "Bangkok"
+  ],
+  "Altai Standard Time": [
+    53.36666666666667,
+    83.75,
+    "Barnaul"
+  ],
+  "W. Mongolia Standard Time": [
+    48.016666666666666,
+    91.65,
+    "Hovd"
+  ],
+  "North Asia Standard Time": [
+    56.016666666666666,
+    92.83333333333333,
+    "Krasnoyarsk"
+  ],
+  "N. Central Asia Standard Time": [
+    55.03333333333333,
+    82.91666666666667,
+    "Novosibirsk"
+  ],
+  "Tomsk Standard Time": [
+    56.5,
+    84.96666666666667,
+    "Tomsk"
+  ],
+  "China Standard Time": [
+    31.233333333333334,
+    121.46666666666667,
+    "Shanghai"
+  ],
+  "North Asia East Standard Time": [
+    52.266666666666666,
+    104.33333333333333,
+    "Irkutsk"
+  ],
+  "Singapore Standard Time": [
+    1.2833333333333332,
+    103.85,
+    "Singapore"
+  ],
+  "W. Australia Standard Time": [
+    -31.95,
+    115.85,
+    "Perth"
+  ],
+  "Taipei Standard Time": [
+    25.05,
+    121.5,
+    "Taipei"
+  ],
+  "Ulaanbaatar Standard Time": [
+    47.916666666666664,
+    106.88333333333334,
+    "Ulaanbaatar"
+  ],
+  "Aus Central W. Standard Time": [
+    -31.716666666666665,
+    128.86666666666667,
+    "Eucla"
+  ],
+  "Transbaikal Standard Time": [
+    52.05,
+    113.46666666666667,
+    "Chita"
+  ],
+  "Tokyo Standard Time": [
+    35.654444444444444,
+    139.7447222222222,
+    "Tokyo"
+  ],
+  "North Korea Standard Time": [
+    39.016666666666666,
+    125.75,
+    "Pyongyang"
+  ],
+  "Korea Standard Time": [
+    37.55,
+    126.96666666666667,
+    "Seoul"
+  ],
+  "Yakutsk Standard Time": [
+    62.0,
+    129.66666666666666,
+    "Yakutsk"
+  ],
+  "Cen. Australia Standard Time": [
+    -34.916666666666664,
+    138.58333333333334,
+    "Adelaide"
+  ],
+  "AUS Central Standard Time": [
+    -12.466666666666667,
+    130.83333333333334,
+    "Darwin"
+  ],
+  "E. Australia Standard Time": [
+    -27.466666666666665,
+    153.03333333333333,
+    "Brisbane"
+  ],
+  "AUS Eastern Standard Time": [
+    -33.86666666666667,
+    151.21666666666667,
+    "Sydney"
+  ],
+  "West Pacific Standard Time": [
+    -9.5,
+    147.16666666666666,
+    "Port Moresby"
+  ],
+  "Tasmania Standard Time": [
+    -42.88333333333333,
+    147.31666666666666,
+    "Hobart"
+  ],
+  "Vladivostok Standard Time": [
+    43.166666666666664,
+    131.93333333333334,
+    "Vladivostok"
+  ],
+  "Lord Howe Standard Time": [
+    -31.55,
+    159.08333333333334,
+    "Lord Howe"
+  ],
+  "Bougainville Standard Time": [
+    -6.216666666666667,
+    155.56666666666666,
+    "Bougainville"
+  ],
+  "Russia Time Zone 10": [
+    67.46666666666667,
+    153.71666666666667,
+    "Srednekolymsk"
+  ],
+  "Magadan Standard Time": [
+    59.56666666666667,
+    150.8,
+    "Magadan"
+  ],
+  "Norfolk Standard Time": [
+    -29.05,
+    167.96666666666667,
+    "Norfolk"
+  ],
+  "Sakhalin Standard Time": [
+    46.96666666666667,
+    142.7,
+    "Sakhalin"
+  ],
+  "Central Pacific Standard Time": [
+    -9.533333333333333,
+    160.2,
+    "Guadalcanal"
+  ],
+  "Russia Time Zone 11": [
+    53.016666666666666,
+    158.65,
+    "Kamchatka"
+  ],
+  "New Zealand Standard Time": [
+    -36.86666666666667,
+    174.76666666666668,
+    "Auckland"
+  ],
+  "Fiji Standard Time": [
+    -18.133333333333333,
+    178.41666666666666,
+    "Fiji"
+  ],
+  "Chatham Islands Standard Time": [
+    -43.95,
+    -176.55,
+    "Chatham"
+  ],
+  "Tonga Standard Time": [
+    -21.133333333333333,
+    -175.2,
+    "Tongatapu"
+  ],
+  "Samoa Standard Time": [
+    -13.833333333333334,
+    -171.73333333333332,
+    "Apia"
+  ],
+  "Line Islands Standard Time": [
+    1.8666666666666667,
+    -157.33333333333334,
+    "Kiritimati"
+  ]
+}

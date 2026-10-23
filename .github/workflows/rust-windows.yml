@@ -1,0 +1,19 @@
+name: Rust Windows
+on:
+  push:
+    paths: ['crates/**', 'Cargo.*', '.github/workflows/rust-windows.yml']
+  pull_request:
+    paths: ['crates/**', 'Cargo.*', '.github/workflows/rust-windows.yml']
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - run: cargo build --locked --release -p rat-desktop
