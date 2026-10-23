@@ -45,6 +45,18 @@ struct AppIdentity: Hashable {
         return AppIdentity(id: path, name: base, bundlePath: nil, isSystem: false)
     }
 
+    @MainActor static var mainProcessCache: [String: String?] = [:]
+
+    /// The executable the app runs as ("Google Chrome"). A connection held by another process (a helper) is shown
+    /// "via <process>". Nil for the "macOS" row, where every service is shown by name.
+    @MainActor var mainProcessName: String? {
+        if isSystem { return nil }
+        if let c = Self.mainProcessCache[id] { return c }
+        let name = bundlePath.map { Bundle(path: $0)?.executableURL?.lastPathComponent } ?? (id as NSString).lastPathComponent
+        Self.mainProcessCache[id] = .some(name)
+        return name
+    }
+
     @MainActor static var iconCache: [String: NSImage] = [:]
 
     @MainActor var icon: NSImage {
@@ -73,3 +85,21 @@ struct AppIdentity: Hashable {
 private extension String {
     func trimmingSuffix(_ s: String) -> String { hasSuffix(s) ? String(dropLast(s.count)) : self }
 }
+
+/// System services that work for many apps at once. Their sockets belong to the service and the service is its own
+/// responsible process, so nothing on the socket says which app asked. Rat shows them as such instead of guessing.
+enum SharedServices {
+    private static let notes: [String: String] = [
+        "mDNSResponder": "DNS and Bonjour for every app. Which app asked for a name cannot be seen: that needs a DNS proxy (a Network Extension), which Rat cannot install.",
+        "nsurlsessiond": "Background downloads and uploads on behalf of apps.",
+        "apsd": "Push notifications for every app.",
+        "trustd": "Certificate checks for every app.",
+        "cloudd": "iCloud sync on behalf of apps.",
+        "networkserviceproxy": "iCloud Private Relay for apps that use it.",
+        "com.apple.WebKit.Networking": "Web content for an app that macOS did not name.",
+    ]
+
+    /// What the service does for others, or nil for a service that works for itself.
+    static func note(for process: String) -> String? { notes[process] }
+}
+

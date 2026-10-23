@@ -29,7 +29,7 @@ enum TimeRange: String, CaseIterable, Identifiable {
 }
 
 struct RemoteHost: Identifiable, Hashable {
-    var id: String { via.map { "\(host):\(port) \($0.listener)" } ?? "\(address):\(port)" }
+    var id: String { (via.map { "\(host):\(port) \($0.listener)" } ?? "\(address):\(port)") + "|\(process ?? "")" }
     /// The server's address; for a destination behind a local proxy, the name's address (empty until looked up).
     let address: String
     var host: String
@@ -38,6 +38,9 @@ struct RemoteHost: Identifiable, Hashable {
     var geo: GeoPoint?
     /// Set when the connection went through a local proxy: `host` is the real destination, `via` the hop.
     var via: ProxyHop? = nil
+    /// The process that holds the socket (an app's helper, or the system service in the "macOS" row).
+    var pid: Int32? = nil
+    var process: String? = nil
 }
 
 struct AppEntry: Identifiable {
@@ -305,10 +308,11 @@ final class Ledger: ObservableObject {
                 return verdict
             }
             for c in perApp[id]?.conns ?? [] where !unmasked.masked.contains(ProxyUnmasking.maskKey(pid: c.pid, localPort: c.localPort, remotePort: c.remotePort))
-                && seen.insert("\(c.remoteAddress):\(c.remotePort)").inserted {
+                && seen.insert("\(c.remoteAddress):\(c.remotePort)|\(c.processName)").inserted {
                 let host = await names.name(for: c.remoteAddress)
                 let geoPoint = isLocalAddress(c.remoteAddress) ? nil : geo.lookup(c.remoteAddress)
-                remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint))
+                remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint,
+                                          pid: c.pid, process: c.processName))
 
                 guard !isLocalAddress(c.remoteAddress) else { continue }
                 if judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp) == .deny, c.localPort != 0 {
@@ -318,11 +322,12 @@ final class Ledger: ObservableObject {
             for r in proxiedByApp[id] ?? [] {
                 // A rule that denies the real destination cuts the client's loopback connection to the proxy.
                 let address = proxyResolver.address(for: r.host, enabled: resolveProxied)
-                if seen.insert("proxy|\(r.host):\(r.port)|\(r.hop.listener)").inserted {
+                let process = (r.path as NSString).lastPathComponent
+                if seen.insert("proxy|\(r.host):\(r.port)|\(r.hop.listener)|\(process)").inserted {
                     var hop = r.hop
                     hop.serverGeo = hop.server.flatMap { isLocalAddress($0) ? nil : geo.lookup($0) }
                     let point = address.flatMap { isLocalAddress($0) ? nil : geo.lookup($0) }
-                    remotes.append(RemoteHost(address: address ?? "", host: r.host, port: r.port, proto: "TCP", geo: point, via: hop))
+                    remotes.append(RemoteHost(address: address ?? "", host: r.host, port: r.port, proto: "TCP", geo: point, via: hop, pid: r.pid, process: process))
                 }
                 if judge(host: r.host, address: address ?? "", port: r.port, proto: .tcp) == .deny, r.live { loopbackNow.insert(r.clientPort) }
             }

@@ -123,18 +123,25 @@ struct ProcessInspector: View {
             if sig { kv("Identifier", ident ?? "none"); kv("Team", team ?? "none") }
             SectionHeader(title: "Connection Details", open: $details)
             if details {
-                ForEach(app.remotes.prefix(50)) { r in
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(r.host).lineLimit(1)
-                        if let via = r.via {
-                            // The real destination first, then the proxy hop it went through.
-                            Text((r.address.isEmpty || r.address == r.host ? "\(r.proto) port \(r.port)" : "\(r.proto) \(r.address):\(r.port)") + serviceSuffix(proto: r.proto, port: r.port))
-                                .font(.caption).foregroundStyle(.secondary).help(serviceHelp)
-                            ProxyBadge(hop: via)
-                        } else {
-                            Text("\(r.proto) \(r.address):\(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).font(.caption).foregroundStyle(.secondary).help(serviceHelp)
-                        }
-                    }.padding(.leading, 6)
+                if app.identity.isSystem {
+                    // The "macOS" row holds many services: grouped by service, never attributed to a guessed app.
+                    let groups = Dictionary(grouping: Array(app.remotes.prefix(80)), by: { $0.process ?? "unknown" }).sorted { $0.key < $1.key }
+                    ForEach(groups, id: \.key) { name, list in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(name).font(.callout.weight(.semibold))
+                                if let pid = list.first?.pid { Text("pid \(pid)").font(.caption).foregroundStyle(.secondary) }
+                            }
+                            if let note = SharedServices.note(for: name) {
+                                Text("Works for other apps: \(note)").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
+                            ForEach(list) { remoteRow($0, showProcess: false) }
+                        }.padding(.leading, 6).padding(.bottom, 4)
+                    }
+                } else {
+                    ForEach(app.remotes.prefix(50)) { r in
+                        remoteRow(r, showProcess: r.process != nil && r.process != app.identity.mainProcessName).padding(.leading, 6)
+                    }
                 }
                 if app.remotes.isEmpty { Text("None").foregroundStyle(.secondary).padding(.leading, 6) }
             }
@@ -143,6 +150,24 @@ struct ProcessInspector: View {
                 let places = Set(app.remotes.flatMap { [$0.geo, $0.via?.serverGeo] }.compactMap { $0 }.map { "\($0.city), \($0.country)" }).sorted()
                 if places.isEmpty { Text("No locations for these connections").foregroundStyle(.secondary).padding(.leading, 6) }
                 ForEach(places, id: \.self) { Text($0).padding(.leading, 6) }
+            }
+        }
+    }
+
+    /// One remote: the destination, then protocol, address, port and usual service, then the hops (subprocess, proxy).
+    @ViewBuilder private func remoteRow(_ r: RemoteHost, showProcess: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(r.host).lineLimit(1)
+            if let via = r.via {
+                // The real destination first, then the proxy hop it went through.
+                Text((r.address.isEmpty || r.address == r.host ? "\(r.proto) port \(r.port)" : "\(r.proto) \(r.address):\(r.port)") + serviceSuffix(proto: r.proto, port: r.port))
+                    .font(.caption).foregroundStyle(.secondary).help(serviceHelp)
+                ProxyBadge(hop: via)
+            } else {
+                Text("\(r.proto) \(r.address):\(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).font(.caption).foregroundStyle(.secondary).help(serviceHelp)
+            }
+            if showProcess, let p = r.process {
+                Text("via \(p)\(r.pid.map { " (pid \($0))" } ?? "")").font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
