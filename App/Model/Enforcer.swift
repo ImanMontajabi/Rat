@@ -6,40 +6,53 @@ private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "enfor
 /// Applies "deny" decisions with the macOS packet filter.
 ///
 /// Rat has no Network Extension entitlement, so it cannot intercept connections per process.
-/// Instead it collects the server addresses of denied connections and loads them into a `pf` table
-/// through the bundled `rat-pf-helper.sh`, which runs as root. Two ways to run it:
+/// Two layers, both loaded into the `com.apple/rat` pf anchor as root:
 ///
-/// * **Manual** (default): each click on "Apply blocking" runs the helper once behind the standard
-///   macOS password prompt. Nothing stays installed.
-/// * **Automatic** (opt-in, explicitly approved by the user): the helper is installed once as two root
-///   LaunchDaemons. One re-applies the blocklist whenever Rat rewrites it, so Deny takes effect
-///   immediately; the other snapshots all processes' sockets so Rat can see system-wide traffic.
-///   "Remove Helper" uninstalls both and clears the pf anchor.
+/// * the server addresses of denied connections (`blocklist.txt`), which hold for every app, and
+/// * the local ports of every socket of a denied app (`denied-apps.txt`), which only the root daemon
+///   `rat-enforcerd` can keep current (it polls every ~50 ms), so new servers, IPv6 fallbacks and
+///   QUIC streams of that app are cut as they appear.
 ///
-/// A blocked address is blocked for every app on the Mac.
+/// Two ways to run it:
+///
+/// * **Manual** (default): each click on "Apply blocking" runs `rat-pf-helper.sh` once behind the
+///   standard macOS password prompt (addresses only). Nothing stays installed.
+/// * **Automatic** (opt-in, explicitly approved by the user): installed once as two root
+///   LaunchDaemons. `rat-enforcerd` enforces both layers continuously; the other snapshots all
+///   processes' sockets so Rat can see system-wide traffic. "Remove Helper" uninstalls both and
+///   clears the pf anchor.
 @MainActor
 final class Enforcer: ObservableObject {
     @Published private(set) var applied: Set<String> = []
     @Published private(set) var busy = false
     @Published private(set) var helperInstalled: Bool
+    @Published private(set) var helperOutdated = false
     @Published var autoApply: Bool { didSet { UserDefaults.standard.set(autoApply, forKey: "autoApplyPF") } }
     @Published var lastError: String?
 
     static let applyLabel = "com.imanmontajabi.rat.pf"
     static let samplerLabel = "com.imanmontajabi.rat.sampler"
     static let helperPath = "/Library/PrivilegedHelperTools/com.imanmontajabi.rat.helper"
+    static let enforcerPath = "/Library/PrivilegedHelperTools/com.imanmontajabi.rat.enforcer"
     static func plistPath(_ label: String) -> String { "/Library/LaunchDaemons/\(label).plist" }
 
     let listURL: URL
     let snapshotURL: URL
+    let appsURL: URL
     private var lastWritten: Set<String>?
+    private var lastApps: Set<String>?
 
     /// `helperInstalled` and `autoApply` can be forced so tests do not depend on (or touch) the machine's real state.
     init(supportDirectory: URL, helperInstalled: Bool? = nil, autoApply: Bool? = nil) {
         listURL = supportDirectory.appendingPathComponent("blocklist.txt")
         snapshotURL = supportDirectory.appendingPathComponent("system-sockets.txt")
+        appsURL = supportDirectory.appendingPathComponent("denied-apps.txt")
         self.helperInstalled = helperInstalled ?? FileManager.default.fileExists(atPath: Self.plistPath(Self.applyLabel))
         self.autoApply = autoApply ?? UserDefaults.standard.bool(forKey: "autoApplyPF")
+        // Helpers installed by 1.0.x only apply the address list; the enforcer daemon came with 1.0.2.
+        if helperInstalled == nil, self.helperInstalled {
+            helperOutdated = !((try? String(contentsOfFile: Self.plistPath(Self.applyLabel), encoding: .utf8))?.contains("rat.enforcer") ?? false)
+        }
     }
 
     func needsApply(for wanted: Set<String>) -> Bool { wanted != applied }
@@ -49,6 +62,18 @@ final class Enforcer: ObservableObject {
     func sync(_ wanted: Set<String>) {
         guard helperInstalled, autoApply, wanted != lastWritten else { return }
         if writeList(wanted) { applied = wanted }
+    }
+
+    /// Apps that are denied outright (bundle or executable paths). The daemon blocks every socket of their processes.
+    func syncApps(_ paths: Set<String>) {
+        guard helperInstalled, autoApply, paths != lastApps else { return }
+        do {
+            try paths.sorted().joined(separator: "\n").appending("\n").write(to: appsURL, atomically: true, encoding: .utf8)
+            lastApps = paths
+            logger.notice("denied apps written: \(paths.count, privacy: .public)")
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     /// One-off apply behind an admin prompt (used when the helper is not installed).
@@ -68,6 +93,10 @@ final class Enforcer: ObservableObject {
             lastError = "Helper script missing from the app bundle."
             return
         }
+        guard let enforcer = Bundle.main.url(forAuxiliaryExecutable: "rat-enforcerd")?.path else {
+            lastError = "Enforcer daemon missing from the app bundle."
+            return
+        }
         let owner = NSUserName()
         func plist(_ label: String, _ args: [String], extra: String) -> String {
             """
@@ -80,8 +109,9 @@ final class Enforcer: ObservableObject {
             </dict></plist>
             """
         }
-        let apply = plist(Self.applyLabel, [Self.helperPath, "apply", listURL.path],
-                          extra: "<key>WatchPaths</key><array><string>\(xml(listURL.path))</string></array><key>RunAtLoad</key><true/>")
+        // The enforcer reads the user's files but only ever uses paths for matching and addresses for pf tables.
+        let apply = plist(Self.applyLabel, [Self.enforcerPath, "--denied", appsURL.path, "--blocklist", listURL.path],
+                          extra: "<key>KeepAlive</key><true/><key>RunAtLoad</key><true/><key>ProcessType</key><string>Interactive</string>")
         let sampler = plist(Self.samplerLabel, [Self.helperPath, "snapshot", snapshotURL.path, owner],
                             extra: "<key>StartInterval</key><integer>5</integer><key>RunAtLoad</key><true/>")
         // The owner of the files the daemon writes into the user's support directory is the user, never root.
@@ -89,6 +119,7 @@ final class Enforcer: ObservableObject {
         set -e
         mkdir -p /Library/PrivilegedHelperTools
         install -m 755 -o root -g wheel \(Self.shellQuote(src)) \(Self.shellQuote(Self.helperPath))
+        install -m 755 -o root -g wheel \(Self.shellQuote(enforcer)) \(Self.shellQuote(Self.enforcerPath))
         cat > \(Self.shellQuote(Self.plistPath(Self.applyLabel))) <<'PLIST'
         \(apply)
         PLIST
@@ -103,7 +134,7 @@ final class Enforcer: ObservableObject {
         /bin/launchctl bootstrap system \(Self.shellQuote(Self.plistPath(Self.samplerLabel)))
         """
         runPrivilegedScript(script) { ok in
-            if ok { self.helperInstalled = true; self.autoApply = true; self.lastWritten = nil }
+            if ok { self.helperInstalled = true; self.helperOutdated = false; self.autoApply = true; self.lastWritten = nil; self.lastApps = nil }
         }
     }
 
@@ -111,10 +142,10 @@ final class Enforcer: ObservableObject {
         let script = """
         for l in \(Self.applyLabel) \(Self.samplerLabel); do /bin/launchctl bootout system/$l 2>/dev/null || true; done
         /sbin/pfctl -a com.apple/rat -F all >/dev/null 2>&1 || true
-        rm -f \(Self.shellQuote(Self.plistPath(Self.applyLabel))) \(Self.shellQuote(Self.plistPath(Self.samplerLabel))) \(Self.shellQuote(Self.helperPath))
+        rm -f \(Self.shellQuote(Self.plistPath(Self.applyLabel))) \(Self.shellQuote(Self.plistPath(Self.samplerLabel))) \(Self.shellQuote(Self.helperPath)) \(Self.shellQuote(Self.enforcerPath))
         """
         runPrivilegedScript(script) { ok in
-            if ok { self.helperInstalled = false; self.autoApply = false; self.applied = []; self.lastWritten = nil }
+            if ok { self.helperInstalled = false; self.helperOutdated = false; self.autoApply = false; self.applied = []; self.lastWritten = nil; self.lastApps = nil }
         }
     }
 

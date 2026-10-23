@@ -227,3 +227,34 @@ final class Release101Tests: XCTestCase {
         XCTAssertEqual(m.ruleSet.rules[0].remoteAddress, "2607:6bc0::10")
     }
 }
+
+/// 1.0.2: helper processes group with their app, and apps that are denied outright are handed to the root daemon.
+final class Release102Tests: XCTestCase {
+    func testSteamAndChromeHelpersGroupUnderTheirApp() {
+        let steamBase = "/Users/me/Library/Application Support/Steam/Steam.AppBundle"
+        for exe in ["Steam/Contents/MacOS/steam_osx", "Steam/Contents/MacOS/ipcserver", "Steam/Contents/Frameworks/Steam Helper.app/Contents/MacOS/Steam Helper"] {
+            let id = AppIdentity.resolve(processPath: "\(steamBase)/\(exe)")
+            XCTAssertEqual(id.id, steamBase, exe)
+            XCTAssertEqual(id.name, "Steam")
+        }
+        let chrome = AppIdentity.resolve(processPath: "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/1/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)")
+        XCTAssertEqual(chrome.id, "/Applications/Google Chrome.app")
+        let firefox = AppIdentity.resolve(processPath: "/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container")
+        XCTAssertEqual(firefox.id, "/Applications/Firefox.app")
+    }
+
+    @MainActor func testDeniedAppsAreWholeAppDenyWithoutAllowExceptions() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-102-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ledger = Ledger(directory: dir)
+        ledger.rules.ruleSet.rules = [
+            Rule(verdict: .deny, processPath: "/Applications/Google Chrome.app"),
+            Rule(verdict: .deny, processPath: "/Applications/Firefox.app"),
+            Rule(verdict: .allow, processPath: "/Applications/Firefox.app", remoteDomain: "mozilla.org"),
+            Rule(verdict: .deny, processPath: "/Applications/Steam.app", remoteDomain: "ads.example"),
+        ]
+        ledger.rules.ruleSet.silentVerdict = .allow
+        XCTAssertEqual(ledger.deniedAppPaths, ["/Applications/Google Chrome.app"])
+    }
+}

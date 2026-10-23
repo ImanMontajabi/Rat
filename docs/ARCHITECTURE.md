@@ -257,3 +257,15 @@ The first versions guessed at the UI from screenshots. v1.0.1 follows the app's 
 | Monitor toolbar: view menu (Group By, Sort By, Show Local Network, Show Network Extensions, Show Connections of Other Users, Float on Top), traffic chart, inspector | Same three buttons and menu entries, all functional |
 
 Behaviour fixes in this release: alerts re-validated against the rules every tick, so an app with a whole-app Allow or Deny never prompts; alert scope defaults to *This App (Any Server)*; IP addresses are never stored as "domains"; the traffic chart tiles its window and fits it to the data that exists; versioned binaries (`…/claude/versions/2.1.308`) resolve to their tool; app extensions (`.appex`) are listed separately like Little Snitch's EXT rows.
+
+## 10. Revision 4 (v1.0.2): blocking a denied app by its sockets
+
+Chasing the server addresses of a denied browser every 1.5 s cannot work: Chrome and Firefox rotate CDN addresses, fall back to IPv6 and move QUIC streams, so each new address downloads for a moment before it is blocked.
+
+Deny now has three layers. All are loaded into the `com.apple/rat` pf anchor by the root daemon `rat-enforcerd` (a LaunchDaemon with `KeepAlive`, installed with the helper):
+
+1. **Grouping.** Every helper process is attributed to its app: the outermost `.app` or `.AppBundle` in the path (Chrome Helper variants, Firefox `plugin-container`, `Steam Helper`, `steam_osx`, `ipcserver` all live inside their app), and system XPC services such as `com.apple.WebKit.Networking` follow `responsibility_get_pid_responsible_for_pid` to Safari. Only system services borrow their client's identity, so `curl` run from a Terminal stays `curl`.
+2. **Ports.** Rat writes the apps that are denied outright (a whole-app Deny, no allow exceptions, or Silent Deny) to `denied-apps.txt`. The daemon reads the process list every 10 ms, reads the sockets of those processes every 50 ms (every 10 ms for the first 0.6 s of a new process) and blocks their local ports in both directions, TCP and UDP, IPv4 and IPv6, never on `lo0`. Ports stay blocked 5 s after the socket closes. Servers they reached have their pf states killed.
+3. **Addresses.** `blocklist.txt` (servers seen while an app was denied) is a table that blocks everyone. Seen servers are blocked before a single packet.
+
+pf cannot match a process, so the port layer reacts to a socket after it exists. A SYN may leave before the ports are loaded; the server's answer is dropped when it arrives, so a connection to a distant server fails, but one to a server less than a few milliseconds away can complete its handshake first. `scripts/verify-blocking.sh` (needs `sudo`) measures this with fresh `curl` processes, the hardest case, and checks the address layer for zero bytes. Closing the gap needs a Network Extension.

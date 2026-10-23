@@ -209,7 +209,14 @@ struct SecuritySettings: View {
         SettingsPane {
             Text("Firewall Helper").font(.system(size: 15, weight: .semibold))
             if enf.helperInstalled {
-                Label("Installed: blocking is applied automatically", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
+                if enf.helperOutdated {
+                    Label("Installed, but an older version", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
+                    Text("This helper only blocks server addresses. The current one also cuts every connection of a denied app (browsers, Steam, Safari’s helpers) the moment it opens.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Button(enf.busy ? "Updating…" : "Update Helper…") { enf.installHelper() }.disabled(enf.busy)
+                } else {
+                    Label("Installed: blocking is applied automatically", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
+                }
                 SettingToggle(title: "Auto-apply firewall rules", detail: "Deny takes effect immediately. Turn off to apply blocking by hand.",
                               isOn: Binding(get: { enf.autoApply }, set: { enf.autoApply = $0; ledger.refreshBlocklist() }))
                 Label(ledger.systemWide ? "Seeing all processes system-wide" : "Waiting for the first system snapshot…", systemImage: "eye")
@@ -220,12 +227,12 @@ struct SecuritySettings: View {
                 Text("Deny blocks server addresses with the macOS packet filter. Without the helper you click “Apply blocking” each time, and Rat sees only your own processes.")
                     .font(.callout).foregroundStyle(.secondary)
                 Button(enf.busy ? "Installing…" : "Install Helper…") { enf.installHelper() }.disabled(enf.busy)
-                Text("Installs two root LaunchDaemons after an administrator-password prompt: one applies the blocklist the moment it changes, the other lists every process’s connections. “Remove Helper” uninstalls both and clears the firewall table.")
+                Text("Installs two root LaunchDaemons after an administrator-password prompt: one blocks denied apps continuously, the other lists every process’s connections. “Remove Helper” uninstalls both and clears the firewall table.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let err = enf.lastError { Text(err).font(.caption).foregroundStyle(.red) }
             Divider()
-            Text("A blocked address is blocked for every app on this Mac. Rat cannot block per process without Apple’s Network Extension entitlement.")
+            Text("Denying an app blocks the ports of all its processes, so it is cut as soon as the helper sees a socket (about 50 ms). A connection can still start for a split second, and addresses on the blocklist are blocked for every app. Blocking before a connection opens, per process, needs Apple’s Network Extension entitlement.")
                 .font(.callout).foregroundStyle(.secondary)
         }
     }

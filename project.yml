@@ -28,10 +28,13 @@ targets:
         product: RatGeo
       - package: RatFilter
         product: RatFilterCore
+      - target: rat-enforcerd
+        copy:
+          destination: executables
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.imanmontajabi.Rat
-        MARKETING_VERSION: 1.0.1
+        MARKETING_VERSION: 1.0.2
         CURRENT_PROJECT_VERSION: 1
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
@@ -41,6 +44,20 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_VERSION: "5.9"
+  rat-enforcerd:
+    type: tool
+    platform: macOS
+    sources: [Enforcerd]
+    dependencies:
+      - package: RatFilter
+        product: RatEnforce
+    settings:
+      base:
+        PRODUCT_NAME: rat-enforcerd
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: NO
+        SKIP_INSTALL: YES
   RatTests:
     type: bundle.unit-test
     platform: macOS

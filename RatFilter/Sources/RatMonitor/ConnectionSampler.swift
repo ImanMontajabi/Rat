@@ -30,7 +30,7 @@ public enum ConnectionSampler {
         return result
     }
 
-    static func allPIDs() -> [pid_t] {
+    public static func allPIDs() -> [pid_t] {
         let bytes = proc_listallpids(nil, 0)
         guard bytes > 0 else { return [] }
         var pids = [pid_t](repeating: 0, count: Int(bytes) + 64)
@@ -43,7 +43,7 @@ public enum ConnectionSampler {
         return proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : "pid \(pid)"
     }
 
-    static func connections(of pid: pid_t) -> [ObservedConnection] {
+    public static func connections(of pid: pid_t) -> [ObservedConnection] {
         let listBytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
         guard listBytes > 0 else { return [] }
         var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(listBytes) / MemoryLayout<proc_fdinfo>.stride + 8)

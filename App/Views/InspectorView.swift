@@ -100,7 +100,7 @@ struct ProcessInspector: View {
                     }.font(.callout).padding(.leading, 6)
                 }
                 if ledger.rules.policy(for: app.identity.ruleKey) == .deny {
-                    Text("\(ledger.blockedAddresses(for: app.id)) server addresses blocked for every app on this Mac.")
+                    Text("\(ledger.blockedAddresses(for: app.id)) server addresses also blocked for every app on this Mac.")
                         .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
                     if !(ledger.enforcer.helperInstalled && ledger.enforcer.autoApply) {
                         Button(ledger.enforcer.busy ? "Applying…" : "Apply blocking") { ledger.applyBlocking() }

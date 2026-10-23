@@ -130,8 +130,8 @@ final class Ledger: ObservableObject {
         let saved = store.load()
         for a in saved.apps where !a.id.hasPrefix("pid ") {
             // Re-resolve plain executables so names learned by older versions ("2.1.308") are corrected and merged.
-            let ident = a.bundlePath != nil || a.isSystem ? AppIdentity(id: a.id, name: a.name, bundlePath: a.bundlePath, isSystem: a.isSystem, isExtension: a.id.hasSuffix("#ext"))
-                                                         : AppIdentity.resolve(processPath: a.id)
+            let ident = a.isSystem || a.id.hasSuffix("#ext") ? AppIdentity(id: a.id, name: a.name, bundlePath: a.bundlePath, isSystem: a.isSystem, isExtension: a.id.hasSuffix("#ext"))
+                                                             : AppIdentity.resolve(processPath: a.id)
             var e = table[ident.id] ?? AppEntry(identity: ident)
             e.totalIn += a.totalIn; e.totalOut += a.totalOut; e.lastActive = max(e.lastActive, a.lastActive)
             table[ident.id] = e
@@ -352,7 +352,31 @@ final class Ledger: ObservableObject {
     }
 
     /// With the root helper installed, keep the pf table in step with the rules automatically.
-    func refreshBlocklist() { enforcer.sync(wantedBlocklist) }
+    func refreshBlocklist() {
+        enforcer.sync(wantedBlocklist)
+        enforcer.syncApps(deniedAppPaths)
+    }
+
+    /// Apps denied outright. The root daemon blocks every socket of their processes (helpers included), by local
+    /// port, so it does not matter which server they try next. An app with any allow rule is left to the address list.
+    var deniedAppPaths: Set<String> {
+        var candidates = Set(table.values.map(\.identity.ruleKey))
+        for r in rules.ruleSet.rules { if let p = r.processPath { candidates.insert(p) } }
+        let active = rules.ruleSet.activeProfileID
+        var out = Set<String>()
+        for key in candidates where key.hasPrefix("/") && key != Bundle.main.bundlePath {
+            let mine = rules.rules(for: key).filter { $0.enabled && ($0.profileID == nil || $0.profileID == active) }
+            if mine.contains(where: { $0.verdict == .allow }) { continue }
+            let probe = Connection(process: ProcessIdentity(path: key), address: "203.0.113.9", port: 443, proto: .tcp)
+            if let m = rules.engine.matchingRule(probe) {
+                let wholeApp = m.remoteDomain == nil && m.remoteHost == nil && m.remoteAddress == nil && m.ports == nil && m.proto == nil
+                if m.verdict == .deny, wholeApp { out.insert(key) }
+            } else if rules.engine.defaultVerdict == .deny {
+                out.insert(key)
+            }
+        }
+        return out
+    }
 
     func applyBlocking() { enforcer.applyOnce(wantedBlocklist) }
 

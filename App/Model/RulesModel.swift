@@ -40,7 +40,7 @@ final class RulesModel: ObservableObject {
                 set.rules[i].remoteAddress = d
                 set.rules[i].remoteDomain = nil
             }
-            if let p = set.rules[i].processPath, !p.contains(".app") {
+            if let p = set.rules[i].processPath, !p.contains(".app") || p.contains(".AppBundle/") {
                 let resolved = AppIdentity.resolve(processPath: p).id
                 if resolved != p && resolved != "macOS" { set.rules[i].processPath = resolved }
             }
