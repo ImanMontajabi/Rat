@@ -13,30 +13,46 @@ struct GeoPoint: Hashable {
     func hash(into h: inout Hasher) { h.combine(city); h.combine(country); h.combine(coordinate.latitude) }
 }
 
-/// Fully offline IP geolocation. Reads the DB-IP Lite city database bundled in Contents/Resources/Vendor;
-/// no address ever leaves the machine.
+/// Fully offline IP geolocation and network owners. Reads the DB-IP Lite databases bundled in
+/// Contents/Resources/Vendor (City for the map, ASN for "who runs this network"); no address ever leaves the machine.
 final class GeoService: @unchecked Sendable {
     static let databaseName = "dbip-city-lite"
-    private let db: GeoIP?
+    static let asnDatabaseName = "dbip-asn-lite"
     private let lock = NSLock()
+    private var db: GeoIP?
+    private var asn: ASNDatabase?
     private var cache: [String: GeoPoint?] = [:]
+    private var asnCache: [String: NetworkOwner?] = [:]
 
-    var available: Bool { db != nil }
+    var available: Bool { lock.withLock { db != nil } }
+    var networksAvailable: Bool { lock.withLock { asn != nil } }
 
     init() {
-        let env = ProcessInfo.processInfo.environment["RAT_GEOIP_DB"]
-        let bundled = Bundle.main.url(forResource: Self.databaseName, withExtension: "mmdb", subdirectory: "Vendor")?.path
-        let path = [env, bundled].compactMap { $0 }.first { FileManager.default.fileExists(atPath: $0) }
-        db = path.flatMap { try? GeoIP(path: $0) }
-        logger.notice("geoip database \(self.db == nil ? "missing" : "loaded", privacy: .public)")
+        db = Self.bundledPath(Self.databaseName, env: "RAT_GEOIP_DB").flatMap { try? GeoIP(path: $0) }
+        asn = Self.bundledPath(Self.asnDatabaseName, env: "RAT_GEOIP_ASN_DB").flatMap { try? ASNDatabase(path: $0) }
+        logger.notice("geoip city \(self.db == nil ? "missing" : "loaded", privacy: .public), asn \(self.asn == nil ? "missing" : "loaded", privacy: .public)")
+    }
+
+    static func bundledPath(_ name: String, env: String) -> String? {
+        let fromEnv = ProcessInfo.processInfo.environment[env]
+        let bundled = Bundle.main.url(forResource: name, withExtension: "mmdb", subdirectory: "Vendor")?.path
+        return [fromEnv, bundled].compactMap { $0 }.first { FileManager.default.fileExists(atPath: $0) }
     }
 
     func lookup(_ ip: String) -> GeoPoint? {
         if let hit = lock.withLock({ cache[ip] }) { return hit }
-        let result = db?.locate(ip).map {
+        let result = lock.withLock { db }?.locate(ip).map {
             GeoPoint(coordinate: .init(latitude: $0.latitude, longitude: $0.longitude), city: $0.city, country: $0.country)
         }
         lock.withLock { cache[ip] = .some(result) }
+        return result
+    }
+
+    /// The network an address belongs to (`AS13335 Cloudflare, Inc.`): who runs the network, not the app's vendor.
+    func network(_ ip: String) -> NetworkOwner? {
+        if let hit = lock.withLock({ asnCache[ip] }) { return hit }
+        let result = lock.withLock { asn }?.owner(ip)
+        lock.withLock { asnCache[ip] = .some(result) }
         return result
     }
 

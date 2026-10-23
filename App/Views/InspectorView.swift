@@ -44,6 +44,9 @@ struct SummaryInspector: View {
                 group("Top Processes", topApps.map { ($0.identity.name, "\(formatBytes($0.totalIn)) down, \(formatBytes($0.totalOut)) up") })
                 group("Top Domains", ledger.domains().prefix(3).map { ($0.name, "\($0.count) connection\($0.count == 1 ? "" : "s")") })
                 if ledger.geo.available { group("Top Countries", ledger.countries().prefix(3).map { ($0.name, "\($0.count) connection\($0.count == 1 ? "" : "s")") }) }
+                if ledger.geo.networksAvailable, !ledger.networks().isEmpty {
+                    group("Top Networks", ledger.networks().prefix(3).map { ($0.name, "\($0.count) connection\($0.count == 1 ? "" : "s")") })
+                }
             }
         }
     }
@@ -165,6 +168,10 @@ struct ProcessInspector: View {
                 ProxyBadge(hop: via)
             } else {
                 Text("\(r.proto) \(r.address):\(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).font(.caption).foregroundStyle(.secondary).help(serviceHelp)
+            }
+            if let n = r.network {
+                Text(n).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    .help("The organization that runs this server's network (often a cloud or hosting provider), not necessarily who runs the service.")
             }
             if showProcess, let p = r.process {
                 Text("via \(p)\(r.pid.map { " (pid \($0))" } ?? "")").font(.caption2).foregroundStyle(.secondary)

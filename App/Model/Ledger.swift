@@ -41,6 +41,8 @@ struct RemoteHost: Identifiable, Hashable {
     /// The process that holds the socket (an app's helper, or the system service in the "macOS" row).
     var pid: Int32? = nil
     var process: String? = nil
+    /// Who runs the server's network (`AS13335 Cloudflare, Inc.`), from the offline ASN database.
+    var network: String? = nil
 }
 
 struct AppEntry: Identifiable {
@@ -301,7 +303,8 @@ final class Ledger: ObservableObject {
                 case .ask:
                     askCount += 1
                     if warmedUp {
-                        alerts.report(ConnectionAlert(appID: e.identity.ruleKey, appName: e.identity.name, host: host, address: address, port: port, proto: proto.rawValue.uppercased()))
+                        alerts.report(ConnectionAlert(appID: e.identity.ruleKey, appName: e.identity.name, host: host, address: address, port: port, proto: proto.rawValue.uppercased(),
+                                                      network: address.isEmpty || isLocalAddress(address) ? nil : geo.network(address)?.label))
                     }
                 case .allow: break
                 }
@@ -312,7 +315,8 @@ final class Ledger: ObservableObject {
                 let host = await names.name(for: c.remoteAddress)
                 let geoPoint = isLocalAddress(c.remoteAddress) ? nil : geo.lookup(c.remoteAddress)
                 remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint,
-                                          pid: c.pid, process: c.processName))
+                                          pid: c.pid, process: c.processName,
+                                          network: isLocalAddress(c.remoteAddress) ? nil : geo.network(c.remoteAddress)?.label))
 
                 guard !isLocalAddress(c.remoteAddress) else { continue }
                 if judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp) == .deny, c.localPort != 0 {
@@ -327,7 +331,8 @@ final class Ledger: ObservableObject {
                     var hop = r.hop
                     hop.serverGeo = hop.server.flatMap { isLocalAddress($0) ? nil : geo.lookup($0) }
                     let point = address.flatMap { isLocalAddress($0) ? nil : geo.lookup($0) }
-                    remotes.append(RemoteHost(address: address ?? "", host: r.host, port: r.port, proto: "TCP", geo: point, via: hop, pid: r.pid, process: process))
+                    remotes.append(RemoteHost(address: address ?? "", host: r.host, port: r.port, proto: "TCP", geo: point, via: hop, pid: r.pid, process: process,
+                                              network: address.flatMap { isLocalAddress($0) ? nil : geo.network($0)?.label }))
                 }
                 if judge(host: r.host, address: address ?? "", port: r.port, proto: .tcp) == .deny, r.live { loopbackNow.insert(r.clientPort) }
             }
@@ -412,6 +417,13 @@ final class Ledger: ObservableObject {
         var d: [String: Int] = [:]
         for a in apps { for r in a.remotes { d[registrableDomain(r.host), default: 0] += 1 } }
         return d.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }
+    }
+
+    /// Networks (ASN organizations) by number of connections, for the Summary.
+    func networks() -> [(name: String, count: Int)] {
+        var d: [String: Int] = [:]
+        for a in apps { for r in a.remotes { if let n = r.network { d[n, default: 0] += 1 } } }
+        return d.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 || ($0.1 == $1.1 && $0.0 < $1.0) }
     }
 
     func countries() -> [(name: String, count: Int)] {

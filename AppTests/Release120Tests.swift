@@ -47,4 +47,30 @@ final class Release120Tests: XCTestCase {
         let calculator = AppIdentity.resolve(processPath: "/System/Applications/Calculator.app/Contents/MacOS/Calculator")
         XCTAssertEqual(calculator.mainProcessName, "Calculator")
     }
+
+    // MARK: #4 network owner (ASN)
+
+    func testBundledASNDatabaseNamesNetworks() throws {
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "dbip-asn-lite", withExtension: "mmdb", subdirectory: "Vendor"),
+                                "Contents/Resources/Vendor/dbip-asn-lite.mmdb must be bundled; run scripts/fetch-geoip.sh")
+        XCTAssertFalse(url.path.isEmpty)
+        let g = GeoService()
+        XCTAssertTrue(g.networksAvailable)
+        XCTAssertEqual(g.network("1.1.1.1")?.number, 13335)
+        XCTAssertTrue(g.network("8.8.8.8")?.label.hasPrefix("AS15169 ") ?? false, g.network("8.8.8.8")?.label ?? "nil")
+        XCTAssertNil(g.network("192.168.1.10"))
+    }
+
+    func testLedgerShowsTheNetworkOfEachServer() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-120-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ledger = Ledger(directory: dir, helperInstalled: true)
+        guard ledger.geo.networksAvailable else { throw XCTSkip("no ASN database") }
+        await ledger.ingest([ObservedConnection(pid: 900, processPath: "/Applications/Demo/Foo.app/Contents/MacOS/Foo", proto: .tcp,
+                                                remoteAddress: "1.1.1.1", remotePort: 443, localPort: 60010, tcpState: "ESTABLISHED")], [])
+        let foo = try XCTUnwrap(ledger.apps.first { $0.id == "/Applications/Demo/Foo.app" })
+        XCTAssertTrue(foo.remotes.first?.network?.hasPrefix("AS13335 ") ?? false)
+        XCTAssertEqual(ledger.networks().first?.count, 1)
+    }
 }

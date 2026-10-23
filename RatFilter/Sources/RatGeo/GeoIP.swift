@@ -8,9 +8,10 @@ public struct GeoLocation: Equatable, Sendable {
     public var countryCode: String
 }
 
-/// Offline IP geolocation backed by a DB-IP Lite city database (CC BY 4.0, https://db-ip.com).
+/// Offline IP geolocation backed by a DB-IP Lite city database (CC BY 4.0, https://db-ip.com), or any file with
+/// the GeoIP2 City layout (MaxMind GeoLite2-City / GeoIP2-City).
 public final class GeoIP: @unchecked Sendable {
-    private let db: MMDB
+    public let db: MMDB
 
     public init(path: String) throws { db = try MMDB(path: path) }
 
@@ -20,6 +21,28 @@ public final class GeoIP: @unchecked Sendable {
                            city: r["city"]?["names"]?["en"]?.string ?? "",
                            country: r["country"]?["names"]?["en"]?.string ?? "",
                            countryCode: r["country"]?["iso_code"]?.string ?? "")
+    }
+}
+
+/// Who runs the network an address belongs to: `AS13335 Cloudflare, Inc.`. It is the network's owner (a cloud or
+/// hosting provider for most services), not the vendor of the app or site.
+public struct NetworkOwner: Equatable, Sendable {
+    public var number: UInt32
+    public var organization: String
+    public init(number: UInt32, organization: String) { self.number = number; self.organization = organization }
+    public var label: String { organization.isEmpty ? "AS\(number)" : "AS\(number) \(organization)" }
+}
+
+/// Offline ASN lookup backed by DB-IP "IP to ASN Lite" (CC BY 4.0) or MaxMind GeoLite2-ASN: both use the fields
+/// `autonomous_system_number` and `autonomous_system_organization`.
+public final class ASNDatabase: @unchecked Sendable {
+    public let db: MMDB
+
+    public init(path: String) throws { db = try MMDB(path: path) }
+
+    public func owner(_ address: String) -> NetworkOwner? {
+        guard let r = db.lookup(address), case .uint(let n)? = r["autonomous_system_number"], n > 0, n <= UInt64(UInt32.max) else { return nil }
+        return NetworkOwner(number: UInt32(n), organization: r["autonomous_system_organization"]?.string ?? "")
     }
 }
 

@@ -15,6 +15,8 @@ public final class MMDB: @unchecked Sendable {
     public enum Failure: Error { case notMMDB, unsupported(String), corrupt }
 
     private let data: Data
+    /// The file's metadata map (`database_type`, `build_epoch`, `description`, …).
+    public let metadata: [String: Value]
     private let nodeCount: Int
     private let recordSize: Int
     private let ipVersion: Int
@@ -34,11 +36,30 @@ public final class MMDB: @unchecked Sendable {
         guard case .map(let meta) = try reader.decode(at: r.upperBound).value,
               case .uint(let nc)? = meta["node_count"], case .uint(let rs)? = meta["record_size"],
               case .uint(let ipv)? = meta["ip_version"] else { throw Failure.corrupt }
+        metadata = meta
         nodeCount = Int(nc); recordSize = Int(rs); ipVersion = Int(ipv)
         guard [24, 28, 32].contains(recordSize) else { throw Failure.unsupported("record size \(recordSize)") }
+        guard [4, 6].contains(ipVersion), nodeCount > 0, nodeCount < Int(Int32.max) else { throw Failure.corrupt }
         treeSize = recordSize * 2 / 8 * nodeCount
         dataSectionStart = treeSize + 16
+        // A file whose search tree does not fit before the metadata is truncated or not what it claims.
+        guard dataSectionStart <= r.lowerBound else { throw Failure.corrupt }
         _ = reader
+        // IPv4 addresses live under ::/96 in an IPv6 tree; found once here so lookups only read.
+        if ipVersion == 6 {
+            var node = 0
+            for _ in 0..<96 where node < nodeCount { node = readNode(node, bit: 0) }
+            ipv4Start = node
+        }
+    }
+
+    /// `database_type`, e.g. "DBIP-City-Lite" or "GeoLite2-ASN".
+    public var databaseType: String { metadata["database_type"]?.string ?? "" }
+
+    /// When the file was built (`build_epoch`).
+    public var buildDate: Date? {
+        guard case .uint(let e)? = metadata["build_epoch"] else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(e))
     }
 
     /// Decoded record for an IPv4/IPv6 address string, or nil if not in the database.
@@ -47,23 +68,21 @@ public final class MMDB: @unchecked Sendable {
         var node = 0
         var path = bits
         if ipVersion == 6, bits.count == 32 {
-            if let s = ipv4Start { node = s } else {
-                for _ in 0..<96 where node < nodeCount { node = readNode(node, bit: 0) }
-                ipv4Start = node
-            }
+            node = ipv4Start ?? nodeCount
         } else if ipVersion == 4, bits.count == 128 { return nil }
         for bit in path where node < nodeCount { node = readNode(node, bit: bit) }
         path.removeAll()
         guard node > nodeCount else { return nil }
         let offset = treeSize + (node - nodeCount)
-        guard offset < data.count else { return nil }
+        guard offset >= dataSectionStart, offset < data.count else { return nil }
         var d = Decoder(data: data, base: dataSectionStart, pointerBase: dataSectionStart)
         return (try? d.decode(at: offset))?.value
     }
 
     private func readNode(_ n: Int, bit: Int) -> Int {
         let o = n * recordSize / 4
-        guard o + 8 <= data.count || recordSize != 32 else { return nodeCount }
+        // Every read stays inside the file; a bad tree ends the search (as "not found").
+        guard o >= 0, o + recordSize / 4 <= data.count else { return nodeCount }
         let b = { (i: Int) -> Int in Int(self.data[self.data.startIndex + o + i]) }
         switch recordSize {
         case 24: return bit == 0 ? (b(0) << 16 | b(1) << 8 | b(2)) : (b(3) << 16 | b(4) << 8 | b(5))
@@ -91,6 +110,9 @@ public final class MMDB: @unchecked Sendable {
         let data: Data
         let base: Int
         let pointerBase: Int
+        /// Values decoded so far. A record has a few dozen; a crafted file (pointer loops, maps of millions of
+        /// entries) is cut off instead of keeping a lookup busy.
+        var budget = 20_000
 
         func byte(_ i: Int) throws -> Int {
             guard i >= 0, data.startIndex + i < data.endIndex else { throw Failure.corrupt }
@@ -104,7 +126,8 @@ public final class MMDB: @unchecked Sendable {
         }
 
         mutating func decode(at start: Int, depth: Int = 0) throws -> (value: Value, next: Int) {
-            guard depth < 16 else { throw Failure.corrupt }
+            guard depth < 16, budget > 0 else { throw Failure.corrupt }
+            budget -= 1
             var p = start
             let ctrl = try byte(p); p += 1
             var type = ctrl >> 5
@@ -128,15 +151,24 @@ public final class MMDB: @unchecked Sendable {
             else if size == 31 { size = 65_821 + Int(try uint(p, 3)); p += 3 }
             switch type {
             case 2:
-                guard data.startIndex + p + size <= data.endIndex else { throw Failure.corrupt }
+                guard p >= 0, data.startIndex + p + size <= data.endIndex else { throw Failure.corrupt }
                 return (.string(String(decoding: data[(data.startIndex + p)..<(data.startIndex + p + size)], as: UTF8.self)), p + size)
             case 3:
+                guard size == 8 else { throw Failure.corrupt }
                 let bits = UInt64(try uint(p, 8)); return (.double(Double(bitPattern: bits)), p + 8)
             case 15:
+                guard size == 4 else { throw Failure.corrupt }
                 let bits = UInt32(try uint(p, 4)); return (.double(Double(Float(bitPattern: bits))), p + 4)
-            case 4: return (.bytes(data.subdata(in: (data.startIndex + p)..<(data.startIndex + p + size))), p + size)
-            case 5, 6, 9, 10: return (.uint(size == 0 ? 0 : try uint(p, min(size, 8))), p + size)
-            case 8: return (.int(Int64(Int32(truncatingIfNeeded: try uint(p, size)))), p + size)
+            case 4:
+                guard p >= 0, data.startIndex + p + size <= data.endIndex else { throw Failure.corrupt }
+                return (.bytes(data.subdata(in: (data.startIndex + p)..<(data.startIndex + p + size))), p + size)
+            case 5, 6, 9, 10:
+                guard size <= (type == 10 ? 16 : type == 9 ? 8 : type == 6 ? 4 : 2) else { throw Failure.corrupt }
+                // uint128 keeps its low 64 bits.
+                return (.uint(size == 0 ? 0 : try uint(p + max(size - 8, 0), min(size, 8))), p + size)
+            case 8:
+                guard size <= 4 else { throw Failure.corrupt }
+                return (.int(Int64(Int32(truncatingIfNeeded: try uint(p, size)))), p + size)
             case 7:
                 var m: [String: Value] = [:]
                 for _ in 0..<size {

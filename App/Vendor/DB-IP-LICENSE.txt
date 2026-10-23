@@ -1,2 +1,3 @@
-IP geolocation data is provided by DB-IP.com (https://db-ip.com), "IP to City Lite" database,
-licensed under Creative Commons Attribution 4.0 International (https://creativecommons.org/licenses/by/4.0/).
+IP geolocation and network data is provided by DB-IP.com (https://db-ip.com): the "IP to City Lite" and
+"IP to ASN Lite" databases, licensed under Creative Commons Attribution 4.0 International
+(https://creativecommons.org/licenses/by/4.0/).
