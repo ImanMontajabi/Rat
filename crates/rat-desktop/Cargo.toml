@@ -1,0 +1,12 @@
+[package]
+name = "rat-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rat-core = { path = "../rat-core" }
+rat-platform = { path = "../rat-platform" }
+gpui-kit = "=0.8.0"
+serde_json.workspace = true
+

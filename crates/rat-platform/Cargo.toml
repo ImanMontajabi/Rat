@@ -1,0 +1,15 @@
+[package]
+name = "rat-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rat-core = { path = "../rat-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+netstat2 = "0.11.2"
+sysinfo = "0.37"
+maxminddb = "0.26"
+

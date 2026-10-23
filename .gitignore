@@ -1,4 +1,7 @@
 .DS_Store
+/target/
+/geoip/
+/dist/
 .build/
 .swiftpm/
 package-lock.json
