@@ -138,6 +138,9 @@ struct MonitorSettings: View {
             SettingToggle(title: "Include connections of other users",
                           detail: ledger.enforcer.helperInstalled ? "Processes of other accounts, seen through the background helper." : "Needs the background helper (Security tab); without it Rat only sees your own processes.",
                           isOn: $s.includeOtherUsers)
+            SettingToggle(title: "Look up where proxied connections go",
+                          detail: "Connections through a local proxy (an SSH tunnel, a SOCKS or HTTP proxy) show their real destination. To place a destination name on the map, Rat looks it up with this Mac’s DNS, which tells your DNS resolver the name the proxy may have been hiding.",
+                          isOn: $s.resolveProxiedHosts)
         }
     }
 }
@@ -211,7 +214,7 @@ struct SecuritySettings: View {
             if enf.helperInstalled {
                 if enf.helperOutdated {
                     Label("Installed, but an older version", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
-                    Text("This helper is from an older version: before 1.0.4 it blocked server addresses for every app (which can break DNS), and it does not report its status. Update it.")
+                    Text("This helper is from an older version: it cannot see where connections through a local proxy go, and a denied app could still use one (helpers before 1.0.4 also blocked server addresses for every app). Update it.")
                         .font(.callout).foregroundStyle(.secondary)
                     Button(enf.busy ? "Updating…" : "Update Helper…") { enf.installHelper() }.disabled(enf.busy)
                 } else {
@@ -223,8 +226,13 @@ struct SecuritySettings: View {
                     if !st.anchorHooked {
                         Label("/etc/pf.conf does not load the com.apple anchors, so the rules are not evaluated", systemImage: "xmark.octagon").foregroundStyle(.red)
                     }
-                    Label("Denied apps running: \(st.deniedApps.count), blocked connections: \(st.blockedPorts)", systemImage: "shield.checkered")
+                    Label("Denied apps running: \(st.deniedApps.count), blocked connections: \(st.blockedPorts)\(st.blockedLoopbackPorts.map { $0 > 0 ? ", through local proxies: \($0)" : "" } ?? "")", systemImage: "shield.checkered")
                         .foregroundStyle(.secondary)
+                    if let capture = st.proxyCapture {
+                        Label(capture ? "Seeing destinations of connections through local proxies" : "Could not open a packet capture device on lo0, so proxied destinations come only from command lines",
+                              systemImage: capture ? "arrow.triangle.branch" : "exclamationmark.triangle")
+                            .foregroundStyle(capture ? Color.secondary : Color.orange)
+                    }
                 } else {
                     Label("The enforcer daemon is not running, so nothing is blocked", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     Button(enf.busy ? "Reinstalling…" : "Reinstall Helper…") { enf.installHelper() }.disabled(enf.busy)

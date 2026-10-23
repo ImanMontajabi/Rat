@@ -52,17 +52,24 @@ public struct EnforcerStatus: Codable, Equatable {
     public var anchorHooked: Bool
     public var deniedApps: [String: App]
     public var blockedPorts: Int
+    /// Loopback connections of denied apps to other apps' ports (local proxies, SSH forwards) blocked on lo0.
+    public var blockedLoopbackPorts: Int?
+    /// Whether the daemon reads proxy requests on lo0 (nil from daemons before 1.1.0).
+    public var proxyCapture: Bool?
 
-    public init(pid: Int32, updated: Date, pfEnabled: Bool, anchorHooked: Bool, deniedApps: [String: App], blockedPorts: Int) {
+    public init(pid: Int32, updated: Date, pfEnabled: Bool, anchorHooked: Bool, deniedApps: [String: App], blockedPorts: Int,
+                blockedLoopbackPorts: Int? = nil, proxyCapture: Bool? = nil) {
         self.pid = pid; self.updated = updated; self.pfEnabled = pfEnabled; self.anchorHooked = anchorHooked
         self.deniedApps = deniedApps; self.blockedPorts = blockedPorts
+        self.blockedLoopbackPorts = blockedLoopbackPorts; self.proxyCapture = proxyCapture
     }
 }
 
 /// Root daemon. For every process that belongs to a denied app it reads all sockets on every pass (every 3 ms while
 /// such a process runs) and loads their local ports into the pf anchor, so connections to servers Rat has never
 /// seen (CDN rotation, IPv6 fallback, QUIC migration) are cut as well. Only ports are ever blocked, never remote
-/// addresses.
+/// addresses. Loopback connections of denied processes to another app's port (a local proxy, an `ssh -L` forward)
+/// are blocked on lo0, so a denied app cannot leave the Mac through a tunnel either.
 public final class EnforcerDaemon {
     public struct Settings {
         public var deniedFile: String
@@ -72,6 +79,9 @@ public final class EnforcerDaemon {
         public var legacyBlocklistFile: String?
         /// Where the daemon publishes `EnforcerStatus` as JSON; optional.
         public var statusFile: String?
+        /// Where proxied connections of `ownerUID`'s processes are published (see `ProxyWatch`); optional.
+        public var proxiedFile: String?
+        public var ownerUID: uid_t?
         public var anchor = "com.apple/rat"
         /// Pass interval while a denied app has processes. Every pass reads the process list and every socket of
         /// every denied process (reading Chrome's ~30 processes takes about 0.05 ms).
@@ -102,7 +112,11 @@ public final class EnforcerDaemon {
     private var portsByApp: [String: (processes: Int, ports: Set<Int>)] = [:]
     public private(set) var lastTickDuration: TimeInterval = 0
     private var portSeen: [Int: Date] = [:]
+    private var loopbackSeen: [Int: Date] = [:]
+    private var fileLoopbackPorts: [Int] = []
     public private(set) var loadedPorts: [Int] = []
+    public private(set) var loadedLoopbackPorts: [Int] = []
+    public private(set) var proxyWatch: ProxyWatch?
     private var loaded = false
     private var token: String?
     private var lastWatchdog = Date.distantPast
@@ -125,13 +139,20 @@ public final class EnforcerDaemon {
         _ = run("/sbin/pfctl", ["-a", settings.anchor, "-F", "all"], nil)
         if let legacy = settings.legacyBlocklistFile { try? FileManager.default.removeItem(atPath: legacy) }
         loadedPorts = []
+        loadedLoopbackPorts = []
         loaded = true
+        if let file = settings.proxiedFile, let owner = settings.ownerUID {
+            let w = ProxyWatch(settings: .init(file: file, ownerUID: owner))
+            w.removeFile()
+            if w.start() { proxyWatch = w }
+        }
     }
 
     public func stop() {
         _ = run("/sbin/pfctl", ["-a", settings.anchor, "-F", "all"], nil)
         if let token { _ = run("/sbin/pfctl", ["-X", token], nil) }
         if let f = settings.statusFile { try? FileManager.default.removeItem(atPath: f) }
+        proxyWatch?.removeFile()
     }
 
     /// Takes a reference on pf so it is enabled while we run (released in `stop`).
@@ -160,7 +181,7 @@ public final class EnforcerDaemon {
         defer { publishStatus(now: now) }
         guard !denied.isEmpty else {
             verdictCache.removeAll(); deniedPIDs.removeAll(); portsByApp.removeAll()
-            settle(now: now, live: [])
+            settle(now: now, live: [], loopback: [])
             return false
         }
         let pids = ConnectionSampler.allPIDs()
@@ -187,51 +208,72 @@ public final class EnforcerDaemon {
             firstSeen = firstSeen.filter { current.contains($0.key) }
             deniedPIDs = deniedPIDs.filter { current.contains($0) }
         }
-        guard !deniedPIDs.isEmpty else { portsByApp.removeAll(); settle(now: now, live: []); return false }
+        guard !deniedPIDs.isEmpty else { portsByApp.removeAll(); settle(now: now, live: [], loopback: []); return false }
 
         // Every socket of every denied process, every pass: descriptors are reused and a socket gets its port only
         // when it connects, so nothing read earlier can be trusted.
         var ports = Set<Int>()
         var byApp: [String: (processes: Int, ports: Set<Int>)] = [:]
+        var listening: [String: Set<Int>] = [:]
+        var loopbackSockets: [(entry: String, local: Int, remote: Int)] = []
         for pid in deniedPIDs {
             let entry = verdictCache[pid] ?? ""
             var app = byApp[entry] ?? (0, [])
             app.processes += 1
             for fd in ConnectionSampler.socketFDs(of: pid) {
-                guard let c = ConnectionSampler.connection(pid: pid, fd: fd, processPath: ""),
-                      c.localPort != 0, c.tcpState != "LISTEN" else { continue }
+                guard let c = ConnectionSampler.connection(pid: pid, fd: fd, processPath: ""), c.localPort != 0 else { continue }
+                if c.tcpState == "LISTEN" { listening[entry, default: []].insert(c.localPort); continue }
                 ports.insert(c.localPort)
                 app.ports.insert(c.localPort)
+                if c.proto == .tcp, ProxyWatch.isLoopback(c.remoteAddress) { loopbackSockets.append((entry, c.localPort, c.remotePort)) }
             }
             byApp[entry] = app
         }
         portsByApp = byApp
-        settle(now: now, live: ports)
+        settle(now: now, live: ports, loopback: Self.loopbackPortsToBlock(loopbackSockets, listening: listening))
         return true
     }
 
+    /// The loopback connections a denied app opened to another program (a local proxy, an `ssh -L` forward, any
+    /// local server): their local ports. Connections between the app's own processes, and connections other
+    /// programs opened to a port the app listens on, are left alone.
+    static func loopbackPortsToBlock(_ sockets: [(entry: String, local: Int, remote: Int)], listening: [String: Set<Int>]) -> Set<Int> {
+        var out = Set<Int>()
+        for s in sockets {
+            let own = listening[s.entry] ?? []
+            if own.contains(s.local) || own.contains(s.remote) { continue }
+            out.insert(s.local)
+        }
+        return out
+    }
+
     /// Loads the ports if they changed.
-    private func settle(now: Date, live ports: Set<Int>) {
+    private func settle(now: Date, live ports: Set<Int>, loopback: Set<Int>) {
         // Ports named by Rat (sockets a rule denies) count while the file is fresh: Rat rewrites it every pass,
         // so a crashed Rat cannot leave ports blocked for good.
         let fresh = portsStamp.map { now.timeIntervalSince($0) < 10 } ?? false
         for p in ports.union(fresh ? filePorts : []) { portSeen[p] = now }
+        for p in loopback.union(fresh ? fileLoopbackPorts : []) { loopbackSeen[p] = now }
         portSeen = portSeen.filter { now.timeIntervalSince($0.value) < settings.portHold }
-        let held = portSeen.keys.sorted()
-        if held != loadedPorts || !loaded {
+        loopbackSeen = loopbackSeen.filter { now.timeIntervalSince($0.value) < settings.portHold }
+        let held = portSeen.keys.sorted(), heldLoopback = loopbackSeen.keys.sorted()
+        if held != loadedPorts || heldLoopback != loadedLoopbackPorts || !loaded {
             let added = Set(held).subtracting(loadedPorts)
-            apply(ports: held)
+            apply(ports: held, loopback: heldLoopback)
+            // Loopback states are not killed: pfctl can only kill by address pair, and 127.0.0.1 <-> 127.0.0.1
+            // would be every local connection on the Mac. Rat's rules keep no state, so none exists by default.
             if !added.isEmpty { killStates(localPorts: added) }
         }
     }
 
-    private func apply(ports: [Int]) {
-        let rules = PFRules.render(ports: ports)
+    private func apply(ports: [Int], loopback: [Int]) {
+        let rules = PFRules.render(ports: ports, loopbackPorts: loopback)
         let t0 = Date()
         defer { if trace { FileHandle.standardError.write(Data("apply \(ports.count) ports in \(Int(Date().timeIntervalSince(t0) * 1000)) ms\n".utf8)) } }
         if rules.isEmpty { _ = run("/sbin/pfctl", ["-a", settings.anchor, "-F", "all"], nil) }
         else { _ = run("/sbin/pfctl", ["-a", settings.anchor, "-f", "-"], rules) }
         loadedPorts = ports
+        loadedLoopbackPorts = loopback
         loaded = true
         reloads += 1
     }
@@ -266,7 +308,8 @@ public final class EnforcerDaemon {
         lastStatus = now
         let status = EnforcerStatus(pid: getpid(), updated: now, pfEnabled: pfEnabled, anchorHooked: anchorHooked,
                                     deniedApps: portsByApp.mapValues { EnforcerStatus.App(processes: $0.processes, ports: $0.ports.count) },
-                                    blockedPorts: loadedPorts.count)
+                                    blockedPorts: loadedPorts.count, blockedLoopbackPorts: loadedLoopbackPorts.count,
+                                    proxyCapture: settings.proxiedFile == nil ? nil : proxyWatch?.capturing ?? false)
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .secondsSince1970
         guard let data = try? enc.encode(status) else { return }
@@ -300,7 +343,9 @@ public final class EnforcerDaemon {
             let f = stamp(pf)
             if f != portsStamp {
                 portsStamp = f
-                filePorts = PFRules.parsePorts((try? String(contentsOfFile: pf, encoding: .utf8)) ?? "")
+                let text = (try? String(contentsOfFile: pf, encoding: .utf8)) ?? ""
+                filePorts = PFRules.parsePorts(text)
+                fileLoopbackPorts = PFRules.parseLoopbackPorts(text)
             }
         }
     }

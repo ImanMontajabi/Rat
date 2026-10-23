@@ -29,12 +29,15 @@ enum TimeRange: String, CaseIterable, Identifiable {
 }
 
 struct RemoteHost: Identifiable, Hashable {
-    var id: String { address }
+    var id: String { via.map { "\(host):\(port) \($0.listener)" } ?? "\(address):\(port)" }
+    /// The server's address; for a destination behind a local proxy, the name's address (empty until looked up).
     let address: String
     var host: String
     var port: Int
     var proto: String
     var geo: GeoPoint?
+    /// Set when the connection went through a local proxy: `host` is the real destination, `via` the hop.
+    var via: ProxyHop? = nil
 }
 
 struct AppEntry: Identifiable {
@@ -109,6 +112,8 @@ final class Ledger: ObservableObject {
     private var table: [String: AppEntry] = [:]
     private var buckets: [Date: Bucket] = [:]
     private var deniedPorts = Set<Int>()
+    private var deniedLoopbackPorts = Set<Int>()
+    private let proxyResolver = ProxyResolver()
     private var signingCache: [String: (identifier: String?, team: String?)] = [:]
     private var running = false
     private var demo = false
@@ -126,7 +131,8 @@ final class Ledger: ObservableObject {
         #endif
         rules = RulesModel(directory: store.directory)
         enforcer = Enforcer(supportDirectory: store.directory, helperInstalled: helperInstalled,
-                            statusPath: helperInstalled == nil ? nil : store.directory.appendingPathComponent("enforcer-status.json").path)
+                            statusPath: helperInstalled == nil ? nil : store.directory.appendingPathComponent("enforcer-status.json").path,
+                            proxiedPath: helperInstalled == nil ? nil : store.directory.appendingPathComponent("proxied.json").path)
         myLocation = GeoService.localPoint()
         let saved = store.load()
         for a in saved.apps where !a.id.hasPrefix("pid ") {
@@ -206,7 +212,7 @@ final class Ledger: ObservableObject {
         return s
     }
 
-    private func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter]) async {
+    func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter]) async {
         let now = Date()
         let dt = max(now.timeIntervalSince(lastTick), 0.2)
         lastTick = now
@@ -224,6 +230,16 @@ final class Ledger: ObservableObject {
             if table[ident.id] == nil { table[ident.id] = AppEntry(identity: ident) }
             table[ident.id]!.pids.insert(c.pid)
         }
+
+        // Connections through a local proxy: the destination the client asked for replaces its loopback socket.
+        let unmasked = ProxyUnmasking.unmask(flows: enforcer.proxiedFlows(), conns: conns, now: now, arguments: { ProcessArguments.read(pid: $0) })
+        var proxiedByApp: [String: [ProxiedRemote]] = [:]
+        for r in unmasked.remotes {
+            let ident = identityByPid[r.pid] ?? AppIdentity.resolve(processPath: r.path, pid: r.pid)
+            proxiedByApp[ident.id, default: []].append(r)
+            if table[ident.id] == nil { table[ident.id] = AppEntry(identity: ident) }
+        }
+        let resolveProxied = AppSettings.shared.resolveProxiedHosts
 
         var rxByApp: [String: Double] = [:], txByApp: [String: Double] = [:]
         var totalRx = 0.0, totalTx = 0.0
@@ -254,12 +270,12 @@ final class Ledger: ObservableObject {
 
         var denyCount = 0, askCount = 0, listenCount = 0
         let wholeAppDenied = deniedAppPaths
-        var portsNow = Set<Int>()
+        var portsNow = Set<Int>(), loopbackNow = Set<Int>()
         for id in table.keys {
             var e = table[id]!
             let rx = rxByApp[id] ?? 0, tx = txByApp[id] ?? 0
             e.rates.append((rx, tx)); if e.rates.count > 14 { e.rates.removeFirst() }
-            if rx + tx > 0 || perApp[id] != nil { e.lastActive = now }
+            if rx + tx > 0 || perApp[id] != nil || proxiedByApp[id] != nil { e.lastActive = now }
             e.listening = perApp[id]?.listening ?? 0
             listenCount += e.listening
             if perApp[id] == nil { e.pids = e.pids.filter { pid in traffic.contains { $0.pid == pid } } }
@@ -267,36 +283,55 @@ final class Ledger: ObservableObject {
 
             var remotes: [RemoteHost] = []
             var seen = Set<String>()
-            let sig = e.remotes.isEmpty && perApp[id] == nil ? (nil as String?, nil as String?) : signing(for: e.identity)
-            for c in perApp[id]?.conns ?? [] where seen.insert("\(c.remoteAddress):\(c.remotePort)").inserted {
-                let host = await names.name(for: c.remoteAddress)
-                let geoPoint = isLocalAddress(c.remoteAddress) ? nil : geo.lookup(c.remoteAddress)
-                remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint))
-
-                guard !isLocalAddress(c.remoteAddress) else { continue }
-                                let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), host: host == c.remoteAddress ? nil : host,
-                                      address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp)
+            let sig = e.remotes.isEmpty && perApp[id] == nil && proxiedByApp[id] == nil ? (nil as String?, nil as String?) : signing(for: e.identity)
+            /// The verdict for one remote, counted and (for `.ask`) reported as an alert.
+            /// `host` is the name shown (the address itself when there is none); a name that is an IP literal is no name.
+            func judge(host: String, address: String, port: Int, proto: Connection.Proto) -> Verdict {
+                let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), host: host == address || isIPLiteral(host) ? nil : host,
+                                      address: address, port: port, proto: proto)
                 let matched = rules.engine.matchingRule(conn)
                 // Matches what is enforced: an app denied from the process list is denied for every server.
                 let verdict = wholeAppDenied.contains(e.identity.ruleKey) ? .deny : (matched?.verdict ?? rules.engine.defaultVerdict)
                 if matched == nil, verdict != .ask, warmedUp { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
                 switch verdict {
-                case .deny:
-                    denyCount += 1
-                    if c.localPort != 0 { portsNow.insert(c.localPort) }
+                case .deny: denyCount += 1
                 case .ask:
                     askCount += 1
                     if warmedUp {
-                        alerts.report(ConnectionAlert(appID: e.identity.ruleKey, appName: e.identity.name, host: host, address: c.remoteAddress, port: c.remotePort, proto: remotes.last!.proto))
+                        alerts.report(ConnectionAlert(appID: e.identity.ruleKey, appName: e.identity.name, host: host, address: address, port: port, proto: proto.rawValue.uppercased()))
                     }
                 case .allow: break
                 }
+                return verdict
+            }
+            for c in perApp[id]?.conns ?? [] where !unmasked.masked.contains(ProxyUnmasking.maskKey(pid: c.pid, localPort: c.localPort, remotePort: c.remotePort))
+                && seen.insert("\(c.remoteAddress):\(c.remotePort)").inserted {
+                let host = await names.name(for: c.remoteAddress)
+                let geoPoint = isLocalAddress(c.remoteAddress) ? nil : geo.lookup(c.remoteAddress)
+                remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint))
+
+                guard !isLocalAddress(c.remoteAddress) else { continue }
+                if judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp) == .deny, c.localPort != 0 {
+                    portsNow.insert(c.localPort)
+                }
+            }
+            for r in proxiedByApp[id] ?? [] {
+                // A rule that denies the real destination cuts the client's loopback connection to the proxy.
+                let address = proxyResolver.address(for: r.host, enabled: resolveProxied)
+                if seen.insert("proxy|\(r.host):\(r.port)|\(r.hop.listener)").inserted {
+                    var hop = r.hop
+                    hop.serverGeo = hop.server.flatMap { isLocalAddress($0) ? nil : geo.lookup($0) }
+                    let point = address.flatMap { isLocalAddress($0) ? nil : geo.lookup($0) }
+                    remotes.append(RemoteHost(address: address ?? "", host: r.host, port: r.port, proto: "TCP", geo: point, via: hop))
+                }
+                if judge(host: r.host, address: address ?? "", port: r.port, proto: .tcp) == .deny, r.live { loopbackNow.insert(r.clientPort) }
             }
             e.remotes = remotes
             table[id] = e
         }
         deniedCount = denyCount; unconfirmedCount = askCount; incomingCount = listenCount
         deniedPorts = portsNow
+        deniedLoopbackPorts = loopbackNow
         apps = Array(table.values)
     }
 
@@ -331,7 +366,7 @@ final class Ledger: ObservableObject {
     /// Hands the helper what to block. Only ports of denied sockets are ever blocked, never server addresses.
     func refreshEnforcement() {
         enforcer.syncApps(deniedAppPaths)
-        enforcer.syncPorts(deniedPorts)
+        enforcer.syncPorts(deniedPorts, loopback: deniedLoopbackPorts)
         enforcer.refreshStatus()
     }
 

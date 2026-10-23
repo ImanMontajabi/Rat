@@ -219,6 +219,9 @@ struct ProcessRow: View {
                     ForEach(app.remotes.prefix(30)) { r in
                         HStack {
                             Text(r.host).lineLimit(1)
+                            if let via = r.via {
+                                Text("via \(via.process)").foregroundStyle(.orange).lineLimit(1).help(via.label)
+                            }
                             Spacer()
                             Text("\(r.proto) \(r.port)").foregroundStyle(.secondary).monospacedDigit()
                         }

@@ -126,14 +126,21 @@ struct ProcessInspector: View {
                 ForEach(app.remotes.prefix(50)) { r in
                     VStack(alignment: .leading, spacing: 0) {
                         Text(r.host).lineLimit(1)
-                        Text("\(r.proto) \(r.address):\(r.port)").font(.caption).foregroundStyle(.secondary)
+                        if let via = r.via {
+                            // The real destination first, then the proxy hop it went through.
+                            Text(r.address.isEmpty || r.address == r.host ? "\(r.proto) port \(r.port)" : "\(r.proto) \(r.address):\(r.port)")
+                                .font(.caption).foregroundStyle(.secondary)
+                            ProxyBadge(hop: via)
+                        } else {
+                            Text("\(r.proto) \(r.address):\(r.port)").font(.caption).foregroundStyle(.secondary)
+                        }
                     }.padding(.leading, 6)
                 }
                 if app.remotes.isEmpty { Text("None").foregroundStyle(.secondary).padding(.leading, 6) }
             }
             SectionHeader(title: "Geographic Information", open: $geo)
             if geo {
-                let places = Set(app.remotes.compactMap { $0.geo }.map { "\($0.city), \($0.country)" }).sorted()
+                let places = Set(app.remotes.flatMap { [$0.geo, $0.via?.serverGeo] }.compactMap { $0 }.map { "\($0.city), \($0.country)" }).sorted()
                 if places.isEmpty { Text("No locations for these connections").foregroundStyle(.secondary).padding(.leading, 6) }
                 ForEach(places, id: \.self) { Text($0).padding(.leading, 6) }
             }
@@ -145,6 +152,20 @@ struct ProcessInspector: View {
             Text(k + ":").foregroundStyle(.secondary).frame(width: 64, alignment: .trailing)
             Text(v).textSelection(.enabled)
         }.font(.callout)
+    }
+}
+
+/// "via ssh proxy (127.0.0.1:1080 → 203.0.113.5)" under a destination that went through a local proxy.
+struct ProxyBadge: View {
+    let hop: ProxyHop
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "arrow.triangle.branch")
+            Text(hop.label).lineLimit(1).truncationMode(.middle)
+            Text(hop.kind).padding(.horizontal, 4).padding(.vertical, 1).overlay(RoundedRectangle(cornerRadius: 3).stroke(.secondary))
+        }
+        .font(.caption2).foregroundStyle(.orange)
+        .help("\(hop.label), \(hop.kind)\(hop.serverGeo.map { ". Proxy server in \($0.city), \($0.country)" } ?? "")")
     }
 }
 

@@ -19,34 +19,68 @@ struct MapPane: View {
                                   span: MKCoordinateSpan(latitudeDelta: lat, longitudeDelta: lon))
     }
 
-    private var fitted: [CLLocationCoordinate2D] { nodes.map(\.point.coordinate) + (ledger.myLocation.map { [$0.coordinate] } ?? []) }
+    private var fitted: [CLLocationCoordinate2D] { graph.nodes.map(\.point.coordinate) + (ledger.myLocation.map { [$0.coordinate] } ?? []) }
 
-    private struct Arc: Identifiable { let id: String; let coords: [CLLocationCoordinate2D]; let highlighted: Bool }
-    private struct Node: Identifiable { let id: String; let point: GeoPoint; let highlighted: Bool }
+    private struct Arc: Identifiable { let id: String; let coords: [CLLocationCoordinate2D]; let highlighted: Bool; let proxied: Bool }
+    private struct Node: Identifiable { let id: String; let point: GeoPoint; let highlighted: Bool; var proxy: Bool }
 
     private var visibleApps: [AppEntry] { ledger.apps.filter { selection == nil || $0.id == selection } }
 
-    private var nodes: [Node] {
-        var seen = Set<String>(); var out: [Node] = []
-        for a in visibleApps { for r in a.remotes { if let g = r.geo, seen.insert("\(g.city)|\(g.country)").inserted { out.append(Node(id: "\(g.city)|\(g.country)", point: g, highlighted: selection != nil)) } } }
-        return out
-    }
+    private static func key(_ g: GeoPoint) -> String { "\(g.city)|\(g.country)" }
 
-    private var arcs: [Arc] {
-        guard let me = ledger.myLocation else { return [] }
-        return nodes.map { Arc(id: $0.id, coords: Self.curve(from: me.coordinate, to: $0.point.coordinate), highlighted: $0.highlighted) }
+    /// Pins and lines. A connection through a local proxy is drawn in two hops, This Mac → proxy server → real
+    /// destination (the second hop dashed); when the proxy's server is unknown, one dashed line to the destination.
+    private var graph: (nodes: [Node], arcs: [Arc]) {
+        var nodes: [String: Node] = [:], order: [String] = []
+        var arcs: [String: Arc] = [:], arcOrder: [String] = []
+        let highlighted = selection != nil
+        func add(_ g: GeoPoint, proxy: Bool) {
+            let k = Self.key(g)
+            if nodes[k] == nil { nodes[k] = Node(id: k, point: g, highlighted: highlighted, proxy: proxy); order.append(k) }
+            else if proxy { nodes[k]!.proxy = true }
+        }
+        func arc(from a: CLLocationCoordinate2D, _ aKey: String, to b: GeoPoint, proxied: Bool) {
+            let id = "\(aKey)>\(Self.key(b))"
+            guard aKey != Self.key(b), arcs[id] == nil else { return }
+            arcs[id] = Arc(id: id, coords: Self.curve(from: a, to: b.coordinate), highlighted: highlighted, proxied: proxied)
+            arcOrder.append(id)
+        }
+        let me = ledger.myLocation
+        for a in visibleApps {
+            for r in a.remotes {
+                if let server = r.via?.serverGeo {
+                    add(server, proxy: true)
+                    if let me { arc(from: me.coordinate, "me", to: server, proxied: false) }
+                    if let g = r.geo { add(g, proxy: false); arc(from: server.coordinate, Self.key(server), to: g, proxied: true) }
+                } else if let g = r.geo {
+                    add(g, proxy: false)
+                    if let me { arc(from: me.coordinate, "me", to: g, proxied: r.via != nil) }
+                }
+            }
+        }
+        return (order.map { nodes[$0]! }, arcOrder.map { arcs[$0]! })
     }
 
     var body: some View {
+        let g = graph
         ZStack {
             Map(position: $position) {
-                ForEach(arcs) { a in
-                    MapPolyline(coordinates: a.coords).stroke(a.highlighted ? Color.green : Color(white: 0.75, opacity: 0.55), lineWidth: a.highlighted ? 3 : 2)
+                ForEach(g.arcs) { a in
+                    MapPolyline(coordinates: a.coords)
+                        .stroke(a.highlighted ? (a.proxied ? Color.orange : Color.green) : Color(white: 0.75, opacity: 0.55),
+                                style: StrokeStyle(lineWidth: a.highlighted ? 3 : 2, dash: a.proxied ? [7, 5] : []))
                 }
-                ForEach(nodes) { n in
-                    Annotation(n.point.city, coordinate: n.point.coordinate, anchor: .center) {
-                        Circle().fill(.white.opacity(0.85)).frame(width: 14, height: 14)
-                            .overlay(Circle().stroke(n.highlighted ? Color.blue : .gray, lineWidth: 2))
+                ForEach(g.nodes) { n in
+                    Annotation(n.proxy ? "Proxy · \(n.point.city)" : n.point.city, coordinate: n.point.coordinate, anchor: .center) {
+                        if n.proxy {
+                            Image(systemName: "arrow.triangle.branch").font(.system(size: 9, weight: .bold)).foregroundStyle(.orange)
+                                .frame(width: 18, height: 18)
+                                .background(RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.9)))
+                                .overlay(RoundedRectangle(cornerRadius: 5).stroke(n.highlighted ? Color.orange : .gray, lineWidth: 2))
+                        } else {
+                            Circle().fill(.white.opacity(0.85)).frame(width: 14, height: 14)
+                                .overlay(Circle().stroke(n.highlighted ? Color.blue : .gray, lineWidth: 2))
+                        }
                     }
                 }
                 if let me = ledger.myLocation {

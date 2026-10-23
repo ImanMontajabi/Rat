@@ -18,7 +18,22 @@ for app, a in sorted(s["deniedApps"].items()):
     print(f"  {a['processes']:3} processes, {a['ports']:3} open connections cut   {app}")
 if not s["deniedApps"]:
     print("  no process of a denied app is running")
+if s.get("proxyCapture") is not None:
+    print(f"  proxy unmasking on lo0: {'on' if s['proxyCapture'] else 'OFF (no BPF device)'}   loopback connections cut: {s.get('blockedLoopbackPorts', 0)}")
 PY
+PX=/var/run/com.imanmontajabi.rat.proxied.json
+if [ -r "$PX" ]; then
+  echo "== connections through local proxies (rat-enforcerd, lo0)"
+  /usr/bin/python3 - "$PX" <<'PY'
+import json, sys
+flows = json.load(open(sys.argv[1]))["flows"]
+for f in flows:
+    name = lambda p: (p or "?").rsplit("/", 1)[-1]
+    print(f"  {name(f['clientPath'])} -> {f['host']}:{f['port']} ({f['kind']}) via {name(f.get('proxyPath'))} 127.0.0.1:{f['proxyPort']}{'  (closed)' if f.get('closed') else ''}")
+if not flows:
+    print("  none in the last 30 s")
+PY
+fi
 else
   echo "  no status file: the helper (1.0.5 or later) is not installed or not running"
 fi

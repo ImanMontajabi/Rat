@@ -16,6 +16,11 @@ public struct ObservedConnection: Hashable, Sendable {
     public var localPort: Int
     public var tcpState: String?
 
+    public init(pid: Int32, processPath: String, proto: Proto, remoteAddress: String, remotePort: Int, localPort: Int, tcpState: String?) {
+        self.pid = pid; self.processPath = processPath; self.proto = proto; self.remoteAddress = remoteAddress
+        self.remotePort = remotePort; self.localPort = localPort; self.tcpState = tcpState
+    }
+
     public var processName: String { (processPath as NSString).lastPathComponent }
     public var isOutbound: Bool { !remoteAddress.isEmpty && remotePort != 0 }
 }

@@ -50,6 +50,8 @@ final class AppSettings: ObservableObject {
     @Published var additionalLocalRanges: String {
         didSet { defaults.set(additionalLocalRanges, forKey: "additionalLocalRanges"); LocalRanges.shared.set(additionalLocalRanges) }
     }
+    /// Look up the names of destinations seen through a local proxy, to place them on the map.
+    @Published var resolveProxiedHosts: Bool { didSet { defaults.set(resolveProxiedHosts, forKey: "resolveProxiedHosts") } }
 
     // Notifications
     @Published var notifySilentConnections: Bool { didSet { defaults.set(notifySilentConnections, forKey: "notifySilentConnections") } }
@@ -81,6 +83,7 @@ final class AppSettings: ObservableObject {
         sortKey = SortKey(rawValue: Preferences.store.string(forKey: "sortKey") ?? "") ?? .recent
         floatOnTop = bool("floatOnTop", false)
         additionalLocalRanges = Preferences.store.string(forKey: "additionalLocalRanges") ?? ""
+        resolveProxiedHosts = bool("resolveProxiedHosts", true)
         notifySilentConnections = bool("notifySilentConnections", true)
         notifyProfileSwitch = bool("notifyProfileSwitch", true)
         notifyAlertTimeout = bool("notifyAlertTimeout", true)

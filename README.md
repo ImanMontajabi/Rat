@@ -7,7 +7,7 @@ A network monitor and application firewall for macOS, modelled on Little Snitch.
 ![Network monitor](docs/screenshots/rat-monitor.jpg)
 <sub>Demo data. Server locations come from a bundled offline database; nothing leaves your Mac.</sub>
 
-> **Honest limits.** Little Snitch intercepts each connection *before* it is made, using Apple's Network Extension entitlement, which needs a paid developer account. Rat has none, so it is **reactive**: it notices a new connection after it starts, asks, and on **Deny** cuts it and blocks the server address. A blocked address is blocked for **every** app, not just one. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (sections 7 and 8).
+> **Honest limits.** Little Snitch intercepts each connection *before* it is made, using Apple's Network Extension entitlement, which needs a paid developer account. Rat has none, so it is **reactive**: it notices a new connection after it starts, asks, and on **Deny** cuts that app's connections by their local ports (never by server address, so other apps are not affected). A brand-new process can get its first packets out before the cut. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (sections 7, 8 and 10).
 
 ## Features
 
@@ -15,6 +15,7 @@ A network monitor and application firewall for macOS, modelled on Little Snitch.
 - **Offline world map:** server IPs are resolved on-device from a bundled DB-IP Lite database (`Contents/Resources/Vendor`). Arcs and city pins appear immediately, no lookups, no network.
 - **Connection alerts:** **Silent Allow** is the default, so Rat never nags on first launch. Switch to **Alert Mode** for a floating panel on unknown connections: pick the scope (*This App (Any Server)* by default, domain, exact host, port) and the lifetime (once, until quit, forever), then Allow or Deny. An app with a process-wide Allow or Deny never raises an alert, and pending alerts for it vanish.
 - **Rules window** (⇧⌘R): sidebar of Rules / Unapproved / Profiles / Rule Groups / Known Networks / Invalid Rules and a table with Active, Process, Description and Status. Rules matched on app, team ID, signing ID, domain, host, IP, port range and protocol; the most specific rule wins and deny beats allow on a tie. Rule groups, profiles (Home / Work / Public Wi-Fi), **automatic profile switching** per network, **unapproved rules** with a review queue, JSON **import / export**.
+- **Local proxies and SSH tunnels unmasked:** a connection through `127.0.0.1:<port>` (an `ssh -D` SOCKS tunnel, an HTTP or SOCKS proxy) shows its real destination, read from the client's proxy request on lo0 by the helper (or from `curl -x … https://host` style command lines without it), with the hop: *via ssh proxy (127.0.0.1:1080 → your server)*. The map draws This Mac → proxy server → destination. A denied app cannot leave through a local proxy or forward: its loopback connections to other programs are cut too.
 - **Menu bar:** live up/down throughput, profile selector, mode switch, shortcuts.
 - **Firewall enforcement:** Deny is enforced by an opt-in **background helper** (Security tab): a root LaunchDaemon, `rat-enforcerd`, that blocks the local ports of every connection of a denied app and its helpers (Chrome/Firefox/Steam helpers, Safari's WebKit networking), plus a second daemon that lists *every* process's connections so Rat also sees other users' and system processes. Rat never blocks server addresses, so other apps and DNS are never affected. Settings > Security shows what the helper is enforcing; `scripts/rat-status.sh` prints the same from a terminal. *Remove Helper* uninstalls both. Without the helper nothing is blocked and Rat sees only your own processes.
 - **Updates:** *Rat menu → Check for Updates…* reads GitHub Releases.
@@ -25,7 +26,7 @@ A network monitor and application firewall for macOS, modelled on Little Snitch.
 
 ## Install
 
-Download `Rat-v1.0.5-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
+Download `Rat-v1.1.0-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
 
 ## Build
 
