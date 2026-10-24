@@ -1,7 +1,44 @@
 use anyhow::{Context, Result, bail};
 use netstat2::{AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, get_sockets_info};
 use rat_core::{BlockRule, Connection, Location, Snapshot};
-use std::{net::SocketAddr, path::Path, process::Command, time::Instant};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Instant,
+};
+
+// Resolve relative to the executable first: Explorer/shortcuts need not start in
+// the app folder. Cargo binaries live in target/{debug,release}[/deps].
+fn geo_path(
+    explicit: Option<PathBuf>,
+    executable: Option<&Path>,
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
+    if explicit.is_some() {
+        return explicit;
+    }
+    let beside_exe = executable.and_then(Path::parent);
+    let mut roots = beside_exe.into_iter().collect::<Vec<_>>();
+    if let Some(dir) = beside_exe {
+        let build = if dir.file_name().is_some_and(|n| n == "deps") {
+            dir.parent()
+        } else {
+            Some(dir)
+        };
+        if let Some(target) = build
+            .and_then(Path::parent)
+            .filter(|p| p.file_name().is_some_and(|n| n == "target"))
+        {
+            roots.extend(target.parent());
+        }
+    }
+    roots.extend(cwd);
+    roots
+        .into_iter()
+        .map(|root| root.join("geoip/dbip-city-lite.mmdb"))
+        .find(|p| p.is_file())
+}
 use sysinfo::{Networks, System};
 
 pub struct Monitor {
@@ -12,25 +49,102 @@ pub struct Monitor {
     geo_error: Option<String>,
 }
 
+#[cfg(test)]
+mod geo_tests {
+    use super::*;
+
+    #[test]
+    fn discovers_database_for_cargo_and_portable_launches() {
+        let root = std::env::temp_dir().join(format!("rat-geo-{}", std::process::id()));
+        let repo = root.join("repo");
+        let portable = root.join("portable");
+        for base in [&repo, &portable] {
+            std::fs::create_dir_all(base.join("geoip")).unwrap();
+            std::fs::write(base.join("geoip/dbip-city-lite.mmdb"), b"fixture").unwrap();
+        }
+        for binary in [
+            "target/debug/rat-desktop.exe",
+            "target/release/rat-desktop.exe",
+            "target/debug/deps/test.exe",
+        ] {
+            assert_eq!(
+                geo_path(None, Some(&repo.join(binary)), Some(&root)),
+                Some(repo.join("geoip/dbip-city-lite.mmdb"))
+            );
+        }
+        assert_eq!(
+            geo_path(None, Some(&portable.join("Rat.exe")), Some(&repo)),
+            Some(portable.join("geoip/dbip-city-lite.mmdb"))
+        );
+        assert_eq!(
+            geo_path(None, Some(&root.join("Rat.exe")), Some(&repo)),
+            Some(repo.join("geoip/dbip-city-lite.mmdb"))
+        );
+        let explicit = root.join("custom.mmdb");
+        assert_eq!(
+            geo_path(
+                Some(explicit.clone()),
+                Some(&portable.join("Rat.exe")),
+                Some(&repo)
+            ),
+            Some(explicit)
+        );
+        assert_eq!(
+            geo_path(None, Some(&root.join("Rat.exe")), Some(&root)),
+            None
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the locally installed DB-IP City database"]
+    fn installed_database_resolves_public_addresses_and_live_connections() {
+        let mut monitor = Monitor::default();
+        let reader = monitor.geo.as_ref().expect("GeoIP database should load");
+        for ip in ["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"] {
+            let city = reader
+                .lookup::<maxminddb::geoip2::City>(ip.parse().unwrap())
+                .unwrap()
+                .unwrap();
+            assert!(
+                city.country.and_then(|c| c.names).is_some(),
+                "{ip} has no country"
+            );
+            assert!(
+                city.city.and_then(|c| c.names).is_some(),
+                "{ip} has no city"
+            );
+            let location = city.location.unwrap();
+            assert!(location.latitude.is_some() && location.longitude.is_some());
+        }
+        let snapshot = monitor.sample().unwrap();
+        assert!(snapshot.geo_available);
+        assert!(snapshot.geo_error.is_none());
+        eprintln!(
+            "Live TCP destinations: {}, located: {}",
+            snapshot.connections.len(),
+            snapshot
+                .connections
+                .iter()
+                .filter(|c| c.location.is_some())
+                .count()
+        );
+    }
+}
+
 impl Default for Monitor {
     fn default() -> Self {
         let explicit = std::env::var_os("RAT_GEOIP_DB").map(std::path::PathBuf::from);
-        let path = explicit.or_else(|| {
-            let local = Path::new("geoip/dbip-city-lite.mmdb").to_path_buf();
-            if local.exists() {
-                return Some(local);
-            }
-            std::env::current_exe()
-                .ok()
-                .and_then(|exe| exe.parent().map(|p| p.join("geoip/dbip-city-lite.mmdb")))
-                .filter(|p| p.exists())
-        });
-        let loaded = path.map(maxminddb::Reader::open_readfile);
-        let geo_error = loaded
-            .as_ref()
-            .and_then(|r| r.as_ref().err())
-            .map(|e| format!("Cannot open GeoIP database: {e}"));
-        let geo = loaded.and_then(Result::ok);
+        let executable = std::env::current_exe().ok();
+        let cwd = std::env::current_dir().ok();
+        let path = geo_path(explicit, executable.as_deref(), cwd.as_deref());
+        let (geo, geo_error) = match path {
+            Some(path) => match maxminddb::Reader::open_readfile(&path) {
+                Ok(reader) => (Some(reader), None),
+                Err(error) => (None, Some(format!("Cannot open GeoIP database {}: {error}", path.display()))),
+            },
+            None => (None, Some("GeoIP database missing. Place geoip/dbip-city-lite.mmdb beside Rat.exe or set RAT_GEOIP_DB to a City .mmdb file, then restart Rat.".into())),
+        };
         Self {
             system: System::new_all(),
             networks: Networks::new_with_refreshed_list(),

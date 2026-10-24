@@ -29,6 +29,10 @@ Open `dist/Rat/Rat.exe`. Keep the adjacent `geoip` directory for local destinati
 The executable embeds Rat's existing artwork as a multi-resolution Windows icon (16–256 px), used by Explorer, the title bar and the taskbar.
 Without the database, connection inspection and firewall controls still work.
 Alternatively set `RAT_GEOIP_DB` to an existing City `.mmdb` database before launch.
+Rat finds the database beside the executable, or in the repository's `geoip` folder
+for Cargo debug/release builds, regardless of the launch working directory. A
+missing or unreadable database is reported in the status bar; install or correct
+the database path and restart Rat to load it.
 An explicit invalid path produces a visible diagnostic. Database changes require restarting Rat.
 
 ## Features
