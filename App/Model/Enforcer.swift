@@ -40,6 +40,8 @@ final class Enforcer: ObservableObject {
     let snapshotURL: URL
     let appsURL: URL
     let portsURL: URL
+    /// Touched by Repair Firewall: the daemon puts pf right at once when this file changes (only its date is read).
+    let repairURL: URL
     private let statusURL: URL
     private let proxiedURL: URL
     private var proxiedStamp: Date?
@@ -52,16 +54,18 @@ final class Enforcer: ObservableObject {
         snapshotURL = supportDirectory.appendingPathComponent("system-sockets.txt")
         appsURL = supportDirectory.appendingPathComponent("denied-apps.txt")
         portsURL = supportDirectory.appendingPathComponent("denied-ports.txt")
+        repairURL = supportDirectory.appendingPathComponent("pf-repair-request")
         self.helperInstalled = helperInstalled ?? FileManager.default.fileExists(atPath: Self.plistPath(Self.applyLabel))
         statusURL = URL(fileURLWithPath: statusPath ?? Self.statusPath)
         proxiedURL = URL(fileURLWithPath: proxiedPath ?? Self.proxiedPath)
         // 1.0.4 and earlier had an "auto-apply" switch; a test could turn it off in the real preferences and Deny then
         // silently did nothing. With the helper installed, Deny is now always enforced.
         if !Preferences.isTesting && !Preferences.isDemo { UserDefaults.standard.removeObject(forKey: "autoApplyPF") }
-        // Helpers before 1.1.0 do not read proxy requests on lo0 (before 1.0.5 they also published no status, and
-        // before 1.0.4 they blocked server addresses for every app).
+        // Helpers before 1.4.0 do not repair pf when another program (a VPN client) turns it off or replaces its
+        // rules; before 1.1.0 they did not read proxy requests on lo0 (before 1.0.5 they also published no status,
+        // and before 1.0.4 they blocked server addresses for every app).
         if helperInstalled == nil, self.helperInstalled {
-            helperOutdated = !((try? String(contentsOfFile: Self.plistPath(Self.applyLabel), encoding: .utf8))?.contains("--proxied") ?? false)
+            helperOutdated = !((try? String(contentsOfFile: Self.plistPath(Self.applyLabel), encoding: .utf8))?.contains("--repair") ?? false)
         }
     }
 
@@ -106,6 +110,12 @@ final class Enforcer: ObservableObject {
         }
     }
 
+    /// Asks the daemon to put pf right now (Settings > Security): turn it on and restore the com.apple anchors, also
+    /// when that replaces another program's own rules.
+    func requestRepair() {
+        do { try Data(ISO8601DateFormatter().string(from: Date()).utf8).write(to: repairURL) } catch { lastError = error.localizedDescription }
+    }
+
     /// Local ports of sockets that rules deny, and (`lo0 <port>`) of loopback connections to a local proxy whose
     /// destination a rule denies. Rewritten on every pass while non-empty, because the daemon only trusts the file
     /// while it is fresh (a crashed Rat must not leave ports blocked).
@@ -140,7 +150,7 @@ final class Enforcer: ObservableObject {
         // The enforcer reads the user's files only for matching. It publishes proxied destinations of this user's
         // processes (and nobody else's) in a file only this user can read.
         let apply = plist(Self.applyLabel, [Self.enforcerPath, "--denied", appsURL.path, "--ports", portsURL.path, "--status", Self.statusPath,
-                                            "--proxied", Self.proxiedPath, "--owner-uid", String(getuid())],
+                                            "--proxied", Self.proxiedPath, "--owner-uid", String(getuid()), "--repair", repairURL.path],
                           extra: "<key>KeepAlive</key><true/><key>RunAtLoad</key><true/><key>ProcessType</key><string>Interactive</string>")
         let sampler = plist(Self.samplerLabel, [Self.helperPath, "snapshot", snapshotURL.path, owner],
                             extra: "<key>StartInterval</key><integer>5</integer><key>RunAtLoad</key><true/>")
