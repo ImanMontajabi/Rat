@@ -15,7 +15,7 @@ struct MonitorWindow: View {
                 .frame(width: 400)
             MapPane(selection: selection, filter: filter)
             if showInspector {
-                InspectorView(selection: selection)
+                InspectorView(selection: selection, filter: filter)
                     .frame(width: 330)
                     .background(.ultraThinMaterial)
                     .transition(.move(edge: .trailing))

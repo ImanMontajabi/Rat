@@ -3,6 +3,8 @@ import SwiftUI
 struct InspectorView: View {
     @EnvironmentObject var ledger: Ledger
     let selection: MonitorSelection?
+    /// The list's search and chips: the Summary counts what they leave.
+    var filter = MonitorFilter()
 
     var body: some View {
         ScrollView {
@@ -13,7 +15,7 @@ struct InspectorView: View {
                     ProcessInspector(app: app, process: s.process)
                 }
             } else {
-                SummaryInspector()
+                SummaryInspector(filter: filter)
             }
         }
         .padding(14)
@@ -22,38 +24,47 @@ struct InspectorView: View {
 
 struct SummaryInspector: View {
     @EnvironmentObject var ledger: Ledger
+    var filter = MonitorFilter()
     @State private var conns = true
     @State private var stats = true
 
     var body: some View {
-        let denied = ledger.deniedCount, unconfirmed = ledger.unconfirmedCount, incoming = ledger.incomingCount
-        let topApps = ledger.apps.sorted { $0.totalIn + $0.totalOut > $1.totalIn + $1.totalOut }.prefix(3)
+        let s = ledger.summary(filter)
+        let domains = ledger.domains(s.remotes), networks = ledger.networks(s.remotes)
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Image(systemName: "list.bullet.rectangle").font(.title2).foregroundStyle(.secondary)
                 VStack(alignment: .leading) {
                     Text("Summary").font(.title2.weight(.bold))
-                    Text("\(ledger.apps.count) processes, \(ledger.domains().count) domains").font(.callout).foregroundStyle(.secondary)
+                    Text("\(s.apps.count) process\(s.apps.count == 1 ? "" : "es"), \(domains.count) domain\(domains.count == 1 ? "" : "s")").font(.callout).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("summary-counts")
                 }
             }
-            HStack(spacing: 8) { Pill(kind: .up, text: formatBytes(ledger.sessionOut)); Pill(kind: .down, text: formatBytes(ledger.sessionIn)) }
+            if s.filtered {
+                Label("Filtered: the listed apps and their matching connections", systemImage: "line.3.horizontal.decrease.circle")
+                    .font(.caption).foregroundStyle(Color.accentColor)
+                    .accessibilityIdentifier("summary-filtered")
+            }
+            HStack(spacing: 8) { Pill(kind: .up, text: formatBytes(s.bytesOut)); Pill(kind: .down, text: formatBytes(s.bytesIn)) }
             SectionHeader(title: "Connections", open: $conns)
             if conns {
-                stat("xmark.rectangle", "\(denied) denied")
-                stat("questionmark.square", "\(unconfirmed) unconfirmed")
-                stat("arrow.down.left.circle", "\(incoming) incoming")
+                stat("xmark.rectangle", "\(s.denied) denied")
+                stat("questionmark.square", "\(s.unconfirmed) unconfirmed")
+                stat("arrow.down.left.circle", "\(s.incoming) incoming")
             }
             SectionHeader(title: "Statistics", open: $stats)
             if stats {
-                group("Top Processes", topApps.map { ($0.identity.name, "\(formatBytes($0.totalIn)) down, \(formatBytes($0.totalOut)) up") })
-                group("Top Domains", ledger.domains().prefix(3).map { ($0.name, "\($0.count) connection\($0.count == 1 ? "" : "s")") })
-                if ledger.geo.available { group("Top Countries", ledger.countries().prefix(3).map { ($0.name, "\($0.count) connection\($0.count == 1 ? "" : "s")") }) }
-                if ledger.geo.networksAvailable, !ledger.networks().isEmpty {
-                    group("Top Networks", ledger.networks().prefix(3).map { ($0.name, "\($0.count) connection\($0.count == 1 ? "" : "s")") })
+                group("Top Processes", s.topApps.map { ($0.identity.name, "\(formatBytes($0.totalIn)) down, \(formatBytes($0.totalOut)) up") })
+                group("Top Domains", domains.prefix(3).map { ($0.name, Self.connections($0.count)) })
+                if ledger.geo.available { group("Top Countries", ledger.countries(s.remotes).prefix(3).map { ($0.name, Self.connections($0.count)) }) }
+                if ledger.geo.networksAvailable, !networks.isEmpty {
+                    group("Top Networks", networks.prefix(3).map { ($0.name, Self.connections($0.count)) })
                 }
             }
         }
     }
+
+    private static func connections(_ n: Int) -> String { "\(n) connection\(n == 1 ? "" : "s")" }
 
     private func stat(_ symbol: String, _ text: String) -> some View {
         HStack(spacing: 10) { Image(systemName: symbol).frame(width: 26).foregroundStyle(.secondary); Text(text).font(.title3) }.padding(.leading, 6)

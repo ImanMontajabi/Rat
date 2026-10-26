@@ -185,6 +185,9 @@ struct MonitorFilter: Equatable {
     var route: RouteFilter = .all
     var range: TimeRange = .fiveMinutes
 
+    /// A search or a chip narrows what is shown (the time range alone does not: it is the chart's window).
+    var isActive: Bool { !search.trimmingCharacters(in: .whitespaces).isEmpty || onlyIncoming || onlyDenied || route != .all }
+
     /// The search text without its filter words, and the route filter in effect.
     var query: (text: String, route: RouteFilter) { RouteFilter.parse(search, chip: route) }
 

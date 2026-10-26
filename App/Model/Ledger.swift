@@ -29,6 +29,22 @@ enum TimeRange: String, CaseIterable, Identifiable {
     }
 }
 
+/// What the Summary counts (`Ledger.summary`).
+struct MonitorSummary {
+    /// A search or chip narrowed it to the listed apps.
+    var filtered: Bool
+    var apps: [AppEntry]
+    var remotes: [RemoteHost]
+    /// The session's traffic, or the listed apps' totals.
+    var bytesIn: UInt64
+    var bytesOut: UInt64
+    var denied: Int
+    var unconfirmed: Int
+    var incoming: Int
+
+    var topApps: [AppEntry] { Array(apps.sorted { ($0.totalIn + $0.totalOut, $1.identity.name) > ($1.totalIn + $1.totalOut, $0.identity.name) }.prefix(3)) }
+}
+
 struct RemoteHost: Identifiable, Hashable {
     var id: String { (via.map { "\(host):\(port) \($0.listener)" } ?? "\(address):\(port)") + "|\(process ?? "")" }
     /// The server's address; for a destination behind a local proxy, the name's address (empty until looked up).
@@ -49,6 +65,8 @@ struct RemoteHost: Identifiable, Hashable {
     /// Bytes of the connection's open sockets so far (nettop's per-connection counters; a closed socket drops out).
     var bytesIn: UInt64 = 0
     var bytesOut: UInt64 = 0
+    /// What the rules said on the last pass (nil for local addresses, and while the name is still looked up).
+    var verdict: Verdict? = nil
 }
 
 /// One executable of an app (its main binary, a helper, an XPC service working for it), by name.
@@ -192,7 +210,7 @@ final class Ledger: ObservableObject {
     }()
     var onTick: (() -> Void)?
 
-    private let names = HostNames()
+    private let names: HostNames
     private let store: StateStore
     private var previous: [Int32: TrafficCounter] = [:]
     private var launchers: [Int32: String?] = [:]
@@ -210,7 +228,8 @@ final class Ledger: ObservableObject {
     private var lastTick = Date()
     private var startedAt = Date()
 
-    init(directory: URL? = nil, helperInstalled: Bool? = nil) {
+    init(directory: URL? = nil, helperInstalled: Bool? = nil, names: HostNames = HostNames()) {
+        self.names = names
         // Demo mode never reads or writes the real data folder, and sees no helper: its files are not the daemon's.
         let demo = directory == nil && Preferences.isDemo
         store = StateStore.standard(base: demo ? FileManager.default.temporaryDirectory.appendingPathComponent("rat-demo-\(UUID())") : directory)
@@ -418,7 +437,7 @@ final class Ledger: ObservableObject {
                     continue
                 }
                 guard seen.insert(key).inserted else { continue }
-                let host = await names.name(for: c.remoteAddress)
+                let (host, named) = names.lookup(c.remoteAddress)
                 let geoPoint = isLocalAddress(c.remoteAddress) ? nil : geo.lookup(c.remoteAddress)
                 remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint,
                                           pid: c.pid, process: c.processName,
@@ -429,15 +448,19 @@ final class Ledger: ObservableObject {
                 indexByKey[key] = remotes.count - 1
 
                 guard !isLocalAddress(c.remoteAddress) else { continue }
-                if judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp, route: remotes.last?.route) == .deny, c.localPort != 0 {
-                    portsNow.insert(c.localPort)
-                }
+                // A connection whose name is still being looked up is judged on a later pass (at most
+                // `HostNames.grace` later), so a rule for its domain matches and an alert names it.
+                guard named else { continue }
+                let verdict = judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp, route: remotes.last?.route)
+                remotes[remotes.count - 1].verdict = verdict
+                if verdict == .deny, c.localPort != 0 { portsNow.insert(c.localPort) }
             }
             for r in proxiedByApp[id] ?? [] {
                 // A rule that denies the real destination cuts the client's loopback connection to the proxy.
                 let address = proxyResolver.address(for: r.host, enabled: resolveProxied)
                 let process = (r.path as NSString).lastPathComponent
-                if seen.insert("proxy|\(r.host):\(r.port)|\(r.hop.listener)|\(process)").inserted {
+                let fresh = seen.insert("proxy|\(r.host):\(r.port)|\(r.hop.listener)|\(process)").inserted
+                if fresh {
                     var hop = r.hop
                     // A forwarding proxy's one outside connection is the destination itself.
                     if hop.server != nil, hop.server == address { hop.server = nil }
@@ -448,7 +471,9 @@ final class Ledger: ObservableObject {
                                               network: address.flatMap { isLocalAddress($0) ? nil : geo.network($0)?.label },
                                               bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0))
                 }
-                if judge(host: r.host, address: address ?? "", port: r.port, proto: .tcp) == .deny, r.live { loopbackNow.insert(r.clientPort) }
+                let verdict = judge(host: r.host, address: address ?? "", port: r.port, proto: .tcp)
+                if fresh { remotes[remotes.count - 1].verdict = verdict }
+                if verdict == .deny, r.live { loopbackNow.insert(r.clientPort) }
             }
             e.remotes = remotes
             table[id] = e
@@ -544,23 +569,39 @@ final class Ledger: ObservableObject {
 
     // MARK: derived data
 
-    func domains() -> [(name: String, count: Int)] {
-        var d: [String: Int] = [:]
-        for a in apps { for r in a.remotes { d[registrableDomain(r.host), default: 0] += 1 } }
-        return d.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }
+    func domains(_ remotes: [RemoteHost]? = nil) -> [(name: String, count: Int)] {
+        Self.tally(remotes ?? apps.flatMap(\.remotes)) { registrableDomain($0.host) }
     }
 
     /// Networks (ASN organizations) by number of connections, for the Summary.
-    func networks() -> [(name: String, count: Int)] {
+    func networks(_ remotes: [RemoteHost]? = nil) -> [(name: String, count: Int)] {
+        Self.tally(remotes ?? apps.flatMap(\.remotes)) { $0.network }
+    }
+
+    func countries(_ remotes: [RemoteHost]? = nil) -> [(name: String, count: Int)] {
+        Self.tally(remotes ?? apps.flatMap(\.remotes)) { $0.geo?.country }
+    }
+
+    /// Connections by key, most first (ties by name).
+    private static func tally(_ remotes: [RemoteHost], _ key: (RemoteHost) -> String?) -> [(name: String, count: Int)] {
         var d: [String: Int] = [:]
-        for a in apps { for r in a.remotes { if let n = r.network { d[n, default: 0] += 1 } } }
+        for r in remotes { if let k = key(r) { d[k, default: 0] += 1 } }
         return d.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 || ($0.1 == $1.1 && $0.0 < $1.0) }
     }
 
-    func countries() -> [(name: String, count: Int)] {
-        var d: [String: Int] = [:]
-        for a in apps { for r in a.remotes { if let c = r.geo?.country { d[c, default: 0] += 1 } } }
-        return d.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }
+    /// The inspector's Summary: every app, or with a search or chip on, the listed apps and their matching
+    /// connections (the same set the map draws). Unfiltered, the totals are the session's.
+    func summary(_ filter: MonitorFilter, settings: AppSettings? = nil) -> MonitorSummary {
+        guard filter.isActive else {
+            return MonitorSummary(filtered: false, apps: apps, remotes: apps.flatMap(\.remotes), bytesIn: sessionIn, bytesOut: sessionOut,
+                                  denied: deniedCount, unconfirmed: unconfirmedCount, incoming: incomingCount)
+        }
+        let listed = filter.apps(self, settings: settings ?? .shared)
+        let remotes = listed.flatMap { a in a.remotes.filter { filter.matches($0, of: a) } }
+        return MonitorSummary(filtered: true, apps: listed, remotes: remotes,
+                              bytesIn: listed.reduce(0) { $0 + $1.totalIn }, bytesOut: listed.reduce(0) { $0 + $1.totalOut },
+                              denied: remotes.filter { $0.verdict == .deny }.count, unconfirmed: remotes.filter { $0.verdict == .ask }.count,
+                              incoming: listed.reduce(0) { $0 + $1.listening })
     }
 
     /// Bars for the traffic chart. The window shrinks to the data that exists (never a lone sliver on the right edge)
