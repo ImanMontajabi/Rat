@@ -1,0 +1,1 @@
+Windscribe's tunnels (windscribeamneziawg, windscribeopenvpn and the others its helper runs from /Library/Application Support/Windscribe) are listed under Windscribe and are covered when Windscribe is denied.

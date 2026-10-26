@@ -269,16 +269,16 @@ struct SecuritySettings: View {
         SettingsPane {
             Text("Firewall Helper").font(.system(size: 15, weight: .semibold))
             if enf.helperInstalled {
-                if enf.helperOutdated {
-                    Label("Installed, but an older version", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
-                    Text("This helper is from an older version: when a VPN client turns the packet filter off or replaces its rules, it does not put them right, so denied apps are not blocked (helpers before 1.1.0 also cannot see where connections through a local proxy go). Update it.")
+                if let reason = enf.outdatedReason {
+                    Label("Installed, but it needs an update", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
+                    Text(reason)
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button(enf.busy ? "Updating…" : "Update Helper…") { enf.installHelper() }.disabled(enf.busy)
                 } else {
                     Label("Installed: blocking is applied automatically", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
                 }
                 if let st = enf.status {
-                    if st.pfEnabled && st.anchorHooked {
+                    if st.pfEnabled && st.anchorHooked && st.pfIssue == nil {
                         Label("Packet filter enabled and evaluating Rat’s rules", systemImage: "checkmark.circle").foregroundStyle(.green)
                     } else {
                         if !st.pfEnabled { Label("Packet filter is disabled", systemImage: "xmark.octagon").foregroundStyle(.red) }

@@ -58,9 +58,53 @@ public enum PFHeal {
         }
     }
 
+    /// The filter rules pf evaluates before it reaches Rat's anchor (`anchor "com.apple/*"`, or Rat's own), in
+    /// order; nil when the main ruleset does not hook it.
+    static func linesBeforeHook(_ rules: String, anchor: String) -> [String]? {
+        let parent = anchor.split(separator: "/").first.map(String.init) ?? anchor
+        var out: [String] = []
+        for raw in rules.split(whereSeparator: \.isNewline) {
+            let text = raw.trimmingCharacters(in: .whitespaces)
+            if text.hasPrefix("anchor \"\(anchor)\"") || text.hasPrefix("anchor \"\(parent)/*\"") { return out }
+            if !text.isEmpty { out.append(text) }
+        }
+        return nil
+    }
+
+    /// Other programs' anchors that pf evaluates before Rat's: their rules are read (`pfctl -a <name> -s rules`)
+    /// to see whether one passes traffic first. Rules in their sub-anchors are not.
+    public static func anchorsBeforeHook(_ rules: String, anchor: String) -> [String] {
+        (linesBeforeHook(rules, anchor: anchor) ?? []).compactMap { line in
+            guard line.hasPrefix("anchor \""), let name = anchorLines(line)?.first?.name else { return nil }
+            return name.hasSuffix("/*") ? String(name.dropLast(2)) : name
+        }
+    }
+
+    /// The first rule that decides packets before pf reaches Rat's anchor: a `pass … quick` rule, in the main
+    /// ruleset or in another program's anchor evaluated first (`anchorRules`, by name). A quick match ends pf's
+    /// evaluation, so what it passes never meets Rat's rules (a VPN client's catch-all `pass out quick all`
+    /// would let every denied app through). Nil when nothing comes first.
+    public static func shadowingRule(rules: String, anchor: String, anchorRules: [String: String] = [:]) -> String? {
+        func passesQuick(_ line: String) -> Bool {
+            let t = line.split(separator: " ")
+            return t.first == "pass" && t.contains("quick")
+        }
+        for line in linesBeforeHook(rules, anchor: anchor) ?? [] {
+            if passesQuick(line) { return line }
+            guard line.hasPrefix("anchor \""), let name = anchorLines(line)?.first?.name else { continue }
+            let key = name.hasSuffix("/*") ? String(name.dropLast(2)) : name
+            if let hit = anchorRules[key]?.split(whereSeparator: \.isNewline).map({ $0.trimmingCharacters(in: .whitespaces) }).first(where: passesQuick) {
+                return "\(hit) (anchor \"\(key)\")"
+            }
+        }
+        return nil
+    }
+
     /// What to do about pf. `rules` and `nat` are the main ruleset (`pfctl -s rules`, `pfctl -s nat`), `config` is
-    /// /etc/pf.conf, and `force` is the user's Repair (it may replace another program's own rules while pf runs).
-    public static func plan(enabled: Bool, rules: String, nat: String, config: String, anchor: String, force: Bool = false) -> Plan {
+    /// /etc/pf.conf, `anchorRules` the rules of the anchors pf evaluates before Rat's (`anchorsBeforeHook`), and
+    /// `force` is the user's Repair (it may replace another program's own rules while pf runs).
+    public static func plan(enabled: Bool, rules: String, nat: String, config: String, anchor: String,
+                            anchorRules: [String: String] = [:], force: Bool = false) -> Plan {
         let filterLines = anchorLines(rules), natLines = anchorLines(nat)
         let ownRules = filterLines == nil || natLines == nil
         let lines = (filterLines ?? []) + (natLines ?? [])
@@ -69,7 +113,13 @@ public enum PFHeal {
         let configHooks = systemConfigHooks(config)
         let configChanged = "/etc/pf.conf was changed and no longer loads the com.apple anchors (anchor \"com.apple/*\"), so Rat's rules are not evaluated. Rat does not edit it; restore that line."
         if enabled {
-            if hooked { return .none }
+            if hooked {
+                guard let rule = shadowingRule(rules: rules, anchor: anchor, anchorRules: anchorRules) else { return .none }
+                // Only anchor points: Apple's go first again, the other program's rules stay as they are.
+                if !ownRules { return .rehook(rehookRuleset(foreign)) }
+                if force { return configHooks ? .reloadSystemConfig : .blocked(configChanged) }
+                return .blocked("Another program's firewall passes traffic before pf reaches Rat's rules (\(rule)), so denied apps can get through. Rat does not reorder that program's rules on its own: turn its firewall (kill switch) off, or use Repair Firewall to load macOS's pf configuration again.")
+            }
             if !ownRules { return .rehook(rehookRuleset(foreign)) }
             if force { return configHooks ? .reloadSystemConfig : .blocked(configChanged) }
             return .blocked("Another program replaced pf's main ruleset with rules of its own, so Rat's rules are not evaluated. Rat does not remove them on its own: turn that program's firewall (kill switch) off, or use Repair Firewall to load macOS's pf configuration again.")

@@ -153,7 +153,10 @@ struct SidebarView: View {
                 Pill(kind: .down, text: formatBytes(ledger.sessionIn), label: "received")
             }
             if showChart { TrafficChart(range: range) }
-            if !ledger.deniedAppPaths.isEmpty {
+            if ledger.enforcer.helperInstalled && ledger.enforcer.helperOutdated {
+                Label("The firewall helper needs an update (Settings > Security)", systemImage: "exclamationmark.shield")
+                    .font(.caption).foregroundStyle(.orange)
+            } else if !ledger.deniedAppPaths.isEmpty {
                 if !ledger.enforcer.helperInstalled {
                     Label("Deny is not enforced: install the firewall helper (Settings > Security)", systemImage: "exclamationmark.shield")
                         .font(.caption).foregroundStyle(.orange)
