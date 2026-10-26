@@ -19,6 +19,19 @@ public enum ProcessGrouping {
         return root
     }
 
+    /// Programs an app installs outside its bundle and runs from there. Windscribe's root helper copies its tunnels
+    /// (`windscribeamneziawg`, `windscribeopenvpn`, `windscribewstunnel`, `windscribectrld`) into
+    /// /Library/Application Support/Windscribe/bin. They belong to the app in the list and when it is denied.
+    static let companions: [(prefix: String, app: String)] = [
+        ("/Library/Application Support/Windscribe/", "/Applications/Windscribe.app"),
+        ("/Library/PrivilegedHelperTools/com.windscribe.", "/Applications/Windscribe.app"),
+    ]
+
+    /// The app a program installed outside its bundle belongs to (see `companions`).
+    public static func companionApp(of path: String) -> String? {
+        companions.first { path.hasPrefix($0.prefix) }?.app
+    }
+
     /// Whether the path is a system service that works on behalf of an app (WebKit's networking XPC service
     /// carries Safari's traffic), so the app it works for is found through the responsible process.
     public static func actsForOthers(_ path: String) -> Bool {

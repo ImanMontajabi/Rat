@@ -157,6 +157,8 @@ struct ProcessInspector: View {
                             Text("Not enforced: this needs the firewall helper (Settings > Security).").foregroundStyle(.orange)
                         } else if ledger.enforcer.status == nil {
                             Text("Not enforced: the firewall helper is not running (Settings > Security).").foregroundStyle(.orange)
+                        } else if ledger.enforcer.helperOutdated {
+                            Text("May not be enforced: the firewall helper needs an update (Settings > Security).").foregroundStyle(.orange)
                         } else if let e = ledger.enforcement(for: app.id) {
                             Text("Blocked by the firewall helper: \(e.processes) processes, \(e.ports) open connections cut.").foregroundStyle(.secondary)
                         } else {

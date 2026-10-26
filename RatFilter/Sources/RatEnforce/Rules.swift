@@ -31,6 +31,7 @@ public struct DeniedApps: Equatable {
     public func entry(for path: String, responsiblePath: () -> String?) -> String? {
         func inside(_ p: String) -> String? { paths.first { p == $0 || p.hasPrefix($0 + "/") } }
         if let e = inside(path) { return e }
+        if let app = ProcessGrouping.companionApp(of: path), let e = inside(app) { return e }
         if ProcessGrouping.actsForOthers(path), let r = responsiblePath() { return inside(r) }
         return nil
     }
@@ -66,6 +67,25 @@ public enum PFRules {
             """
         }
         return out
+    }
+
+    /// Whether the anchor's rules as `pfctl -a <anchor> -s rules` prints them still block every port: `ports` off
+    /// lo0 and `loopback` on lo0. pfctl expands a list into one rule per port (`from any port = 50200`).
+    public static func holds(_ text: String, ports: [Int], loopback: [Int]) -> Bool {
+        var outside = Set<Int>(), onLoopback = Set<Int>()
+        for line in text.split(whereSeparator: \.isNewline) where line.hasPrefix("block ") {
+            let t = line.split(separator: " ", omittingEmptySubsequences: true)
+            var found: [Int] = []
+            var i = 0
+            while i + 1 < t.count {
+                defer { i += 1 }
+                guard t[i] == "port" else { continue }
+                if t[i + 1] == "=", i + 2 < t.count, let p = Int(t[i + 2]) { found.append(p) }
+                if t[i + 1] == "{" { found += t[(i + 2)...].prefix { $0 != "}" }.compactMap { Int($0) } }
+            }
+            if line.contains(" on lo0 ") { onLoopback.formUnion(found) } else { outside.formUnion(found) }
+        }
+        return Set(ports).isSubset(of: outside) && Set(loopback).isSubset(of: onLoopback)
     }
 
     /// Reads a list of ports, one per line; anything else is ignored.

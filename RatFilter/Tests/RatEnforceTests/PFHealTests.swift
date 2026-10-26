@@ -90,6 +90,8 @@ final class PFHealTests: XCTestCase {
         var nat: String
         var configLoads = 0
         var anchorLoads: [String] = []
+        /// Rules in each anchor, by name (`pfctl -a <name> -s rules`).
+        var anchors: [String: String] = [:]
         var commands: [[String]] = []
         init(enabled: Bool, rules: String, nat: String) { self.enabled = enabled; self.rules = rules; self.nat = nat }
 
@@ -100,13 +102,18 @@ final class PFHealTests: XCTestCase {
             case ["-s", "rules"]: return rules
             case ["-s", "nat"]: return nat
             case ["-E"]: enabled = true; return "No ALTQ support in kernel\npf enabled\nToken : 1234\n"
+            case _ where args.count == 4 && args[0] == "-a" && args[2...] == ["-s", "rules"]: return anchors[args[1]] ?? ""
             default: return ""
             }
         }
 
         func run(_ exe: String, _ args: [String], _ stdin: String?) -> Int32 {
             commands.append(args)
-            if args.first == "-a" { if args.contains("-f") { anchorLoads.append(stdin ?? "") }; return 0 }
+            if args.first == "-a" {
+                if args.contains("-f") { anchorLoads.append(stdin ?? ""); anchors[args[1]] = stdin ?? "" }
+                if args.contains("-F") { anchors[args[1]] = "" }
+                return 0
+            }
             if args.first == "-n" { return 0 }
             if args == ["-N", "-R", "-f", "-"], let text = stdin {
                 let lines = text.split(separator: "\n").map(String.init)
@@ -123,8 +130,8 @@ final class PFHealTests: XCTestCase {
         }
     }
 
-    private func daemon(_ pf: FakePF, dir: URL) throws -> (EnforcerDaemon, EnforcerDaemon.Settings) {
-        try "".write(to: dir.appendingPathComponent("denied.txt"), atomically: true, encoding: .utf8)
+    private func daemon(_ pf: FakePF, dir: URL, denied: String = "") throws -> (EnforcerDaemon, EnforcerDaemon.Settings) {
+        try denied.write(to: dir.appendingPathComponent("denied.txt"), atomically: true, encoding: .utf8)
         try appleConfig.write(to: dir.appendingPathComponent("pf.conf"), atomically: true, encoding: .utf8)
         var s = EnforcerDaemon.Settings(deniedFile: dir.appendingPathComponent("denied.txt").path, statusFile: dir.appendingPathComponent("status.json").path)
         s.anchor = anchor
@@ -289,5 +296,136 @@ final class PFHealTests: XCTestCase {
         XCTAssertTrue(d.matches(path: "/Applications/Cloudflare WARP.app/Contents/Resources/warp-svc", responsiblePath: { nil }))
         XCTAssertTrue(d.matches(path: "/Applications/Cloudflare WARP.app/Contents/MacOS/Cloudflare WARP", responsiblePath: { nil }))
         XCTAssertFalse(d.matches(path: "/Applications/Warp.app/Contents/MacOS/stable", responsiblePath: { nil }), "the Warp terminal is another app")
+    }
+
+    // MARK: Rat's anchor emptied behind the daemon's back
+
+    /// pfctl prints a loaded port list one rule per port.
+    func testAnchorContentsAreReadBackAsPfctlPrintsThem() {
+        let printed = """
+        block return-rst out quick on ! lo0 proto tcp from any port = 50200 to any
+        block return-rst out quick on ! lo0 proto tcp from any port = 50201 to any
+        block return-icmp(port-unr, port-unr) out quick on ! lo0 proto udp from any port = 50200 to any
+        block drop in quick on ! lo0 proto tcp from any to any port = 50200
+        block return-rst out quick on lo0 proto tcp from any port = 6000 to any
+        block drop in quick on lo0 proto tcp from any to any port = 6000
+
+        """
+        XCTAssertTrue(PFRules.holds(printed, ports: [50200, 50201], loopback: [6000]))
+        XCTAssertTrue(PFRules.holds(PFRules.render(ports: [50200, 50201], loopbackPorts: [6000]), ports: [50200, 50201], loopback: [6000]), "and as Rat writes them")
+        XCTAssertFalse(PFRules.holds("", ports: [50200], loopback: []), "a flushed anchor")
+        XCTAssertFalse(PFRules.holds("No ALTQ support in kernel\nALTQ related functions disabled\n", ports: [50200], loopback: []))
+        XCTAssertFalse(PFRules.holds(printed, ports: [50200, 50999], loopback: []), "a port that is not there")
+        XCTAssertFalse(PFRules.holds(printed, ports: [6000], loopback: []), "a loopback rule does not block off lo0")
+        XCTAssertFalse(PFRules.holds(printed, ports: [], loopback: [50200]), "nor the other way round")
+    }
+
+    /// The ports to block stay the same while something flushes Rat's anchor (a VPN client reloading pf, sleep and
+    /// wake): the watchdog notices on its next pass and loads them again, without waiting for a port to change.
+    func testAFlushedAnchorIsLoadedAgainWhileThePortsStayTheSame() throws {
+        let dir = try tempDir()
+        let pf = FakePF(enabled: true, rules: appleRules, nat: appleNat)
+        let (d, _) = try daemon(pf, dir: dir, denied: ConnectionSampler.path(of: getpid()) + "\n")
+        let (fd, port) = socket(AF_INET, any: true)
+        defer { close(fd) }
+        d.start()
+        let t0 = Date()
+        XCTAssertTrue(d.tick(now: t0))
+        XCTAssertTrue(d.loadedPorts.contains(port))
+        XCTAssertTrue(PFRules.holds(pf.anchors[anchor] ?? "", ports: d.loadedPorts, loopback: []))
+        d.tick(now: t0.addingTimeInterval(2.1))
+        let loads = pf.anchorLoads.count
+        XCTAssertEqual(try status(dir).repairs, 0, "nothing to put right while pf holds the rules")
+
+        pf.anchors[anchor] = ""   // flushed behind the daemon's back
+        d.tick(now: t0.addingTimeInterval(4.2))
+        XCTAssertEqual(pf.anchorLoads.count, loads + 1, "loaded again on the next watchdog pass")
+        XCTAssertTrue(PFRules.holds(pf.anchors[anchor] ?? "", ports: [port], loopback: []))
+        d.tick(now: t0.addingTimeInterval(5.3))
+        XCTAssertEqual(try status(dir).repairs, 1)
+        XCTAssertEqual(try status(dir).lastRepair, "loaded Rat's rules again (pf had dropped them)")
+        d.tick(now: t0.addingTimeInterval(6.4))
+        XCTAssertEqual(pf.anchorLoads.count, loads + 1, "and not again while it holds them")
+    }
+
+    // MARK: traffic passed before Rat's anchor is reached
+
+    func testAPassQuickRuleBeforeApplesAnchorIsReported() {
+        let rules = "pass out quick all flags S/SA keep state\n" + appleRules
+        guard case .blocked(let why) = PFHeal.plan(enabled: true, rules: rules, nat: appleNat, config: appleConfig, anchor: anchor) else {
+            return XCTFail("a catch-all pass before Rat's anchor is not the same as a working firewall")
+        }
+        XCTAssertTrue(why.contains("pass out quick all"), why)
+        XCTAssertTrue(why.contains("Repair Firewall"), why)
+        XCTAssertEqual(PFHeal.plan(enabled: true, rules: rules, nat: appleNat, config: appleConfig, anchor: anchor, force: true), .reloadSystemConfig)
+        XCTAssertEqual(PFHeal.plan(enabled: true, rules: appleRules + "pass out quick all\n", nat: appleNat, config: appleConfig, anchor: anchor), .none,
+                       "after Rat's anchor it decides only what Rat's rules let through")
+        XCTAssertEqual(PFHeal.plan(enabled: true, rules: "pass out all\n" + appleRules, nat: appleNat, config: appleConfig, anchor: anchor), .none,
+                       "without quick a later rule (Rat's) still decides")
+    }
+
+    /// A VPN client's anchor evaluated before Apple's that passes traffic with `quick`: only anchor points, so
+    /// Apple's go first again and the VPN's rules stay.
+    func testAVPNAnchorThatPassesFirstIsMovedBehindApples() {
+        let rules = "anchor \"com.cloudflare.warp_svc\" all\n" + appleRules
+        let warp = ["com.cloudflare.warp_svc": "pass out quick on utun4 all flags S/SA keep state\nblock drop out quick all\n"]
+        XCTAssertEqual(PFHeal.anchorsBeforeHook(rules, anchor: anchor), ["com.cloudflare.warp_svc"])
+        XCTAssertEqual(PFHeal.shadowingRule(rules: rules, anchor: anchor, anchorRules: warp), "pass out quick on utun4 all flags S/SA keep state (anchor \"com.cloudflare.warp_svc\")")
+        guard case .rehook(let ruleset) = PFHeal.plan(enabled: true, rules: rules, nat: appleNat, config: appleConfig, anchor: anchor, anchorRules: warp) else {
+            return XCTFail("expected a rehook")
+        }
+        let lines = ruleset.split(separator: "\n").map(String.init)
+        XCTAssertLessThan(lines.firstIndex(of: "anchor \"com.apple/*\"")!, lines.firstIndex(of: "anchor \"com.cloudflare.warp_svc\" all")!)
+        XCTAssertEqual(PFHeal.plan(enabled: true, rules: rules, nat: appleNat, config: appleConfig, anchor: anchor,
+                                   anchorRules: ["com.cloudflare.warp_svc": "block drop out quick all\n"]), .none, "an anchor that only blocks first is fine")
+    }
+
+    func testDaemonPutsApplesAnchorsBeforeAVPNsThatPassFirst() throws {
+        let dir = try tempDir()
+        let pf = FakePF(enabled: true, rules: "anchor \"com.cloudflare.warp_svc\" all\n" + appleRules, nat: appleNat)
+        pf.anchors["com.cloudflare.warp_svc"] = "pass out quick all flags S/SA keep state\n"
+        let (d, _) = try daemon(pf, dir: dir)
+        d.start()
+        d.tick(now: Date())
+        XCTAssertNil(PFHeal.shadowingRule(rules: pf.rules, anchor: anchor, anchorRules: pf.anchors), pf.rules)
+        XCTAssertTrue(pf.rules.contains("anchor \"com.cloudflare.warp_svc\""), "the VPN's anchor stays")
+        XCTAssertEqual(pf.anchors["com.cloudflare.warp_svc"], "pass out quick all flags S/SA keep state\n", "and its rules")
+        let st = try status(dir)
+        XCTAssertNil(st.pfIssue)
+        XCTAssertEqual(st.lastRepair, "put the com.apple anchors first in pf's main ruleset")
+    }
+
+    // MARK: the helper Rat runs
+
+    func testFileDigestIsSHA256() throws {
+        let dir = try tempDir()
+        let f = dir.appendingPathComponent("abc")
+        try Data("abc".utf8).write(to: f)
+        XCTAssertEqual(FileDigest.sha256(atPath: f.path), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        XCTAssertNil(FileDigest.sha256(atPath: dir.appendingPathComponent("missing").path))
+    }
+
+    /// The daemon publishes the digest of the executable it runs, so Rat sees a helper that was not restarted.
+    func testStatusCarriesTheRunningExecutablesDigest() throws {
+        let dir = try tempDir()
+        let (d, _) = try daemon(FakePF(enabled: true, rules: appleRules, nat: appleNat), dir: dir)
+        d.start()
+        d.tick(now: Date())
+        let me = try XCTUnwrap(FileDigest.sha256(atPath: ConnectionSampler.path(of: getpid())))
+        XCTAssertEqual(try status(dir).executableSHA256, me)
+    }
+
+    // MARK: Windscribe's tunnels
+
+    /// Windscribe's helper runs its tunnels from /Library/Application Support/Windscribe/bin, outside the app.
+    func testDenyingWindscribeCoversTheTunnelsItsHelperRunsOutsideTheApp() {
+        let d = DeniedApps(text: "/Applications/Windscribe.app\n")
+        for tunnel in ["windscribeamneziawg", "windscribeopenvpn", "windscribewstunnel", "windscribectrld"] {
+            XCTAssertTrue(d.matches(path: "/Library/Application Support/Windscribe/bin/" + tunnel, responsiblePath: { nil }), tunnel)
+        }
+        XCTAssertTrue(d.matches(path: "/Library/PrivilegedHelperTools/com.windscribe.helper.macos", responsiblePath: { nil }))
+        XCTAssertTrue(d.matches(path: "/Applications/Windscribe.app/Contents/MacOS/Windscribe", responsiblePath: { nil }))
+        XCTAssertFalse(DeniedApps(text: "/Applications/Safari.app\n").matches(path: "/Library/Application Support/Windscribe/bin/windscribeamneziawg", responsiblePath: { nil }))
+        XCTAssertNil(ProcessGrouping.companionApp(of: "/Library/Application Support/Other/bin/tool"))
     }
 }

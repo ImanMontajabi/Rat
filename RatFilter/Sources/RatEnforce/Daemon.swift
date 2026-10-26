@@ -64,14 +64,19 @@ public struct EnforcerStatus: Codable, Equatable {
     public var repairs: Int?
     public var lastRepair: String?
     public var lastRepairAt: Date?
+    /// SHA-256 of the daemon's executable when it started, so Rat can tell that the running helper is not the one in
+    /// its bundle (nil from daemons before 1.4.0).
+    public var executableSHA256: String?
 
     public init(pid: Int32, updated: Date, pfEnabled: Bool, anchorHooked: Bool, deniedApps: [String: App], blockedPorts: Int,
                 blockedLoopbackPorts: Int? = nil, proxyCapture: Bool? = nil, tunnels: [String: String]? = nil,
-                pfIssue: String? = nil, repairs: Int? = nil, lastRepair: String? = nil, lastRepairAt: Date? = nil) {
+                pfIssue: String? = nil, repairs: Int? = nil, lastRepair: String? = nil, lastRepairAt: Date? = nil,
+                executableSHA256: String? = nil) {
         self.pid = pid; self.updated = updated; self.pfEnabled = pfEnabled; self.anchorHooked = anchorHooked
         self.deniedApps = deniedApps; self.blockedPorts = blockedPorts
         self.blockedLoopbackPorts = blockedLoopbackPorts; self.proxyCapture = proxyCapture; self.tunnels = tunnels
         self.pfIssue = pfIssue; self.repairs = repairs; self.lastRepair = lastRepair; self.lastRepairAt = lastRepairAt
+        self.executableSHA256 = executableSHA256
     }
 }
 
@@ -145,6 +150,7 @@ public final class EnforcerDaemon {
     private var lastRepair: String?
     private var lastRepairAt: Date?
     private var repairStamp: Date?
+    private var executableSHA256: String?
     private var lastTunnelScan = Date.distantPast
     private let tunnelLock = NSLock()
     private var tunnels: [String: String] = [:]
@@ -159,6 +165,8 @@ public final class EnforcerDaemon {
     }
 
     public func start() {
+        // Read once: an update replaces the file on disk while this process keeps running the old code.
+        executableSHA256 = FileDigest.sha256(atPath: ConnectionSampler.path(of: getpid()))
         // A repair asked for before this start is not replayed.
         repairStamp = settings.repairFile.flatMap(Self.modified)
         watchdog(now: Date())
@@ -341,7 +349,16 @@ public final class EnforcerDaemon {
         pfEnabled = info.contains("Status: Enabled")
         var rules = capture("/sbin/pfctl", ["-s", "rules"])
         anchorHooked = PFStates.hooksAnchor(rules, anchor: settings.anchor)
-        if pfEnabled, anchorHooked, !force { pfIssue = nil; return }
+        // Another program's anchors evaluated before Rat's are read too: a `pass … quick` in one ends pf's
+        // evaluation before Rat's rules are reached. (Nothing to read on a Mac where Apple's anchors come first.)
+        let anchorRules = Dictionary(PFHeal.anchorsBeforeHook(rules, anchor: settings.anchor).map { ($0, capture("/sbin/pfctl", ["-a", $0, "-s", "rules"])) },
+                                     uniquingKeysWith: { a, _ in a })
+        let shadowed = anchorHooked && PFHeal.shadowingRule(rules: rules, anchor: settings.anchor, anchorRules: anchorRules) != nil
+        if pfEnabled, anchorHooked, !shadowed, !force {
+            pfIssue = nil
+            verifyAnchor(now: now)
+            return
+        }
         // Another program that keeps undoing the repair is not fought every 2 s: after five repairs in a minute,
         // once every 30 s.
         recentRepairs = recentRepairs.filter { now.timeIntervalSince($0) < 60 }
@@ -352,7 +369,7 @@ public final class EnforcerDaemon {
         let nat = capture("/sbin/pfctl", ["-s", "nat"])
         let config = (try? String(contentsOfFile: settings.systemConfig, encoding: .utf8)) ?? ""
         var done: String?
-        switch PFHeal.plan(enabled: pfEnabled, rules: rules, nat: nat, config: config, anchor: settings.anchor, force: force) {
+        switch PFHeal.plan(enabled: pfEnabled, rules: rules, nat: nat, config: config, anchor: settings.anchor, anchorRules: anchorRules, force: force) {
         case .none:
             pfIssue = nil
         case .enable:
@@ -365,7 +382,7 @@ public final class EnforcerDaemon {
         case .rehook(let ruleset):
             // Parsed first, so a ruleset pfctl rejects never replaces the main one halfway.
             if run("/sbin/pfctl", ["-n", "-N", "-R", "-f", "-"], ruleset) == 0, run("/sbin/pfctl", ["-N", "-R", "-f", "-"], ruleset) == 0 {
-                done = "restored the com.apple anchors in pf's main ruleset"
+                done = shadowed ? "put the com.apple anchors first in pf's main ruleset" : "restored the com.apple anchors in pf's main ruleset"
             } else {
                 pfIssue = "pf's main ruleset no longer evaluates the com.apple anchors, and restoring them failed."
             }
@@ -373,16 +390,34 @@ public final class EnforcerDaemon {
             pfIssue = why
         }
         guard let done else { return }
-        repairs += 1
         recentRepairs.append(now)
-        lastRepair = done
-        lastRepairAt = now
+        record(done, now: now)
         // Our anchor is loaded again on this pass, whatever the reload kept.
         loaded = false
         pfEnabled = capture("/sbin/pfctl", ["-s", "info"]).contains("Status: Enabled")
         rules = capture("/sbin/pfctl", ["-s", "rules"])
         anchorHooked = PFStates.hooksAnchor(rules, anchor: settings.anchor)
         pfIssue = pfEnabled && anchorHooked ? nil : "Rat \(done), but pf still \(pfEnabled ? "does not evaluate its rules" : "is off")."
+    }
+
+    private func record(_ repair: String, now: Date) {
+        repairs += 1
+        lastRepair = repair
+        lastRepairAt = now
+    }
+
+    /// Our anchor's rules can disappear while the ports to block stay the same (another program flushes the
+    /// com.apple anchors, or loads /etc/pf.anchors/com.apple again), and `settle` loads only what changed. So pf's
+    /// copy is read back and, when it no longer blocks what was loaded, everything is loaded again on this pass.
+    private func verifyAnchor(now: Date) {
+        guard loaded, !(loadedPorts.isEmpty && loadedLoopbackPorts.isEmpty) else { return }
+        let text = capture("/sbin/pfctl", ["-a", settings.anchor, "-s", "rules"])
+        guard !PFRules.holds(text, ports: loadedPorts, loopback: loadedLoopbackPorts) else { return }
+        // Every port counts as new, so a state another ruleset kept for one in the meantime is killed as well.
+        loadedPorts = []
+        loadedLoopbackPorts = []
+        loaded = false
+        record("loaded Rat's rules again (pf had dropped them)", now: now)
     }
 
     static func modified(_ path: String) -> Date? {
@@ -399,7 +434,8 @@ public final class EnforcerDaemon {
                                     blockedPorts: loadedPorts.count, blockedLoopbackPorts: loadedLoopbackPorts.count,
                                     proxyCapture: settings.proxiedFile == nil ? nil : proxyWatch?.capturing ?? false,
                                     tunnels: tunnelLock.withLock { tunnels },
-                                    pfIssue: pfIssue, repairs: repairs, lastRepair: lastRepair, lastRepairAt: lastRepairAt)
+                                    pfIssue: pfIssue, repairs: repairs, lastRepair: lastRepair, lastRepairAt: lastRepairAt,
+                                    executableSHA256: executableSHA256)
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .secondsSince1970
         guard let data = try? enc.encode(status) else { return }
