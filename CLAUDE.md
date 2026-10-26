@@ -13,6 +13,7 @@ GitHub rulesets protect `main` and `release`: no direct pushes, no force pushes,
 - **Version:** the root `Version` file (`X.Y.Z`, no extension) is the single source of truth and holds the version being developed on `main`. `scripts/version.sh set X.Y.Z` writes it and `project.yml`'s `MARKETING_VERSION`; `scripts/version.sh check` fails when they differ.
 - **Pull request:** push the branch and open it with `gh pr create --base main` (fill in `.github/pull_request_template.md`: summary, architecture, checklist). Merge only when CI is green. Commits and PR bodies keep the attribution lines.
 - **Releases:** a merge into `main` publishes a nightly pre-release. A stable release is a PR from `main` into `release`: the release workflow publishes `v<Version>` when `Version` is higher than the last stable tag, then opens a PR back to `main` that compiles the fragments into `CHANGELOG.md` and bumps `Version` to the next minor. Merging into `release` publishes a release: only the maintainer does it.
+- **CI (`.github/workflows/`):** `ci.yml` runs on every PR: the fragment and Version checks (Ubuntu), `swift test` and `xcodebuild -scheme Rat test` (macOS), and a Release build packed into a DMG that is attached to the run. `nightly.yml` (push to `main`) publishes `v<Version>-nightly.<YYYYMMDD>.<sha>` as a pre-release with the DMG, `.sha256` and the notes rendered from the fragments, keeping the newest five. `release.yml` (push to `release`) does the stable release described above. All builds share `.github/actions/setup-macos` (newest stable Xcode, XcodeGen, create-dmg, DB-IP cached per month), `scripts/build-release.sh <out> [build]` and `scripts/make-dmg.sh <Rat.app> <out.dmg>`; run the two scripts locally for the same build. Actions are pinned to commit SHAs.
 
 ## Commands
 
@@ -27,6 +28,7 @@ TEST_RUNNER_RAT_RECORD_SNAPSHOTS=1 xcodebuild -scheme Rat test -only-testing:Rat
 RAT_DEMO_MAP=1 RAT_OPEN=settings|rules RAT_SETTINGS_TAB=APS open Rat.app   # Debug only: fixed demo data (never touches real data), open a window/tab at launch
 scripts/version.sh check                       # Version and project.yml agree
 scripts/changelog.py render                    # preview the unreleased notes from changelog.d/
+scripts/build-release.sh /tmp/out && scripts/make-dmg.sh /tmp/out/Rat.app /tmp/out/Rat.dmg   # the CI release build
 ```
 
 ## Architecture

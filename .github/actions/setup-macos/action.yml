@@ -1,0 +1,45 @@
+name: Set up the macOS build
+description: Newest stable Xcode, XcodeGen (and create-dmg), and the DB-IP databases cached per month.
+
+inputs:
+  dmg:
+    description: Also install create-dmg for packaging.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Select Xcode
+      shell: bash
+      run: |
+        set -euo pipefail
+        ls -d /Applications/Xcode*.app
+        xcode="$(ls -d /Applications/Xcode_*.app | grep -viE 'beta|_rc|release.candidate' | sort -V | tail -n1)"
+        sudo xcode-select -s "$xcode"
+        xcodebuild -version
+        swift --version
+
+    - name: Install tools
+      shell: bash
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+        HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      run: |
+        brew install xcodegen
+        if [ "${{ inputs.dmg }}" = true ]; then brew install create-dmg; fi
+
+    # DB-IP publishes one file per month; fetch-geoip.sh only downloads what the cache does not have.
+    - name: GeoIP cache key
+      id: month
+      shell: bash
+      run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache GeoIP databases
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: App/Vendor/*.mmdb
+        key: geoip-${{ steps.month.outputs.month }}
+
+    - name: Fetch GeoIP databases
+      shell: bash
+      run: scripts/fetch-geoip.sh
