@@ -1,1 +1,0 @@
-The firewall helper checks every 2 seconds that pf still holds Rat's rules and loads them again when they were dropped (sleep and wake, a VPN client reloading pf), and it puts Apple's anchors back in front of a VPN client's anchor that passes traffic first. A firewall whose own rules pass traffic before Rat's is reported in Settings > Security.

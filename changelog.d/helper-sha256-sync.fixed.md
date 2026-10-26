@@ -1,1 +1,0 @@
-Update Helper is now shown whenever the helper installed or running is not the one in this copy of Rat, compared by SHA-256: after updating Rat, the old helper no longer keeps running unnoticed (Settings > Security, the Inspector and the sidebar say so).

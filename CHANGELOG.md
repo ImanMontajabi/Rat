@@ -6,6 +6,23 @@ DMG checksums, are on the [Releases](https://github.com/ImanMontajabi/Rat/releas
 
 <!-- releases -->
 
+## [1.4.0] - 2026-10-26
+
+### Changed
+
+- Allow (✓) in the process list now allows the whole app past its own narrower deny rules, as Deny (✗) already wins over its narrower allow rules. Rules for any process still apply.
+
+### Fixed
+
+- The firewall helper checks every 2 seconds that pf still holds Rat's rules and loads them again when they were dropped (sleep and wake, a VPN client reloading pf), and it puts Apple's anchors back in front of a VPN client's anchor that passes traffic first. A firewall whose own rules pass traffic before Rat's is reported in Settings > Security.
+- Update Helper is now shown whenever the helper installed or running is not the one in this copy of Rat, compared by SHA-256: after updating Rat, the old helper no longer keeps running unnoticed (Settings > Security, the Inspector and the sidebar say so).
+- Denied apps were not blocked after a VPN client (Cloudflare WARP) turned the packet filter off or replaced its main ruleset. The firewall helper now puts pf right within 2 seconds: it turns pf on again (loading macOS's /etc/pf.conf first when another program's leftover rules are in it) and restores the com.apple anchors next to a running VPN's own. Settings > Security says what happened and has Repair Firewall Now. Update the helper (Settings > Security) to get it.
+- Windscribe's tunnels (windscribeamneziawg, windscribeopenvpn and the others its helper runs from /Library/Application Support/Windscribe) are listed under Windscribe and are covered when Windscribe is denied.
+
+### Development
+
+- The README is rewritten for 1.3.0 with fresh screenshots from the demo data (`scripts/readme-screenshots.sh`), and a Persian README (`README.fa.md`) is added.
+
 ## [1.3.0] - 2026-10-26
 
 ### Added
