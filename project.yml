@@ -1,6 +1,12 @@
 name: Rat
 options:
   bundleIdPrefix: com.imanmontajabi
+# UITest: a Debug build under its own bundle identifier, so the UI tests never quit (or share preferences with)
+# the Rat the user is running.
+configs:
+  Debug: debug
+  Release: release
+  UITest: debug
   deploymentTarget:
     macOS: "14.0"
   createIntermediateGroups: true
@@ -36,7 +42,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.imanmontajabi.Rat
-        MARKETING_VERSION: 1.2.0
+        MARKETING_VERSION: 1.3.0
         CURRENT_PROJECT_VERSION: 1
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
@@ -46,6 +52,9 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_VERSION: "5.9"
+      configs:
+        UITest:
+          PRODUCT_BUNDLE_IDENTIFIER: com.imanmontajabi.Rat.uitest
   rat-enforcerd:
     type: tool
     platform: macOS
@@ -73,6 +82,18 @@ targets:
         CODE_SIGN_IDENTITY: "-"
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/Rat.app/Contents/MacOS/Rat
         BUNDLE_LOADER: $(TEST_HOST)
+  RatUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources: [UITests]
+    dependencies:
+      - target: Rat
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.imanmontajabi.RatUITests
+        CODE_SIGN_IDENTITY: "-"
+        TEST_TARGET_NAME: Rat
 schemes:
   Rat:
     build:
@@ -80,3 +101,12 @@ schemes:
         Rat: all
     test:
       targets: [RatTests]
+  # Needs a logged-in GUI session: run with scripts/test-ui.sh, not in CI.
+  RatUITests:
+    build:
+      targets:
+        Rat: all
+        RatUITests: [test]
+    test:
+      config: UITest
+      targets: [RatUITests]

@@ -8,37 +8,19 @@ import AppKit
 struct SidebarView: View {
     @EnvironmentObject var ledger: Ledger
     @ObservedObject private var settings = AppSettings.shared
-    @Binding var selection: String?
+    @Binding var selection: MonitorSelection?
     @Binding var showChart: Bool
     @Binding var showInspector: Bool
+    /// The search field, its chips and the time range; the map shows what they leave.
+    @Binding var filter: MonitorFilter
 
-    @State private var search = ""
-    @State private var onlyIncoming = false
-    @State private var onlyDenied = false
-    @State private var range: TimeRange = .fiveMinutes
     @State private var expandedGroups = Set<String>()
 
     // MARK: data
 
-    private var cutoff: Date { Date().addingTimeInterval(-range.seconds) }
-
-    private var filtered: [AppEntry] {
-        var list = ledger.apps.filter { $0.lastActive >= cutoff && ($0.totalIn + $0.totalOut > 0 || !$0.remotes.isEmpty || $0.listening > 0) }
-        if !settings.includeLocalNetwork {
-            list = list.filter { $0.remotes.isEmpty || $0.remotes.contains { !isLocalAddress($0.address) } || $0.totalIn + $0.totalOut > 0 }
-        }
-        if !settings.includeNetworkExtensions { list = list.filter { !$0.identity.isExtension } }
-        if !settings.includeOtherUsers { list = list.filter { !$0.otherUsers } }
-        if onlyIncoming { list = list.filter { $0.listening > 0 } }
-        if onlyDenied { list = list.filter { ledger.rules.policy(for: $0.identity.ruleKey) == .deny } }
-        if !search.isEmpty {
-            list = list.filter { a in
-                a.identity.name.localizedCaseInsensitiveContains(search) ||
-                a.remotes.contains { $0.host.localizedCaseInsensitiveContains(search) || ($0.geo?.country.localizedCaseInsensitiveContains(search) ?? false) || ($0.geo?.city.localizedCaseInsensitiveContains(search) ?? false) }
-            }
-        }
-        return list
-    }
+    private var query: (text: String, route: RouteFilter) { filter.query }
+    private var range: TimeRange { filter.range }
+    private var filtered: [AppEntry] { filter.apps(ledger, settings: settings) }
 
     private var rows: [AppEntry] {
         let list = filtered
@@ -74,10 +56,7 @@ struct SidebarView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if settings.groupBy == .process {
-                        ForEach(rows) { app in
-                            ProcessRow(app: app, selected: selection == app.id)
-                                .onTapGesture { selection = selection == app.id ? nil : app.id }
-                        }
+                        ForEach(rows) { app in ProcessRow(app: app, selection: $selection, filter: query.route) }
                     } else {
                         ForEach(groups) { g in groupRow(g) }
                     }
@@ -101,10 +80,7 @@ struct SidebarView: View {
             .padding(.vertical, 8).padding(.horizontal, 6).contentShape(Rectangle())
             .onTapGesture { if !expandedGroups.insert(g.id).inserted { expandedGroups.remove(g.id) } }
             if expandedGroups.contains(g.id) {
-                ForEach(g.apps) { app in
-                    ProcessRow(app: app, selected: selection == app.id).padding(.leading, 18)
-                        .onTapGesture { selection = selection == app.id ? nil : app.id }
-                }
+                ForEach(g.apps) { app in ProcessRow(app: app, selection: $selection, filter: query.route).padding(.leading, 18) }
             }
         }
     }
@@ -142,13 +118,22 @@ struct SidebarView: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search", text: $search).textFieldStyle(.plain)
-            chip("arrow.down.left.circle", on: $onlyIncoming, help: "Only apps accepting incoming connections")
-            chip("xmark.rectangle", on: $onlyDenied, help: "Only denied apps")
+            TextField("Search", text: $filter.search).textFieldStyle(.plain).accessibilityIdentifier("search-field")
+            chip("arrow.down.left.circle", on: $filter.onlyIncoming, help: "Only apps accepting incoming connections").accessibilityIdentifier("only-incoming")
+            chip("xmark.rectangle", on: $filter.onlyDenied, help: "Only denied apps").accessibilityIdentifier("only-denied")
             Menu {
-                ForEach(TimeRange.allCases) { r in Button(r.title) { range = r } }
+                Picker("Route", selection: $filter.route) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
+            } label: {
+                Image(systemName: filter.route.symbol).foregroundStyle(filter.route == .all ? Color.secondary : .accentColor)
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("Only connections through a VPN or a proxy (or type vpn / proxy in the search field)")
+            .accessibilityIdentifier("route-filter")
+            Menu {
+                ForEach(TimeRange.allCases) { r in Button(r.title) { filter.range = r } }
             } label: { Label(range.rawValue, systemImage: "clock").font(.callout) }
             .menuStyle(.borderlessButton).fixedSize()
+            .accessibilityIdentifier("time-range")
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(.white.opacity(0.08), in: Capsule())
@@ -181,7 +166,7 @@ struct SidebarView: View {
                 }
             }
             HStack {
-                Text(settings.groupBy == .process ? "\(rows.count) apps" : "\(groups.count) groups").font(.caption).foregroundStyle(.secondary)
+                Text(settings.groupBy == .process ? "\(rows.count) app\(rows.count == 1 ? "" : "s")" : "\(groups.count) group\(groups.count == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Text("Last \(range.title)").font(.caption).foregroundStyle(.secondary)
             }
@@ -190,19 +175,115 @@ struct SidebarView: View {
     }
 }
 
+/// What the Network Monitor shows: the search, the chips next to it and the time range. The list and the map
+/// apply the same filter, so the map draws only the listed apps' matching connections.
+struct MonitorFilter: Equatable {
+    var search = ""
+    var onlyIncoming = false
+    var onlyDenied = false
+    /// The route chip; "vpn" or "proxy" in the search overrides it.
+    var route: RouteFilter = .all
+    var range: TimeRange = .fiveMinutes
+
+    /// A search or a chip narrows what is shown (the time range alone does not: it is the chart's window).
+    var isActive: Bool { !search.trimmingCharacters(in: .whitespaces).isEmpty || onlyIncoming || onlyDenied || route != .all }
+
+    /// The search text without its filter words, and the route filter in effect.
+    var query: (text: String, route: RouteFilter) { RouteFilter.parse(search, chip: route) }
+
+    /// The apps the list shows.
+    @MainActor func apps(_ ledger: Ledger, settings: AppSettings, now: Date = Date()) -> [AppEntry] {
+        let (text, route) = query
+        let cutoff = now.addingTimeInterval(-range.seconds)
+        var list = ledger.apps.filter { $0.lastActive >= cutoff && ($0.totalIn + $0.totalOut > 0 || !$0.remotes.isEmpty || $0.listening > 0) }
+        if !settings.includeLocalNetwork {
+            list = list.filter { $0.remotes.isEmpty || $0.remotes.contains { !isLocalAddress($0.address) } || $0.totalIn + $0.totalOut > 0 }
+        }
+        if !settings.includeNetworkExtensions { list = list.filter { !$0.identity.isExtension } }
+        if !settings.includeOtherUsers { list = list.filter { !$0.otherUsers } }
+        if onlyIncoming { list = list.filter { $0.listening > 0 } }
+        if onlyDenied { list = list.filter { ledger.rules.policy(for: $0.identity.ruleKey) == .deny } }
+        if route != .all { list = list.filter { $0.remotes.contains(where: route.matches) } }
+        if !text.isEmpty {
+            list = list.filter { a in
+                a.identity.name.localizedCaseInsensitiveContains(text) ||
+                a.processes.keys.contains { $0.localizedCaseInsensitiveContains(text) } ||
+                a.remotes.contains { Self.remote($0, contains: text) }
+            }
+        }
+        return list
+    }
+
+    /// Whether the map draws one of a listed app's connections: it is on the route asked for and, when the
+    /// search names neither the app nor the connection's process, the search finds the connection itself
+    /// ("Paris" draws only the lines to Paris).
+    func matches(_ r: RemoteHost, of app: AppEntry) -> Bool {
+        let (text, route) = query
+        guard route.matches(r) else { return false }
+        guard !text.isEmpty, !app.identity.name.localizedCaseInsensitiveContains(text) else { return true }
+        return (r.process?.localizedCaseInsensitiveContains(text) ?? false) || Self.remote(r, contains: text)
+    }
+
+    private static func remote(_ r: RemoteHost, contains text: String) -> Bool {
+        r.host.localizedCaseInsensitiveContains(text) || r.address.localizedCaseInsensitiveContains(text) ||
+            (r.geo?.country.localizedCaseInsensitiveContains(text) ?? false) || (r.geo?.city.localizedCaseInsensitiveContains(text) ?? false) ||
+            (r.via?.serverGeo?.city.localizedCaseInsensitiveContains(text) ?? false)
+    }
+}
+
+/// Which connections the list shows: all, or only those through a VPN or a proxy.
+enum RouteFilter: String, CaseIterable, Identifiable {
+    case all, vpn, proxy, either
+    var id: String { rawValue }
+    var title: String { ["all": "All Connections", "vpn": "Through a VPN", "proxy": "Through a Proxy", "either": "Through a VPN or Proxy"][rawValue]! }
+    var symbol: String { ["all": "point.3.connected.trianglepath.dotted", "vpn": "lock.shield", "proxy": "arrow.triangle.branch", "either": "shield.lefthalf.filled"][rawValue]! }
+    /// Splits the filter words off a search ("vpn", "proxy", or "is:vpn", "is:proxy"); both words mean either.
+    /// Without one, the chip's choice applies.
+    static func parse(_ search: String, chip: RouteFilter) -> (text: String, route: RouteFilter) {
+        var vpn = false, proxy = false, words: [Substring] = []
+        for w in search.split(separator: " ") {
+            switch w.lowercased() {
+            case "vpn", "is:vpn": vpn = true
+            case "proxy", "is:proxy": proxy = true
+            default: words.append(w)
+            }
+        }
+        let route: RouteFilter = vpn && proxy ? .either : vpn ? .vpn : proxy ? .proxy : chip
+        return (words.joined(separator: " "), route)
+    }
+
+    func matches(_ r: RemoteHost) -> Bool {
+        switch self {
+        case .all: return true
+        case .vpn: return r.isVPN
+        case .proxy: return r.isProxied
+        case .either: return r.isVPN || r.isProxied
+        }
+    }
+}
+
+/// An app and, expanded, its tree: the main process's connections, then each other process (helpers, XPC
+/// services; for the macOS row, every service) with its own connections. Each level can be selected, which scopes
+/// the map and the inspector.
 struct ProcessRow: View {
     @EnvironmentObject var ledger: Ledger
     let app: AppEntry
-    let selected: Bool
+    @Binding var selection: MonitorSelection?
+    /// Shows only the connections through a VPN or a proxy.
+    var filter: RouteFilter = .all
     @State private var open = false
+    @State private var openProcesses = Set<String>()
+
+    private var selectedHere: Bool { selection?.appID == app.id }
 
     var body: some View {
+        let tree: (direct: [RemoteHost], processes: [ProcessNode]) = open ? filtered(app.tree) : ([], [])
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "chevron.right").font(.caption2).rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.secondary)
-                    .frame(width: 14).contentShape(Rectangle()).onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { open.toggle() } }
+                Disclosure(open: open, label: app.identity.name) { withAnimation(.easeInOut(duration: 0.15)) { open.toggle() } }
                 Image(nsImage: app.identity.icon).resizable().frame(width: 24, height: 24)
-                Text(app.identity.name).lineLimit(1).font(.system(size: 14, weight: .medium))
+                Text(app.identity.name).lineLimit(1).font(.system(size: 14, weight: .medium)).layoutPriority(1)
+                RouteSummaryBadges(remotes: app.remotes).layoutPriority(0.5) // after the name, before the spacer
                 if app.identity.isExtension {
                     Text("EXT").font(.system(size: 9, weight: .semibold)).padding(.horizontal, 4).padding(.vertical, 1)
                         .overlay(RoundedRectangle(cornerRadius: 3).stroke(.secondary)).foregroundStyle(.secondary)
@@ -218,26 +299,95 @@ struct ProcessRow: View {
                 }
             }
             .padding(.vertical, 7).padding(.horizontal, 6)
-            .background(selected ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .background(selectedHere && selection?.process == nil && selection?.remote == nil ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+            .onTapGesture { select(MonitorSelection(appID: app.id)) }
+            .accessibilityElement(children: .contain)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { select(MonitorSelection(appID: app.id)) }
+            .accessibilityIdentifier("app-row-\(app.identity.name)")
             if open {
-                VStack(alignment: .leading, spacing: 3) {
-                    if app.remotes.isEmpty { Text("No outgoing connections").foregroundStyle(.secondary) }
-                    ForEach(app.remotes.prefix(30)) { r in
-                        HStack {
-                            Text(r.host).lineLimit(1)
-                            if app.identity.isSystem, let p = r.process { Text(p).foregroundStyle(.secondary).lineLimit(1) }
-                            if let via = r.via {
-                                Text("via \(via.process)").foregroundStyle(.orange).lineLimit(1).help(via.label)
-                            }
-                            Spacer()
-                            Text("\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).foregroundStyle(.secondary).monospacedDigit()
-                        }
-                    }
+                VStack(alignment: .leading, spacing: 1) {
+                    if tree.direct.isEmpty && tree.processes.isEmpty { Text("No outgoing connections").foregroundStyle(.secondary).padding(.leading, 44) }
+                    ForEach(tree.direct.prefix(30)) { r in remoteRow(r, indent: 44, process: app.mainProcess) }
+                    ForEach(tree.processes) { node in processRow(node) }
                 }
-                .font(.caption).padding(.leading, 52).padding(.trailing, 8).padding(.vertical, 4)
+                .font(.caption).padding(.trailing, 8).padding(.vertical, 4)
             }
         }
+    }
+
+    private func select(_ s: MonitorSelection) { selection = selection == s ? nil : s }
+
+    private func filtered(_ t: (direct: [RemoteHost], processes: [ProcessNode])) -> (direct: [RemoteHost], processes: [ProcessNode]) {
+        guard filter != .all else { return t }
+        let nodes = t.processes.map { n -> ProcessNode in var n = n; n.remotes = n.remotes.filter(filter.matches); return n }
+        return (t.direct.filter(filter.matches), nodes.filter { !$0.remotes.isEmpty })
+    }
+
+    @ViewBuilder private func processRow(_ node: ProcessNode) -> some View {
+        let isOpen = openProcesses.contains(node.name)
+        let s = MonitorSelection(appID: app.id, process: node.name)
+        HStack(spacing: 6) {
+            Disclosure(open: isOpen, label: node.name) { if !openProcesses.insert(node.name).inserted { openProcesses.remove(node.name) } }
+            Image(systemName: app.identity.isSystem ? "gearshape.2" : "gearshape").foregroundStyle(.secondary)
+            Text(node.name).lineLimit(1).truncationMode(.middle).font(.caption.weight(.medium)).layoutPriority(1)
+            RouteSummaryBadges(remotes: node.remotes)
+            Text(node.pids.count == 1 ? "pid \(node.pids[0])" : node.pids.isEmpty ? "" : "\(node.pids.count) processes").foregroundStyle(.secondary).lineLimit(1)
+            Spacer(minLength: 4)
+            Text("\(node.remotes.count)").foregroundStyle(.secondary).monospacedDigit().help("Connections")
+            if node.totalIn + node.totalOut > 0 { Text(formatBytes(node.totalIn + node.totalOut)).foregroundStyle(.secondary).monospacedDigit() }
+        }
+        .padding(.vertical, 3).padding(.leading, 30).padding(.trailing, 4)
+        .background(selection == s ? Color.accentColor.opacity(0.85) : .clear, in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
+        .onTapGesture { select(s) }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { select(s) }
+        .accessibilityIdentifier("process-row-\(node.name)")
+        if isOpen {
+            if node.remotes.isEmpty { Text("No outgoing connections").foregroundStyle(.secondary).padding(.leading, 70) }
+            ForEach(node.remotes.prefix(30)) { r in remoteRow(r, indent: 70, process: node.name) }
+        }
+    }
+
+    private func remoteRow(_ r: RemoteHost, indent: CGFloat, process: String?) -> some View {
+        let s = MonitorSelection(appID: app.id, process: process, remote: r.id)
+        return HStack(spacing: 6) {
+            Text(r.host).lineLimit(1).truncationMode(.middle)
+            RouteBadges(remote: r, compact: true)
+            Spacer(minLength: 4)
+            Text("\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            if r.bytesIn + r.bytesOut > 0 {
+                Text(formatBytes(r.bytesIn + r.bytesOut)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+                    .help("\(formatBytes(r.bytesIn)) received, \(formatBytes(r.bytesOut)) sent on the open connections")
+            }
+        }
+        .padding(.vertical, 2).padding(.leading, indent).padding(.trailing, 4)
+        .background(selection == s ? Color.accentColor.opacity(0.7) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .contentShape(Rectangle())
+        .onTapGesture { select(s) }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { select(s) }
+        .accessibilityIdentifier("remote-row-\(r.host)")
+    }
+}
+
+/// The chevron that opens a row, as a button so it is reachable by keyboard and UI tests.
+struct Disclosure: View {
+    let open: Bool
+    let label: String
+    let toggle: () -> Void
+    var body: some View {
+        Button(action: toggle) {
+            Image(systemName: "chevron.right").font(.caption2).rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.secondary)
+                .frame(width: 14, height: 14).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(open ? "Collapse \(label)" : "Expand \(label)")
+        .accessibilityIdentifier("disclose-\(label)")
     }
 }
 

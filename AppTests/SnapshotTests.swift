@@ -47,6 +47,11 @@ final class SnapshotTests: XCTestCase {
 
     private func assertMatchesGolden(_ rep: NSBitmapImageRep, _ name: String, tolerance: Double = 0.02, file: StaticString = #filePath, line: UInt = #line) throws {
         let url = Self.snapshotDir.appendingPathComponent("\(name).png")
+        // Pixels depend on the display scale and the Xcode/macOS that renders them: CI renders (catching crashes and
+        // layout errors) but compares only on the machine the goldens were recorded on.
+        if ProcessInfo.processInfo.environment["RAT_SKIP_GOLDENS"] != nil {
+            throw XCTSkip("golden comparison skipped (RAT_SKIP_GOLDENS); run locally")
+        }
         if ProcessInfo.processInfo.environment["RAT_RECORD_SNAPSHOTS"] != nil {
             try FileManager.default.createDirectory(at: Self.snapshotDir, withIntermediateDirectories: true)
             try rep.representation(using: .png, properties: [:])!.write(to: url)
@@ -81,7 +86,7 @@ final class SnapshotTests: XCTestCase {
 
     func testSidebarMatchesGolden() throws {
         let ledger = demoLedger()
-        let view = SidebarView(selection: .constant(nil), showChart: .constant(false), showInspector: .constant(true)).environmentObject(ledger)
+        let view = SidebarView(selection: .constant(nil), showChart: .constant(false), showInspector: .constant(true), filter: .constant(MonitorFilter())).environmentObject(ledger)
         try assertMatchesGolden(render(view, size: CGSize(width: 400, height: 700)), "sidebar")
     }
 
@@ -168,7 +173,7 @@ final class SnapshotTests: XCTestCase {
         guard let img = NSImage(contentsOf: ref), let refCG = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { throw XCTSkip("reference screenshots not present (gitignored)") }
         let refSidebarLum = luminance(refCG, region: CGRect(x: 0.01, y: 0.12, width: 0.24, height: 0.7))
         let ledger = demoLedger()
-        let rep = render(SidebarView(selection: .constant(nil), showChart: .constant(false), showInspector: .constant(true)).environmentObject(ledger), size: CGSize(width: 400, height: 700))
+        let rep = render(SidebarView(selection: .constant(nil), showChart: .constant(false), showInspector: .constant(true), filter: .constant(MonitorFilter())).environmentObject(ledger), size: CGSize(width: 400, height: 700))
         let ours = luminance(rep.cgImage!, region: CGRect(x: 0.02, y: 0.15, width: 0.9, height: 0.6))
         XCTAssertLessThan(refSidebarLum, 0.35)
         XCTAssertLessThan(ours, 0.35, "process list should be a dark pane")

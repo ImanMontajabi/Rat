@@ -104,7 +104,8 @@ final class ServicesTests: XCTestCase {
         XCTAssertTrue(g.available)
         XCTAssertEqual(g.lookup("8.8.8.8")?.country, "United States")
         XCTAssertNil(g.lookup("10.0.0.1"))
-        XCTAssertNotNil(GeoService.localPoint())
+        // The Mac's own position comes from its time zone; "UTC" (CI runners) is no place.
+        if TimeZone.current.identifier.contains("/") { XCTAssertNotNil(GeoService.localPoint()) }
     }
 
     func testBundledGeoDatabaseShipsInVendorFolder() throws {

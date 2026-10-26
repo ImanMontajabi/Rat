@@ -4,17 +4,18 @@ import AppKit
 struct MonitorWindow: View {
     @EnvironmentObject var ledger: Ledger
     @ObservedObject private var settings = AppSettings.shared
-    @State private var selection: String?
+    @State private var selection: MonitorSelection?
     @State private var showInspector = true
     @State private var showChart = true
+    @State private var filter = MonitorFilter()
 
     var body: some View {
         HStack(spacing: 0) {
-            SidebarView(selection: $selection, showChart: $showChart, showInspector: $showInspector)
+            SidebarView(selection: $selection, showChart: $showChart, showInspector: $showInspector, filter: $filter)
                 .frame(width: 400)
-            MapPane(selection: selection)
+            MapPane(selection: selection, filter: filter)
             if showInspector {
-                InspectorView(selection: selection)
+                InspectorView(selection: selection, filter: filter)
                     .frame(width: 330)
                     .background(.ultraThinMaterial)
                     .transition(.move(edge: .trailing))

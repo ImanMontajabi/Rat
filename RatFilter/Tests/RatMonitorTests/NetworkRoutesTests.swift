@@ -42,4 +42,47 @@ final class NetworkRoutesTests: XCTestCase {
         _ = NetworkRoutes.systemProxies()
         XCTAssertTrue(NetworkRoutes.tunnelAddresses().values.allSatisfy(NetworkRoutes.isTunnel))
     }
+
+    /// The interface `route -n get` prints, for the same addresses.
+    private func routeCommand(_ address: String) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/sbin/route")
+        p.arguments = ["-n", "get", address]
+        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        p.waitUntilExit()
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        return text.split(separator: "\n").first { $0.contains("interface:") }.map { $0.split(separator: ":").last!.trimmingCharacters(in: .whitespaces) }
+    }
+
+    func testRouteInterfaceMatchesTheRoutingTable() {
+        XCTAssertEqual(NetworkRoutes.routeInterface(to: "127.0.0.1"), "lo0")
+        XCTAssertEqual(NetworkRoutes.routeInterface(to: "::1"), "lo0")
+        XCTAssertNil(NetworkRoutes.routeInterface(to: "not an address"))
+        for a in ["1.1.1.1", "8.8.8.8", "203.0.113.5"] {
+            XCTAssertEqual(NetworkRoutes.routeInterface(to: a), routeCommand(a), a)
+        }
+    }
+
+    /// Live, on a Mac whose VPN carries the Internet (Windscribe, WireGuard, WARP, …): the tunnel is found from the
+    /// routing table, it has an address, and this user's connections to the Internet are bound to it.
+    func testLiveFullTunnelVPNIsFound() throws {
+        guard let tunnel = NetworkRoutes.internetTunnel() else { throw XCTSkip("no VPN carries the Internet on this Mac") }
+        XCTAssertTrue(NetworkRoutes.isTunnel(tunnel))
+        let addresses = NetworkRoutes.tunnelAddresses().filter { $0.value == tunnel }.map(\.key)
+        XCTAssertFalse(addresses.isEmpty, "\(tunnel) carries the Internet, so it has an address")
+        let open = ConnectionSampler.sample().filter { $0.proto == .tcp && $0.tcpState == "ESTABLISHED" && !$0.remoteAddress.hasPrefix("127.") && $0.remoteAddress != "::1" && !$0.remoteAddress.hasPrefix("fe80") }
+        if !open.isEmpty {
+            XCTAssertTrue(open.contains { addresses.contains($0.localAddress) }, "connections go out through \(tunnel): \(Set(open.map(\.localAddress)))")
+        }
+    }
+
+    func testLocalProxyPrograms() {
+        XCTAssertEqual(NetworkRoutes.localProxyProgram(inPath: "/usr/bin/ssh"), "ssh")
+        XCTAssertEqual(NetworkRoutes.localProxyProgram(inPath: "/opt/homebrew/bin/tor"), "Tor")
+        XCTAssertEqual(NetworkRoutes.localProxyProgram(inPath: "/opt/homebrew/bin/mitmdump"), "mitmproxy")
+        XCTAssertEqual(NetworkRoutes.localProxyProgram(inPath: "/Applications/ClashX.app/Contents/MacOS/ClashX"), "ClashX")
+        XCTAssertNil(NetworkRoutes.localProxyProgram(inPath: "/usr/local/bin/node"), "a dev server is no proxy")
+        XCTAssertNil(NetworkRoutes.localProxyProgram(inPath: "/usr/bin/sshd-keygen-wrapper"))
+    }
 }

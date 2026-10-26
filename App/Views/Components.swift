@@ -1,5 +1,95 @@
 import SwiftUI
 
+/// The tags of a connection that does not go straight to its server: `VPN · Windscribe · utun3` (teal),
+/// `Proxy · ssh` (orange) for a local or system proxy, including destinations unmasked behind a local proxy, and
+/// `VPN server · Windscribe` (grey) for the VPN client's own connection that carries the tunnel.
+struct RouteBadges: View {
+    let remote: RemoteHost
+    /// Narrow rows leave out the tunnel interface.
+    var compact = false
+
+    struct Item: Hashable {
+        var text: String
+        var symbol: String
+        var vpn: Bool
+        var carrier = false
+        var help: String
+        var color: Color { carrier ? .secondary : vpn ? .teal : .orange }
+    }
+
+    static func items(_ r: RemoteHost, compact: Bool) -> [Item] {
+        var out: [Item] = []
+        if let route = r.route {
+            if case .vpnServer = route {
+                out.append(Item(text: route.badge, symbol: "server.rack", vpn: false, carrier: true, help: route.help))
+            } else {
+                out.append(Item(text: compact ? route.shortBadge : route.badge, symbol: route.isVPN ? "lock.shield" : "arrow.triangle.branch", vpn: route.isVPN, help: route.help))
+            }
+        }
+        if let via = r.via, !(r.route?.isProxy ?? false) {
+            out.append(Item(text: via.badge, symbol: "arrow.triangle.branch", vpn: false, help: "\(via.label), \(via.kind)"))
+        }
+        return out
+    }
+
+    var body: some View {
+        HStack(spacing: 4) { ForEach(Self.items(remote, compact: compact), id: \.self) { RouteBadge(item: $0) } }
+    }
+}
+
+/// The routes an app's or a process's connections take, on its row: each distinct tag once, VPNs first, at most
+/// two and a count of the rest ("VPN · Windscribe", "Proxy · ssh", "+1").
+struct RouteSummaryBadges: View {
+    let remotes: [RemoteHost]
+
+    static func items(_ remotes: [RemoteHost]) -> [RouteBadges.Item] {
+        var seen = Set<String>(), out: [RouteBadges.Item] = []
+        for r in remotes { for i in RouteBadges.items(r, compact: true) where seen.insert(i.text).inserted { out.append(i) } }
+        return out.sorted { ($0.vpn ? 0 : $0.carrier ? 2 : 1, $0.text) < ($1.vpn ? 0 : $1.carrier ? 2 : 1, $1.text) }
+    }
+
+    var body: some View {
+        let items = Self.items(remotes)
+        if !items.isEmpty {
+            // The row's name keeps its room: with less space the tags step down to the first one and a count,
+            // then to their symbols (each still names itself in its tooltip).
+            ViewThatFits(in: .horizontal) {
+                badges(items, shown: 2)
+                badges(items, shown: 1)
+                HStack(spacing: 3) { ForEach(items, id: \.self) { RouteBadge(item: $0, symbolOnly: true) } }
+            }
+        }
+    }
+
+    private func badges(_ items: [RouteBadges.Item], shown: Int) -> some View {
+        HStack(spacing: 3) {
+            ForEach(items.prefix(shown), id: \.self) { RouteBadge(item: $0) }
+            if items.count > shown {
+                Text("+\(items.count - shown)").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                    .help(items.dropFirst(shown).map(\.text).joined(separator: ", "))
+            }
+        }
+    }
+}
+
+struct RouteBadge: View {
+    let item: RouteBadges.Item
+    var symbolOnly = false
+
+    var body: some View {
+        Group {
+            if symbolOnly { Image(systemName: item.symbol).accessibilityLabel(item.text) } else { Label(item.text, systemImage: item.symbol) }
+        }
+            .font(.system(size: 9, weight: .semibold)).lineLimit(1)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .foregroundStyle(item.color)
+            .background(item.color.opacity(0.15), in: Capsule())
+            .fixedSize()
+            .help(item.help)
+            .accessibilityIdentifier("badge-\(item.text)")
+    }
+}
+
 struct Pill: View {
     enum Kind { case up, down }
     let kind: Kind
@@ -27,7 +117,9 @@ struct PolicyToggle: View {
     var body: some View {
         HStack(spacing: 2) {
             cell("xmark", active: policy == .deny, tint: .red) { set(policy == .deny ? nil : .deny) }
+                .accessibilityLabel("Deny").accessibilityIdentifier("policy-deny")
             cell("checkmark", active: policy == .allow, tint: .green) { set(policy == .allow ? nil : .allow) }
+                .accessibilityLabel("Allow").accessibilityIdentifier("policy-allow")
         }
     }
 
@@ -39,6 +131,7 @@ struct PolicyToggle: View {
                 .background(active ? tint : (policy == nil ? Color.blue : Color.gray.opacity(0.35)), in: RoundedRectangle(cornerRadius: 5))
         }
         .buttonStyle(.plain)
+        .accessibilityValue(active ? "on" : "off")
     }
 }
 

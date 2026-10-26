@@ -36,6 +36,83 @@ public enum NetworkRoutes {
         return out
     }
 
+    /// The interface the kernel sends packets for `address` through, from the routing table (what
+    /// `route -n get <address>` prints as `interface:`). With a full-tunnel VPN the Internet's routes
+    /// (`0/1` and `128.0/1`, or a scoped default) point at the tunnel, so this names it. Nil when the address is
+    /// not a literal or no route matches.
+    public static func routeInterface(to address: String) -> String? {
+        var dst = sockaddr_storage()
+        let length: Int
+        if var a4 = in_addr() as in_addr?, inet_pton(AF_INET, address, &a4) == 1 {
+            var sin = sockaddr_in(); sin.sin_len = UInt8(MemoryLayout<sockaddr_in>.size); sin.sin_family = sa_family_t(AF_INET); sin.sin_addr = a4
+            length = MemoryLayout<sockaddr_in>.size
+            withUnsafeBytes(of: sin) { src in withUnsafeMutableBytes(of: &dst) { $0.copyMemory(from: src) } }
+        } else if var a6 = in6_addr() as in6_addr?, inet_pton(AF_INET6, address, &a6) == 1 {
+            var sin6 = sockaddr_in6(); sin6.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size); sin6.sin6_family = sa_family_t(AF_INET6); sin6.sin6_addr = a6
+            length = MemoryLayout<sockaddr_in6>.size
+            withUnsafeBytes(of: sin6) { src in withUnsafeMutableBytes(of: &dst) { $0.copyMemory(from: src) } }
+        } else { return nil }
+
+        let fd = socket(PF_ROUTE, SOCK_RAW, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var timeout = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        // Request: header, RTA_DST (the address), RTA_IFP (an empty link address: "tell me the interface").
+        func roundup(_ n: Int) -> Int { n > 0 ? 1 + ((n - 1) | (MemoryLayout<UInt32>.size - 1)) : MemoryLayout<UInt32>.size }
+        var ifp = sockaddr_dl(); ifp.sdl_len = UInt8(MemoryLayout<sockaddr_dl>.size); ifp.sdl_family = sa_family_t(AF_LINK)
+        let header = MemoryLayout<rt_msghdr>.size
+        var buf = [UInt8](repeating: 0, count: header + roundup(length) + roundup(MemoryLayout<sockaddr_dl>.size))
+        let seq = Int32.random(in: 1..<Int32.max)
+        var rtm = rt_msghdr()
+        rtm.rtm_msglen = UInt16(buf.count); rtm.rtm_version = UInt8(RTM_VERSION); rtm.rtm_type = UInt8(RTM_GET)
+        rtm.rtm_addrs = RTA_DST | RTA_IFP; rtm.rtm_flags = RTF_UP | RTF_HOST; rtm.rtm_seq = seq; rtm.rtm_pid = getpid()
+        buf.withUnsafeMutableBytes { b in
+            withUnsafeBytes(of: rtm) { b.copyMemory(from: $0) }
+            withUnsafeBytes(of: dst) { UnsafeMutableRawBufferPointer(rebasing: b[header..<header + length]).copyMemory(from: UnsafeRawBufferPointer(rebasing: $0[0..<length])) }
+            withUnsafeBytes(of: ifp) { src in
+                let at = header + roundup(length)
+                UnsafeMutableRawBufferPointer(rebasing: b[at..<at + src.count]).copyMemory(from: src)
+            }
+        }
+        guard buf.withUnsafeBytes({ write(fd, $0.baseAddress, $0.count) }) == buf.count else { return nil }
+
+        // Reply: the same header with every address the kernel filled in, in RTA_* bit order.
+        var reply = [UInt8](repeating: 0, count: 2048)
+        for _ in 0..<8 {
+            let n = reply.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            guard n >= header else { return nil }
+            let r = reply.withUnsafeBytes { $0.loadUnaligned(as: rt_msghdr.self) }
+            guard r.rtm_seq == seq, r.rtm_pid == getpid(), r.rtm_type == UInt8(RTM_GET) else { continue }
+            guard r.rtm_errno == 0 else { return nil }
+            var at = header
+            for bit in 0..<Int(RTAX_MAX) {
+                guard r.rtm_addrs & (1 << bit) != 0, at < n else { continue }
+                let len = Int(reply[at])
+                if 1 << bit == RTA_IFP, at + 1 < n, reply[at + 1] == UInt8(AF_LINK) {
+                    let dl = reply.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: at, as: sockaddr_dl.self) }
+                    let nameLength = Int(dl.sdl_nlen)
+                    let start = at + 8   // sdl_len, family, index (2), type, nlen, alen, slen
+                    guard nameLength > 0, start + nameLength <= n else { return nil }
+                    return String(decoding: reply[start..<start + nameLength], as: UTF8.self)
+                }
+                at += roundup(len)
+            }
+            return nil
+        }
+        return nil
+    }
+
+    /// The tunnel interface that carries the Internet (a full-tunnel VPN), if one does: the interface the
+    /// kernel would route a public address through.
+    public static func internetTunnel() -> String? {
+        for probe in ["1.1.1.1", "2606:4700:4700::1111"] {
+            if let i = routeInterface(to: probe), isTunnel(i) { return i }
+        }
+        return nil
+    }
+
     /// Tunnel interface → path of the process holding its kernel control socket (the VPN client that opened
     /// `utunN`). Root sees every process; a user only their own.
     public static func tunnelOwners(pids: [pid_t] = ConnectionSampler.allPIDs()) -> [String: String] {
@@ -115,6 +192,26 @@ public enum NetworkRoutes {
         let range = NSRange(lower.startIndex..., in: lower)
         guard let hit = patterns.first(where: { $0.regex.firstMatch(in: lower, range: range) != nil })?.name else { return nil }
         return displayNames[hit] ?? hit.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
+    }
+
+    // MARK: local proxies
+
+    /// Executables that run a proxy or tunnel on the Mac (`ssh -D`, Tor, Clash, mitmproxy, …), by lowercase name.
+    static let localProxyPrograms: [String: String] = [
+        "ssh": "ssh", "autossh": "autossh", "tor": "Tor", "mitmproxy": "mitmproxy", "mitmdump": "mitmproxy", "mitmweb": "mitmproxy",
+        "privoxy": "Privoxy", "polipo": "Polipo", "squid": "Squid", "tinyproxy": "tinyproxy", "3proxy": "3proxy",
+        "clash": "Clash", "clash-meta": "Clash", "mihomo": "Clash", "v2ray": "V2Ray", "xray": "Xray", "sing-box": "sing-box",
+        "hysteria": "Hysteria", "trojan": "Trojan", "trojan-go": "Trojan", "naive": "NaiveProxy", "ss-local": "Shadowsocks",
+        "sslocal": "Shadowsocks", "gost": "gost", "glider": "glider", "brook": "Brook", "tuic-client": "TUIC", "redsocks": "redsocks",
+        "wireproxy": "wireproxy", "cloudflared": "cloudflared", "obfs4proxy": "obfs4proxy", "lyrebird": "Tor", "snowflake-client": "Tor",
+        "proxychains4": "proxychains", "dnscrypt-proxy": "dnscrypt-proxy",
+    ]
+
+    /// The local proxy a loopback listener belongs to: a known proxy program, or a known VPN/proxy app
+    /// ("ClashX", "Hiddify"). Nil for anything else (a dev server on port 3000 is no proxy).
+    public static func localProxyProgram(inPath path: String) -> String? {
+        let exe = (path as NSString).lastPathComponent.lowercased()
+        return localProxyPrograms[exe] ?? knownApp(inPath: path)
     }
 
     // MARK: system proxies

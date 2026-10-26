@@ -1,0 +1,96 @@
+name: Nightly
+
+# Every merge into main publishes a pre-release: v<Version>-nightly.<YYYYMMDD>.<short sha>, with the DMG, its
+# SHA-256 and the unreleased notes compiled from changelog.d/ (the fragments stay until a stable release). Only
+# the newest five nightlies are kept. The app's update check ignores them unless the user opts into pre-releases.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  nightly:
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: write # the pre-release and its tag
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags, for the "since" line
+
+      - uses: ./.github/actions/setup-macos
+        with:
+          dmg: "true"
+
+      - name: Nightly version
+        id: ver
+        run: |
+          set -euo pipefail
+          version="$(scripts/version.sh get)"
+          tag="v${version}-nightly.$(date -u +%Y%m%d).$(git rev-parse --short=7 HEAD)"
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "last=$(git tag -l 'v*' | grep -v -e '-' | sort -V | tail -n1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build Rat.app
+        run: scripts/build-release.sh "$RUNNER_TEMP/out" "${{ github.run_number }}"
+
+      - name: Pack DMG
+        run: scripts/make-dmg.sh "$RUNNER_TEMP/out/Rat.app" "$RUNNER_TEMP/out/Rat-${{ steps.ver.outputs.tag }}-arm64.dmg"
+
+      - name: Release notes
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          LAST: ${{ steps.ver.outputs.last }}
+        run: |
+          set -euo pipefail
+          sha="$(cut -d' ' -f1 "$RUNNER_TEMP"/out/*.dmg.sha256)"
+          {
+            echo "**Nightly build of \`main\`** toward Rat $VERSION, commit ${GITHUB_SHA::7}. For testing: not a stable release."
+            echo
+            echo "Ad-hoc signed, Apple Silicon, macOS 14+. First launch: right-click Rat › Open. Update the helper afterwards if Settings › Security asks for it."
+            echo
+            python3 -I scripts/changelog.py render --level 3 | sed "1s/.*/### Changes since ${LAST:-the first release}/"
+            echo
+            echo "SHA-256 of \`Rat-$TAG-arm64.dmg\`: \`$sha\`"
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          files=("$RUNNER_TEMP"/out/*.dmg "$RUNNER_TEMP"/out/*.dmg.sha256)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # A re-run of the same commit on the same day replaces the files.
+            gh release upload "$TAG" "${files[@]}" --clobber
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$TAG" "${files[@]}" --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Rat $TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
+      - name: Keep the newest five nightlies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release list --limit 200 --json tagName,isPrerelease,createdAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+-nightly\\.")))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+          while read -r old; do
+            echo "deleting $old"
+            gh release delete "$old" --yes --cleanup-tag
+          done

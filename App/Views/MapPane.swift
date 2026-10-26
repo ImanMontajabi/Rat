@@ -3,7 +3,9 @@ import MapKit
 
 struct MapPane: View {
     @EnvironmentObject var ledger: Ledger
-    let selection: String?
+    let selection: MonitorSelection?
+    /// The list's search and filters: only the apps and connections they leave are drawn.
+    var filter = MonitorFilter()
     @State private var position: MapCameraPosition = .region(MapPane.region(fitting: []))
 
     /// The visible region: every pin with some margin, never tighter than a regional view (15 degrees), so a lone
@@ -24,7 +26,7 @@ struct MapPane: View {
     private struct Arc: Identifiable { let id: String; let coords: [CLLocationCoordinate2D]; let highlighted: Bool; let proxied: Bool }
     private struct Node: Identifiable { let id: String; let point: GeoPoint; let highlighted: Bool; var proxy: Bool }
 
-    private var visibleApps: [AppEntry] { ledger.apps.filter { selection == nil || $0.id == selection } }
+    private var visibleApps: [AppEntry] { filter.apps(ledger, settings: .shared).filter { selection == nil || $0.id == selection?.appID } }
 
     private static func key(_ g: GeoPoint) -> String { "\(g.city)|\(g.country)" }
 
@@ -47,7 +49,7 @@ struct MapPane: View {
         }
         let me = ledger.myLocation
         for a in visibleApps {
-            for r in a.remotes {
+            for r in a.remotes(for: selection) where filter.matches(r, of: a) {
                 if let server = r.via?.serverGeo {
                     add(server, proxy: true)
                     if let me { arc(from: me.coordinate, "me", to: server, proxied: false) }
@@ -103,8 +105,17 @@ struct MapPane: View {
             }
             Text("IP geolocation by DB-IP.com").font(.caption2).foregroundStyle(.secondary).padding(6)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            // The places on the map, for VoiceOver and the UI tests (map annotations are not reachable there).
+            Text("Map").font(.system(size: 1)).foregroundStyle(.clear).allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .accessibilityLabel("Map")
+                .accessibilityValue(Self.summary(g.nodes.map { $0.proxy ? "Proxy · \($0.point.city)" : $0.point.city }))
+                .accessibilityIdentifier("map-places")
         }
     }
+
+    /// "Madrid, Proxy · Stockholm": the places drawn, sorted; "No servers" when the filter leaves none.
+    static func summary(_ places: [String]) -> String { places.isEmpty ? "No servers" : places.sorted().joined(separator: ", ") }
 
     /// Quadratic curve between two coordinates, bowed north so lines read as arcs.
     static func curve(from a: CLLocationCoordinate2D, to b: CLLocationCoordinate2D, steps: Int = 32) -> [CLLocationCoordinate2D] {

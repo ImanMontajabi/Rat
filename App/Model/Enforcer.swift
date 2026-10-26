@@ -57,7 +57,7 @@ final class Enforcer: ObservableObject {
         proxiedURL = URL(fileURLWithPath: proxiedPath ?? Self.proxiedPath)
         // 1.0.4 and earlier had an "auto-apply" switch; a test could turn it off in the real preferences and Deny then
         // silently did nothing. With the helper installed, Deny is now always enforced.
-        if !Preferences.isTesting { UserDefaults.standard.removeObject(forKey: "autoApplyPF") }
+        if !Preferences.isTesting && !Preferences.isDemo { UserDefaults.standard.removeObject(forKey: "autoApplyPF") }
         // Helpers before 1.1.0 do not read proxy requests on lo0 (before 1.0.5 they also published no status, and
         // before 1.0.4 they blocked server addresses for every app).
         if helperInstalled == nil, self.helperInstalled {
@@ -205,6 +205,12 @@ final class Enforcer: ObservableObject {
 
     private func runPrivileged(_ command: String, done: @escaping (Bool) -> Void) {
         guard !busy else { return }
+        // Tests and demo mode (UI tests click through Settings) must never install, update or remove the real helper.
+        guard !Preferences.isTesting && !Preferences.isDemo else {
+            lastError = "The firewall helper cannot be changed in demo mode or under tests."
+            done(false)
+            return
+        }
         busy = true
         lastError = nil
         Task.detached {

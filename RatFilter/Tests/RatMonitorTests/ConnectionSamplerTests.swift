@@ -29,4 +29,18 @@ final class ConnectionSamplerTests: XCTestCase {
         let pids = Set(ConnectionSampler.sample().map(\.pid))
         XCTAssertTrue(pids.count >= 1)
     }
+
+    func testParentPIDOfThisProcess() {
+        XCTAssertEqual(ProcessGrouping.parentPID(of: getpid()), getppid())
+    }
+
+    func testLaunchingAppWalksParentsToTheFirstBundle() {
+        let parents: [pid_t: pid_t] = [400: 300, 300: 200, 200: 100, 100: 1]
+        let paths: [pid_t: String] = [300: "/usr/bin/git", 200: "/bin/zsh", 100: "/Applications/Warp.app/Contents/MacOS/stable"]
+        let hit = ProcessGrouping.launchingApp(of: 400, parent: { parents[$0] ?? 0 }, path: { paths[$0] ?? "pid \($0)" })
+        XCTAssertEqual(hit?.pid, 100)
+        XCTAssertEqual(hit?.path, "/Applications/Warp.app/Contents/MacOS/stable")
+        // A chain that reaches launchd without an app names nobody.
+        XCTAssertNil(ProcessGrouping.launchingApp(of: 300, parent: { $0 == 300 ? 200 : 1 }, path: { _ in "/bin/zsh" }))
+    }
 }
