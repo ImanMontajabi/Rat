@@ -1,0 +1,1 @@
+App and process rows show the VPN and proxy tags of their connections (each tag once; when the row is narrow they fold into a count, then into symbols). A connection without an address of its own is tagged VPN when the routing table sends it through the tunnel, and the VPN client's own connection to its server is tagged "VPN server" instead of VPN.

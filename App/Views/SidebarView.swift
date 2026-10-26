@@ -282,7 +282,8 @@ struct ProcessRow: View {
             HStack(spacing: 8) {
                 Disclosure(open: open, label: app.identity.name) { withAnimation(.easeInOut(duration: 0.15)) { open.toggle() } }
                 Image(nsImage: app.identity.icon).resizable().frame(width: 24, height: 24)
-                Text(app.identity.name).lineLimit(1).font(.system(size: 14, weight: .medium))
+                Text(app.identity.name).lineLimit(1).font(.system(size: 14, weight: .medium)).layoutPriority(1)
+                RouteSummaryBadges(remotes: app.remotes)
                 if app.identity.isExtension {
                     Text("EXT").font(.system(size: 9, weight: .semibold)).padding(.horizontal, 4).padding(.vertical, 1)
                         .overlay(RoundedRectangle(cornerRadius: 3).stroke(.secondary)).foregroundStyle(.secondary)
@@ -330,7 +331,8 @@ struct ProcessRow: View {
         HStack(spacing: 6) {
             Disclosure(open: isOpen, label: node.name) { if !openProcesses.insert(node.name).inserted { openProcesses.remove(node.name) } }
             Image(systemName: app.identity.isSystem ? "gearshape.2" : "gearshape").foregroundStyle(.secondary)
-            Text(node.name).lineLimit(1).truncationMode(.middle).font(.caption.weight(.medium))
+            Text(node.name).lineLimit(1).truncationMode(.middle).font(.caption.weight(.medium)).layoutPriority(1)
+            RouteSummaryBadges(remotes: node.remotes)
             Text(node.pids.count == 1 ? "pid \(node.pids[0])" : node.pids.isEmpty ? "" : "\(node.pids.count) processes").foregroundStyle(.secondary).lineLimit(1)
             Spacer(minLength: 4)
             Text("\(node.remotes.count)").foregroundStyle(.secondary).monospacedDigit().help("Connections")
