@@ -2,6 +2,16 @@
 
 # Rat
 
+**Windows Rust rewrite:** A native [GPUI Kit](https://gpui-kit.com/) desktop implementation now lives in `crates/`.
+Run `cargo run --locked -p rat-desktop`. See the [Windows README](crates/README.md) and [detailed setup, features and limitations](docs/RUST_REWRITE.md),
+including offline GeoIP setup and administrator requirements for directional IP blocking.
+
+![Rat for Windows: selected application, destination cities, curved connections and traffic inspector](docs/screenshots/rat-windows-monitor.png)
+
+<sub>Windows Rust build. Selected-app connections are highlighted in green. The PC marker is an approximate time-zone location; traffic rates are system-wide.</sub>
+
+The sections below describe the original macOS application.
+
 A network monitor and application firewall for macOS, modelled on Little Snitch. Rat shows which app talks to which server (on a world map, offline), asks before unknown connections, lets you allow or deny them with rules and profiles, and blocks denied servers with the macOS packet filter.
 
 ![Network monitor](docs/screenshots/rat-monitor.jpg)
