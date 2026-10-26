@@ -4,6 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rat is a macOS network monitor and reactive application firewall modelled on Little Snitch. It has no Network Extension entitlement (no paid developer account), so it cannot intercept connections before they start; see `docs/ARCHITECTURE.md` sections 7-8.
 
+## Workflow (mandatory)
+
+GitHub rulesets protect `main` and `release`: no direct pushes, no force pushes, no deletion. Every change goes through a pull request.
+
+- **Branches:** `main` is integration, `release` is the stable line. Work on `feat/<name>`, `fix/<name>`, `ci/<name>` or `test/<name>`, branched from an up-to-date `main`; one logical change per branch. Never commit on `main` or `release`.
+- **Changelog fragment:** every branch adds `changelog.d/<slug>.<type>.md` (types: added, changed, fixed, removed, security, internal; see `changelog.d/README.md`). `scripts/changelog.py new <type> <slug> "…"` creates one; `scripts/changelog.py check --base origin/main` is what CI runs. Only a PR that changes nothing for anyone may use the `skip-changelog` label instead.
+- **Version:** the root `Version` file (`X.Y.Z`, no extension) is the single source of truth and holds the version being developed on `main`. `scripts/version.sh set X.Y.Z` writes it and `project.yml`'s `MARKETING_VERSION`; `scripts/version.sh check` fails when they differ.
+- **Pull request:** push the branch and open it with `gh pr create --base main` (fill in `.github/pull_request_template.md`: summary, architecture, checklist). Merge only when CI is green. Commits and PR bodies keep the attribution lines.
+- **Releases:** a merge into `main` publishes a nightly pre-release. A stable release is a PR from `main` into `release`: the release workflow publishes `v<Version>` when `Version` is higher than the last stable tag, then opens a PR back to `main` that compiles the fragments into `CHANGELOG.md` and bumps `Version` to the next minor. Merging into `release` publishes a release: only the maintainer does it.
+
 ## Commands
 
 ```sh
@@ -15,6 +25,8 @@ xcodebuild -scheme Rat test -only-testing:RatTests/RulesModelTests/testAlertScop
 TEST_RUNNER_RAT_RECORD_SNAPSHOTS=1 xcodebuild -scheme Rat test -only-testing:RatTests/SnapshotTests   # re-record goldens
 (cd RatFilter && RAT_GEOIP_DB=../App/Vendor/dbip-city-lite.mmdb swift test)   # packages; --filter Name for one
 RAT_DEMO_MAP=1 RAT_OPEN=settings|rules RAT_SETTINGS_TAB=APS open Rat.app   # Debug only: fixed demo data (never touches real data), open a window/tab at launch
+scripts/version.sh check                       # Version and project.yml agree
+scripts/changelog.py render                    # preview the unreleased notes from changelog.d/
 ```
 
 ## Architecture
