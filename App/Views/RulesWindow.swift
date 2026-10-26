@@ -22,6 +22,8 @@ struct RulesWindow: View {
 
     var body: some View {
         let rules = ledger.rules
+        // A value, so profile rows redraw when it changes (they would not see a change behind the `rules` reference).
+        let activeProfile = rules.ruleSet.activeProfileID
         NavigationSplitView {
             List(selection: $category) {
                 Section("Rules") {
@@ -34,8 +36,12 @@ struct RulesWindow: View {
                             Image(systemName: p.symbol)
                             Text(p.name)
                             Spacer()
-                            if p.id == rules.ruleSet.activeProfileID { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+                            if p.id == activeProfile {
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityLabel("Active").accessibilityIdentifier("profile-active")
+                            }
                         }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("profile-\(p.name)")
                         .tag(Category.profile(p.id))
                         .contextMenu {
                             Button("Activate Profile") { rules.activate(p.id) }
@@ -145,9 +151,9 @@ struct RulesList: View {
                     Text("\(visible.count) \(visible.count == 1 ? "rule" : "rules")").foregroundStyle(.secondary)
                     Spacer()
                     if case .profile(let id) = category, id != rules.ruleSet.activeProfileID {
-                        Button("Activate") { rules.activate(id) }
+                        Button("Activate") { rules.activate(id) }.accessibilityIdentifier("activate-profile")
                     } else if case .profile = category {
-                        Label("Active", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                        Label("Active", systemImage: "checkmark.circle.fill").foregroundStyle(.green).accessibilityIdentifier("profile-is-active")
                     }
                 }
                 if !subtitle.isEmpty { Text(subtitle).font(.callout).foregroundStyle(.secondary) }

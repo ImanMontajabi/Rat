@@ -144,8 +144,8 @@ struct SidebarView: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
             TextField("Search", text: $search).textFieldStyle(.plain).accessibilityIdentifier("search-field")
-            chip("arrow.down.left.circle", on: $onlyIncoming, help: "Only apps accepting incoming connections")
-            chip("xmark.rectangle", on: $onlyDenied, help: "Only denied apps")
+            chip("arrow.down.left.circle", on: $onlyIncoming, help: "Only apps accepting incoming connections").accessibilityIdentifier("only-incoming")
+            chip("xmark.rectangle", on: $onlyDenied, help: "Only denied apps").accessibilityIdentifier("only-denied")
             Menu {
                 Picker("Route", selection: $routeFilter) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
             } label: {

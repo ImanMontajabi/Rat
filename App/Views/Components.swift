@@ -55,7 +55,9 @@ struct PolicyToggle: View {
     var body: some View {
         HStack(spacing: 2) {
             cell("xmark", active: policy == .deny, tint: .red) { set(policy == .deny ? nil : .deny) }
+                .accessibilityLabel("Deny").accessibilityIdentifier("policy-deny")
             cell("checkmark", active: policy == .allow, tint: .green) { set(policy == .allow ? nil : .allow) }
+                .accessibilityLabel("Allow").accessibilityIdentifier("policy-allow")
         }
     }
 
@@ -67,6 +69,7 @@ struct PolicyToggle: View {
                 .background(active ? tint : (policy == nil ? Color.blue : Color.gray.opacity(0.35)), in: RoundedRectangle(cornerRadius: 5))
         }
         .buttonStyle(.plain)
+        .accessibilityValue(active ? "on" : "off")
     }
 }
 
