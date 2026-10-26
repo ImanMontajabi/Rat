@@ -1,62 +1,142 @@
 <p align="center"><img src="docs/icon.png" width="120" alt="Rat"></p>
 
-# Rat
+<h1 align="center">Rat</h1>
 
-A network monitor and application firewall for macOS, modelled on Little Snitch. Rat shows which app talks to which server (on a world map, offline), asks before unknown connections, lets you allow or deny them with rules and profiles, and blocks denied servers with the macOS packet filter.
+<p align="center">
+🇬🇧 English | <a href="./README.fa.md">🇮🇷 فارسی (Persian)</a>
+</p>
 
-![Network monitor](docs/screenshots/rat-monitor.jpg)
-<sub>Demo data. Server locations come from a bundled offline database; nothing leaves your Mac.</sub>
+<p align="center">
+<a href="https://github.com/ImanMontajabi/Rat/releases/latest"><img alt="Latest stable release" src="https://img.shields.io/github/v/release/ImanMontajabi/Rat?label=stable&sort=semver"></a>
+<a href="https://github.com/ImanMontajabi/Rat/releases"><img alt="Nightly pre-release" src="https://img.shields.io/github/v/release/ImanMontajabi/Rat?include_prereleases&label=nightly&sort=date"></a>
+<a href="https://github.com/ImanMontajabi/Rat/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ImanMontajabi/Rat/actions/workflows/ci.yml/badge.svg"></a>
+<img alt="macOS 14+ arm64" src="https://img.shields.io/badge/macOS-14%2B%20arm64-lightgrey?logo=apple">
+<a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/ImanMontajabi/Rat"></a>
+</p>
 
-> **Honest limits.** Little Snitch intercepts each connection *before* it is made, using Apple's Network Extension entitlement, which needs a paid developer account. Rat has none, so it is **reactive**: it notices a new connection after it starts, asks, and on **Deny** cuts that app's connections by their local ports (never by server address, so other apps are not affected). A brand-new process can get its first packets out before the cut. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (sections 7, 8 and 10).
+Rat is a network monitor and application firewall for macOS, modelled on Little Snitch. It shows which app, and which of its processes, talks to which server, on an offline world map. It shows which connections go through a VPN or a proxy, and unmasks the real destination behind local proxies and SSH tunnels. Apps you deny are cut off with the macOS packet filter. Rat is free and open source (MIT), with no trial and no paywall.
 
-## Features
+![Network monitor: Telegram and Firefox filtered to connections through a VPN or proxy](docs/screenshots/monitor-hierarchy-tags.png)
+<sub>Demo data. The monitor is filtered to *Through a VPN or Proxy*: Telegram is opened down to its helper's connection through Windscribe, and Firefox's connections go through `ssh -D` and Tor. The map draws This Mac → proxy server (Stockholm) → real destination (Madrid), and the Summary counts only what the filter leaves. Server locations come from a bundled offline database; nothing leaves your Mac.</sub>
 
-- **Network Monitor** (toolbar: view options, traffic chart, inspector, as in Little Snitch): per-app list with activity sparklines, session totals, traffic chart (5m / 1h / 1d / 1w), inspector (path, code-signing ID, servers, locations), summary of top processes, domains and countries.
-- **Offline world map:** server IPs are resolved on-device from a bundled DB-IP Lite database (`Contents/Resources/Vendor`). Arcs and city pins appear immediately, no lookups, no network.
-- **Who runs the network:** each server shows its network owner (`AS13335 Cloudflare, Inc.`, offline, DB-IP ASN Lite), plus *Top Networks* in the Summary.
-- **Your own GeoIP files** (Settings > GeoIP): pick a newer DB-IP file or a MaxMind GeoLite2/GeoIP2 City or ASN file, or download the latest DB-IP Lite. Files are validated and loaded without a restart.
-- **Readable connections:** the usual service of a port (`TCP 443 · HTTPS`, `UDP 443 · QUIC`, `5223 · APN`), the process behind each connection (*via Google Chrome Helper (pid 812)*), the services in the macOS row by name (mDNSResponder, nsurlsessiond, … marked when they work for other apps), and *via VPN (Windscribe)* or *via System HTTPS Proxy* when a connection takes that path.
-- **Connection alerts:** **Silent Allow** is the default, so Rat never nags on first launch. Switch to **Alert Mode** for a floating panel on unknown connections: pick the scope (*This App (Any Server)* by default, domain, exact host, port) and the lifetime (once, until quit, forever), then Allow or Deny. An app with a process-wide Allow or Deny never raises an alert, and pending alerts for it vanish.
-- **Rules window** (⇧⌘R): sidebar of Rules / Unapproved / Profiles / Rule Groups / Known Networks / Invalid Rules and a table with Active, Process, Description and Status. Rules matched on app, team ID, signing ID, domain, host, IP, port range and protocol; the most specific rule wins and deny beats allow on a tie. Rule groups, profiles (Home / Work / Public Wi-Fi), **automatic profile switching** per network, **unapproved rules** with a review queue, JSON **import / export**.
-- **Local proxies and SSH tunnels unmasked:** a connection through `127.0.0.1:<port>` (an `ssh -D` SOCKS tunnel, an HTTP or SOCKS proxy) shows its real destination, read from the client's proxy request on lo0 by the helper (or from `curl -x … https://host` style command lines without it), with the hop: *via ssh proxy (127.0.0.1:1080 → your server)*. The map draws This Mac → proxy server → destination. A denied app cannot leave through a local proxy or forward: its loopback connections to other programs are cut too.
-- **Menu bar:** live up/down throughput, profile selector, mode switch, shortcuts.
-- **Firewall enforcement:** Deny is enforced by an opt-in **background helper** (Security tab): a root LaunchDaemon, `rat-enforcerd`, that blocks the local ports of every connection of a denied app and its helpers (Chrome/Firefox/Steam helpers, Safari's WebKit networking), plus a second daemon that lists *every* process's connections so Rat also sees other users' and system processes. Rat never blocks server addresses, so other apps and DNS are never affected. Settings > Security shows what the helper is enforcing; `scripts/rat-status.sh` prints the same from a terminal. *Remove Helper* uninstalls both. Without the helper nothing is blocked and Rat sees only your own processes.
+> **Honest limits.** Little Snitch intercepts each connection *before* it is made, using Apple's Network Extension entitlement, which needs a paid developer account. Rat has none, so it is **reactive**: it notices a connection after it starts, and cuts a denied app's connections by their local ports. A brand-new process can get its first packets out before the cut. The app is ad-hoc signed and not notarized. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (sections 7, 8 and 10).
+
+## What makes Rat different
+
+### Process tree, three levels deep
+Expand an app to see its direct connections and its helper and child processes, then expand a process to see its connections. Examples are `com.apple.WebKit.Networking` under Safari, `Google Chrome Helper` under Chrome, `steam_osx` under Steam, and services such as `mDNSResponder` and `nsurlsessiond` under macOS (marked when they work for other apps). Every process and every connection has its own traffic counters. For a command-line tool, the inspector shows which app started it (*Started by Warp*), but its rules stay its own.
+
+### The real destination behind local proxies and SSH tunnels
+With `http_proxy`, `https_proxy`, `ALL_PROXY`, an `ssh -D` SOCKS tunnel, or a local v2ray/Xray/Clash/sing-box proxy, socket-based monitors usually see only `127.0.0.1:<port>` and the proxy's one connection to its server. Rat shows **both**:
+- **the hop**, for example *via ssh proxy (127.0.0.1:1080 → your server)*;
+- **the real destination**: its domain, address, network owner and location on the map.
+
+With the helper installed, Rat reads the opening request a program sends to a proxy on loopback (HTTP `CONNECT`, plain HTTP, SOCKS5, SOCKS4/4a), and never the traffic after it. Without the helper, it reads the proxy settings in a program's command line and environment, such as `curl -x … https://host`.
+
+### VPN and proxy tags on every level
+Rat detects active tunnels (`utun*`: Windscribe, WireGuard, OpenVPN, Cloudflare WARP, Tailscale, Mullvad, …) and names each one after the app that owns it. It also detects the system proxy and local proxies such as ssh, Tor and Clash.
+
+Apps, processes and connections get badges such as `VPN · Windscribe`, `Proxy · ssh` or `VPN server · Windscribe` (the VPN client's own connection to its server). A connection counts as tunnelled when its socket is bound to the tunnel's address, or, when it has no address of its own, when the routing table sends it into the tunnel. No packets are inspected. To filter, use the route chip or type `vpn` or `proxy` in the search.
+
+### Per-app blocking that leaves DNS alone
+Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
+- **How it blocks:** it blocks the **local ports** of every socket of a denied app and its helpers with stateless `pf` rules (`block return-rst` for TCP, `block return-icmp` for UDP, inbound dropped).
+- **How fast:** it re-reads the denied processes' sockets every 3 ms while one is running.
+- **What it never touches:** server addresses. Shared resolvers such as `1.1.1.1` and `8.8.8.8`, and every app you allow, keep working.
+- **Proxies and forwards:** a denied app cannot slip out through a local proxy or an `ssh -L` forward, because its loopback connections to other programs are cut too.
+
+### One monitor, three synchronized panes
+- **Left:** the app list with sparklines, session totals and a 5m / 1h / 1d / 1w traffic chart.
+- **Middle:** the world map, drawing only what the list shows.
+- **Right:** the inspector for the selected app, process or connection, or a Summary of top processes, domains, countries and networks that follows the search and filters.
+
+### Everything else
+- **Connection alerts:** **Silent Allow** is the default, so a fresh install never nags. **Alert Mode** shows a floating panel for unknown connections, with a scope (app, domain, host, port) and a lifetime (once, until quit, forever).
+- **Rules window** (⇧⌘R):
+  - **Rules:** match on app, team ID, signing ID, domain, host, IP, port range and protocol. The most specific rule wins, and deny beats allow on a tie.
+  - **Organizing:** rule groups, profiles (Home / Work / Public Wi-Fi) with automatic switching per network, and unapproved rules with a review queue.
+  - **Sharing:** JSON import and export.
+- **Readable connections:** the usual service of each port (`TCP 443 · HTTPS`, `UDP 443 · QUIC`, `5223 · APN`), the network owner (`AS13335 Cloudflare, Inc.`), and reverse DNS that never holds up the monitor.
+- **Offline GeoIP:** bundled DB-IP Lite City and ASN databases. You can also use your own DB-IP or MaxMind file (Settings > GeoIP).
+- **Menu bar:** live throughput, a profile selector and a mode switch.
 - **Updates:** *Rat menu → Check for Updates…* reads GitHub Releases.
 
-![Rules](docs/screenshots/rat-rules.jpg)
+| Rules window (⇧⌘R) | Settings (⌘,) |
+|---|---|
+| ![Rules window](docs/screenshots/rules-window.png) | ![Settings window](docs/screenshots/settings-window.png) |
 
-![Settings](docs/screenshots/rat-settings-general.jpg) ![Alert](docs/screenshots/rat-alert.png)
+Settings has ten tabs, named as in Little Snitch: General, Control Center, Alert, Monitor, APS, Security, GeoIP, Notifications, Update and Advanced.
+
+![Connection alert](docs/screenshots/rat-alert.png)
 
 ## Install
 
-Download `Rat-v1.2.0-arm64.dmg` from [Releases](https://github.com/ImanMontajabi/Rat/releases), drag Rat to Applications. Apple Silicon, macOS 14+. The app is ad-hoc signed and not notarized (no paid developer account), so the first launch needs right-click, **Open** (or `xattr -dr com.apple.quarantine /Applications/Rat.app`).
+1. Download `Rat-v<version>-arm64.dmg`. **Stable:** from [the latest release](https://github.com/ImanMontajabi/Rat/releases/latest). **Nightly:** from [the pre-releases](https://github.com/ImanMontajabi/Rat/releases), built from `main` on every merge (the newest five are kept). Each DMG has a `.sha256` next to it: `shasum -a 256 -c Rat-*.dmg.sha256`.
+2. Open the DMG and drag Rat to Applications. Rat needs an Apple Silicon Mac with macOS 14 or later.
+3. Rat is ad-hoc signed and not notarized (there is no paid developer account), so open it the first time with right-click → **Open**, or run:
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/Rat.app
+   ```
+4. **Install the firewall helper (optional).** Open Settings (⌘,) → **Security** → **Install Helper…** and enter your administrator password. This installs two root LaunchDaemons:
+   - `rat-enforcerd`, which enforces Deny and reads proxy requests on loopback;
+   - a snapshot helper, so Rat also sees other users' and system processes.
 
-## Build
+   After an update, the same tab offers **Update Helper…**, and **Remove Helper…** uninstalls both. Without the helper, Rat still monitors your own processes, but nothing is blocked.
+
+To see what is enforced right now, run `scripts/rat-status.sh`, or `sudo scripts/rat-status.sh` to include the live `pf` rules.
+
+## Build from source
+
+Requirements: Xcode (newest stable) and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`). `create-dmg` is optional; `make-dmg.sh` falls back to `hdiutil`.
 
 ```sh
-./scripts/fetch-geoip.sh                 # downloads the ~125 MB DB-IP database into App/Vendor (git-ignored)
-xcodegen generate
-xcodebuild -scheme Rat -configuration Release ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build
-xcodebuild -scheme Rat test              # app, rules-model and snapshot tests
-(cd RatFilter && RAT_GEOIP_DB=../App/Vendor/dbip-city-lite.mmdb swift test)
+./scripts/fetch-geoip.sh                    # once: the ~125 MB DB-IP databases into App/Vendor (git-ignored)
+xcodegen generate                           # Rat.xcodeproj is generated from project.yml
+./scripts/build-release.sh /tmp/out         # the Release build CI makes → /tmp/out/Rat.app
+./scripts/make-dmg.sh /tmp/out/Rat.app /tmp/out/Rat.dmg
 ```
 
-Snapshot tests compare rendered SwiftUI views with goldens in `AppTests/Snapshots` and check layout and colour against the Little Snitch reference screenshots (kept local in `./screenshot`). Re-record goldens with `TEST_RUNNER_RAT_RECORD_SNAPSHOTS=1`.
+## Architecture
 
-## Layout
-
-| Path | Contents |
+| Module | Contents |
 |---|---|
-| `RatFilter/Sources/RatFilterCore` | Rules, profiles, groups, network triggers, engine, import/export. Pure Swift. |
-| `RatFilter/Sources/RatMonitor` | `libproc` connection sampler, `nettop` traffic sampler, root-snapshot parser, port names, VPN and system-proxy detection. |
-| `RatFilter/Sources/RatGeo` | MaxMind DB (`.mmdb`) reader (City and ASN, hardened for user-chosen files) and time-zone locator. |
-| `RatFilter/Sources/RatFilterExtension` | `NEFilterDataProvider` from the first prototype. Dormant: it needs the Network Extension entitlement. |
-| `App/` | SwiftUI app: monitor, rules window, alert panel, menu bar, pf enforcer. |
-| `App/Resources/rat-pf-helper.sh` | The helper that runs as root (`apply` / `snapshot`). Validates every address it reads. |
+| `App/` | The SwiftUI app. `Ledger` samples every 1.5 s, groups processes into apps, evaluates each connection against the rules, raises alerts and hands the helper the denied apps and ports. It also holds the monitor, the Rules and Settings windows, the alert panel and the menu bar. |
+| `RatFilter/Sources/RatFilterCore` | The rule engine: rules, profiles, groups, network triggers, import/export. Pure Swift. |
+| `RatFilter/Sources/RatMonitor` | The `libproc` connection sampler, the `nettop` traffic sampler, process grouping, port names, and VPN, route and proxy detection (routing socket, tunnel owners, system proxies, command-line proxy settings). |
+| `RatFilter/Sources/RatGeo` | A MaxMind DB (`.mmdb`) reader (City and ASN; hardened for files you choose) and the time-zone locator. |
+| `RatFilter/Sources/RatEnforce` + `Enforcerd/` | `rat-enforcerd`, the root daemon: the `pf` anchor for denied apps' local ports, and the loopback proxy-request reader (BPF on `lo0`). It never blocks remote addresses. |
+| `RatFilter/Sources/RatFilterExtension` | A dormant `NEFilterDataProvider` that needs the Network Extension entitlement. |
+
+The full design, including why Rat blocks local ports and not addresses, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Testing
+
+```sh
+xcodebuild -scheme Rat test                                            # app, rules-model and snapshot tests
+(cd RatFilter && RAT_GEOIP_DB=../App/Vendor/dbip-city-lite.mmdb swift test)   # the packages
+scripts/test-ui.sh                  # XCUITest on demo data + snapshot goldens (needs a logged-in GUI session)
+scripts/readme-screenshots.sh       # retakes the screenshots above from demo data
+sudo scripts/verify-blocking.sh     # live end-to-end blocking test
+```
+
+The UI tests and screenshots run a separate demo build (bundle ID `com.imanmontajabi.Rat.uitest`) with fixed data. They never touch your running Rat, its rules or its preferences. Keep your hands off the keyboard and mouse while they run.
+
+## Release workflow
+
+- **Pull requests:** every change goes through a PR into `main` from a `feat/`, `fix/`, `ci/`, `test/` or `docs/` branch, and adds a fragment in [`changelog.d/`](changelog.d/README.md) (`scripts/changelog.py new <type> <slug> "…"`). CI checks the fragment and the `Version` file, runs the tests, and builds a DMG.
+- **Version:** the root `Version` file (`X.Y.Z`) is the version being developed. `scripts/version.sh set X.Y.Z` keeps `project.yml` in step.
+- **Nightly:** every merge into `main` publishes `v<Version>-nightly.<date>.<sha>` as a pre-release with its DMG and notes.
+- **Stable:** a PR from `main` into `release` publishes `v<Version>`. The workflow then opens a PR back to `main` that compiles the fragments into [CHANGELOG.md](CHANGELOG.md) and bumps `Version`.
 
 ## Where the design comes from
 
-Static reverse-engineering of the installed Little Snitch (with [REA](https://github.com/morluto/rea)): a `NEFilterDataProvider` content filter with allow / drop / pause verdicts, rules re-applied to live flows, matching by code signature, an *unapproved* rule state, profiles with network triggers, a separate agent for alerts, and an Endpoint Security extension. No Little Snitch code or assets are used. The screenshots below are of Little Snitch and are UI reference only.
+The design comes from static reverse engineering of the installed Little Snitch (with [REA](https://github.com/morluto/rea)). It found:
+- a `NEFilterDataProvider` content filter with allow, drop and pause verdicts, and rules re-applied to live flows;
+- matching by code signature, and an *unapproved* rule state;
+- profiles with network triggers;
+- a separate agent for alerts, and an Endpoint Security extension.
+
+No Little Snitch code or assets are used. The screenshots below are of Little Snitch and are UI reference only.
 
 | | |
 |---|---|
@@ -65,4 +145,4 @@ Static reverse-engineering of the installed Little Snitch (with [REA](https://gi
 
 ## Credits and license
 
-MIT, see [LICENSE](LICENSE). IP geolocation and network data by [DB-IP.com](https://db-ip.com), IP to City Lite and IP to ASN Lite databases, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+MIT, see [LICENSE](LICENSE). IP geolocation and network data come from [DB-IP.com](https://db-ip.com): the IP to City Lite and IP to ASN Lite databases, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
