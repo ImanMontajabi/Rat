@@ -1,1 +1,0 @@
-A connection through a plain forwarding proxy (one that connects to the destination itself) no longer shows the destination as the proxy's server on the map; connections through a local proxy on [::1] name the right listener.

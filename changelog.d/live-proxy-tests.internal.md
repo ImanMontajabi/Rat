@@ -1,1 +1,0 @@
-Live proxy tests: real curl through a loopback SOCKS5 and HTTP CONNECT proxy (IPv4 and IPv6) must show the real destination with its Proxy tag, from the command line and, where the firewall helper is installed, from its lo0 capture.
