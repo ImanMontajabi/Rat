@@ -269,19 +269,31 @@ struct SecuritySettings: View {
         SettingsPane {
             Text("Firewall Helper").font(.system(size: 15, weight: .semibold))
             if enf.helperInstalled {
-                if enf.helperOutdated {
-                    Label("Installed, but an older version", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
-                    Text("This helper is from an older version: it cannot see where connections through a local proxy go, and a denied app could still use one (helpers before 1.0.4 also blocked server addresses for every app). Update it.")
-                        .font(.callout).foregroundStyle(.secondary)
+                if let reason = enf.outdatedReason {
+                    Label("Installed, but it needs an update", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
+                    Text(reason)
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button(enf.busy ? "Updating…" : "Update Helper…") { enf.installHelper() }.disabled(enf.busy)
                 } else {
                     Label("Installed: blocking is applied automatically", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
                 }
                 if let st = enf.status {
-                    Label(st.pfEnabled ? "Packet filter enabled" : "Packet filter is disabled", systemImage: st.pfEnabled ? "checkmark.circle" : "xmark.octagon")
-                        .foregroundStyle(st.pfEnabled ? Color.secondary : Color.red)
-                    if !st.anchorHooked {
-                        Label("/etc/pf.conf does not load the com.apple anchors, so the rules are not evaluated", systemImage: "xmark.octagon").foregroundStyle(.red)
+                    if st.pfEnabled && st.anchorHooked && st.pfIssue == nil {
+                        Label("Packet filter enabled and evaluating Rat’s rules", systemImage: "checkmark.circle").foregroundStyle(.green)
+                    } else {
+                        if !st.pfEnabled { Label("Packet filter is disabled", systemImage: "xmark.octagon").foregroundStyle(.red) }
+                        if !st.anchorHooked {
+                            Label("The packet filter’s main ruleset does not evaluate the com.apple anchors, so Rat’s rules are not applied", systemImage: "xmark.octagon").foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if let issue = st.pfIssue { Text(issue).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+                        Button("Repair Firewall Now") { enf.requestRepair() }
+                            .help("Turns the packet filter on and loads macOS’s pf configuration again, with Rat’s anchor. A VPN client’s own firewall rules are replaced until it loads them again.")
+                    }
+                    if let n = st.repairs, n > 0, let what = st.lastRepair {
+                        Label("Repaired automatically \(n == 1 ? "once" : "\(n) times") (last: \(what)\(st.lastRepairAt.map { ", " + $0.formatted(date: .omitted, time: .shortened) } ?? ""))", systemImage: "wrench.and.screwdriver")
+                            .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            .help("Another program, usually a VPN client, turned the packet filter off or replaced its rules.")
                     }
                     Label("Denied apps running: \(st.deniedApps.count), blocked connections: \(st.blockedPorts)\(st.blockedLoopbackPorts.map { $0 > 0 ? ", through local proxies: \($0)" : "" } ?? "")", systemImage: "shield.checkered")
                         .foregroundStyle(.secondary)
@@ -308,7 +320,7 @@ struct SecuritySettings: View {
             if let err = enf.lastError { Text(err).font(.caption).foregroundStyle(.red) }
             Divider()
             Text("Denying an app blocks the ports of all its processes as soon as the helper sees a socket (a few milliseconds). Server addresses are never blocked, so other apps are not affected. A first connection to a very close server can still get a few packets through; blocking before a connection opens needs Apple’s Network Extension entitlement.")
-                .font(.callout).foregroundStyle(.secondary)
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 }

@@ -23,7 +23,9 @@ private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "enfor
 final class Enforcer: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var helperInstalled: Bool
-    @Published private(set) var helperOutdated = false
+    /// Why the installed helper must be updated (Update Helper…), or nil when it is the one in this copy of Rat.
+    @Published private(set) var outdatedReason: String?
+    var helperOutdated: Bool { outdatedReason != nil }
     /// What the daemon last reported (nil when it is not running or has not written for a while).
     @Published private(set) var status: EnforcerStatus?
     @Published var lastError: String?
@@ -40,29 +42,76 @@ final class Enforcer: ObservableObject {
     let snapshotURL: URL
     let appsURL: URL
     let portsURL: URL
+    /// Touched by Repair Firewall: the daemon puts pf right at once when this file changes (only its date is read).
+    let repairURL: URL
     private let statusURL: URL
     private let proxiedURL: URL
     private var proxiedStamp: Date?
     private var proxied: [ProxiedFlow] = []
 
+    /// The files compared for Update Helper: the LaunchDaemon plist, the helper in this app's bundle and the
+    /// installed one. Nil under tests unless given, so they never read the machine's helper.
+    struct HelperFiles {
+        var plist: String
+        var bundled: String?
+        var installed: String
+    }
+    private let helperFiles: HelperFiles?
+    private lazy var bundledDigest: String? = helperFiles?.bundled.flatMap(FileDigest.sha256(atPath:))
+    /// The installed helper's digest, read again only when the file changes (size, date or inode).
+    private var installedDigest: (stamp: [Int], digest: String?)?
+
     /// `helperInstalled` and the daemon's files can be forced so tests do not depend on (or touch) the machine's real state.
-    init(supportDirectory: URL, helperInstalled: Bool? = nil, statusPath: String? = nil, proxiedPath: String? = nil) {
+    init(supportDirectory: URL, helperInstalled: Bool? = nil, statusPath: String? = nil, proxiedPath: String? = nil, helperFiles: HelperFiles? = nil) {
         // Earlier versions wrote the server addresses of denied apps here and blocked them for every app.
         try? FileManager.default.removeItem(at: supportDirectory.appendingPathComponent("blocklist.txt"))
         snapshotURL = supportDirectory.appendingPathComponent("system-sockets.txt")
         appsURL = supportDirectory.appendingPathComponent("denied-apps.txt")
         portsURL = supportDirectory.appendingPathComponent("denied-ports.txt")
+        repairURL = supportDirectory.appendingPathComponent("pf-repair-request")
         self.helperInstalled = helperInstalled ?? FileManager.default.fileExists(atPath: Self.plistPath(Self.applyLabel))
         statusURL = URL(fileURLWithPath: statusPath ?? Self.statusPath)
         proxiedURL = URL(fileURLWithPath: proxiedPath ?? Self.proxiedPath)
         // 1.0.4 and earlier had an "auto-apply" switch; a test could turn it off in the real preferences and Deny then
         // silently did nothing. With the helper installed, Deny is now always enforced.
         if !Preferences.isTesting && !Preferences.isDemo { UserDefaults.standard.removeObject(forKey: "autoApplyPF") }
-        // Helpers before 1.1.0 do not read proxy requests on lo0 (before 1.0.5 they also published no status, and
-        // before 1.0.4 they blocked server addresses for every app).
-        if helperInstalled == nil, self.helperInstalled {
-            helperOutdated = !((try? String(contentsOfFile: Self.plistPath(Self.applyLabel), encoding: .utf8))?.contains("--proxied") ?? false)
+        self.helperFiles = helperFiles ?? (helperInstalled == nil && !Preferences.isTesting
+            ? HelperFiles(plist: Self.plistPath(Self.applyLabel), bundled: Bundle.main.url(forAuxiliaryExecutable: "rat-enforcerd")?.path, installed: Self.enforcerPath)
+            : nil)
+        checkHelper()
+    }
+
+    /// Why the installed helper is not the one in this copy of Rat, or nil. The helper is compared by its SHA-256,
+    /// not by a version number: the installed file with the bundled one, and the bundled one with what the daemon
+    /// runs (`status`, from the daemon's status file; one without a digest predates this check). `bundled` is nil
+    /// when the app has no helper to compare with, and then only the plist decides.
+    nonisolated static func outdatedReason(plist: String?, bundled: String?, installed: String?, status: EnforcerStatus?) -> String? {
+        // Helpers before 1.4.0 do not repair pf when another program (a VPN client) turns it off or replaces its
+        // rules; before 1.1.0 they did not read proxy requests on lo0 (before 1.0.5 they also published no status,
+        // and before 1.0.4 they blocked server addresses for every app).
+        guard plist?.contains("--repair") == true else {
+            return "This helper is from an older version: when a VPN client turns the packet filter off or replaces its rules, it does not put them right, so denied apps may not be blocked. Update it."
         }
+        guard let bundled else { return nil }
+        if installed != bundled {
+            return "The installed helper is not the one in this copy of Rat (Rat was updated or moved), so it may block with older rules or not at all. Update it."
+        }
+        if let status, status.executableSHA256 != bundled {
+            return "The helper that is running is not the installed one: it was not restarted after an update. Update it to restart it."
+        }
+        return nil
+    }
+
+    /// Compares the installed and running helper with the bundled one (on every status refresh, cheap: the
+    /// installed file is hashed again only when it changes).
+    private func checkHelper() {
+        guard helperInstalled, let files = helperFiles else { return }
+        var st = stat()
+        let stamp = stat(files.installed, &st) == 0 ? [Int(st.st_size), Int(st.st_mtimespec.tv_sec), Int(st.st_mtimespec.tv_nsec), Int(st.st_ino)] : []
+        if installedDigest?.stamp != stamp { installedDigest = (stamp, stamp.isEmpty ? nil : FileDigest.sha256(atPath: files.installed)) }
+        let reason = Self.outdatedReason(plist: try? String(contentsOfFile: files.plist, encoding: .utf8), bundled: bundledDigest,
+                                         installed: installedDigest?.digest, status: status)
+        if reason != outdatedReason { outdatedReason = reason }
     }
 
     /// Reads the daemon's status file. A status older than 10 s means the daemon is not running.
@@ -72,6 +121,7 @@ final class Enforcer: ObservableObject {
         let s = (try? Data(contentsOf: statusURL)).flatMap { try? dec.decode(EnforcerStatus.self, from: $0) }
         let fresh = s.flatMap { now.timeIntervalSince($0.updated) < 10 ? $0 : nil }
         if fresh != status { status = fresh }
+        checkHelper()
     }
 
     /// Connections through local proxies the daemon saw on lo0 (re-read when the file changes).
@@ -104,6 +154,12 @@ final class Enforcer: ObservableObject {
         if write(paths.sorted().map { $0 + "\n" }.joined(), to: appsURL) {
             logger.notice("denied apps written: \(paths.count, privacy: .public)")
         }
+    }
+
+    /// Asks the daemon to put pf right now (Settings > Security): turn it on and restore the com.apple anchors, also
+    /// when that replaces another program's own rules.
+    func requestRepair() {
+        do { try Data(ISO8601DateFormatter().string(from: Date()).utf8).write(to: repairURL) } catch { lastError = error.localizedDescription }
     }
 
     /// Local ports of sockets that rules deny, and (`lo0 <port>`) of loopback connections to a local proxy whose
@@ -140,7 +196,7 @@ final class Enforcer: ObservableObject {
         // The enforcer reads the user's files only for matching. It publishes proxied destinations of this user's
         // processes (and nobody else's) in a file only this user can read.
         let apply = plist(Self.applyLabel, [Self.enforcerPath, "--denied", appsURL.path, "--ports", portsURL.path, "--status", Self.statusPath,
-                                            "--proxied", Self.proxiedPath, "--owner-uid", String(getuid())],
+                                            "--proxied", Self.proxiedPath, "--owner-uid", String(getuid()), "--repair", repairURL.path],
                           extra: "<key>KeepAlive</key><true/><key>RunAtLoad</key><true/><key>ProcessType</key><string>Interactive</string>")
         let sampler = plist(Self.samplerLabel, [Self.helperPath, "snapshot", snapshotURL.path, owner],
                             extra: "<key>StartInterval</key><integer>5</integer><key>RunAtLoad</key><true/>")
@@ -169,7 +225,8 @@ final class Enforcer: ObservableObject {
         done
         """
         runPrivilegedScript(script) { ok in
-            if ok { self.helperInstalled = true; self.helperOutdated = false }
+            // The old daemon removed its status file when launchd stopped it; the new one writes its own digest.
+            if ok { self.helperInstalled = true; self.status = nil; self.checkHelper() }
         }
     }
 
@@ -180,7 +237,7 @@ final class Enforcer: ObservableObject {
         rm -f \(Self.shellQuote(Self.statusPath)) \(Self.shellQuote(Self.proxiedPath)) \(Self.shellQuote(Self.plistPath(Self.applyLabel))) \(Self.shellQuote(Self.plistPath(Self.samplerLabel))) \(Self.shellQuote(Self.helperPath)) \(Self.shellQuote(Self.enforcerPath))
         """
         runPrivilegedScript(script) { ok in
-            if ok { self.helperInstalled = false; self.helperOutdated = false; self.status = nil }
+            if ok { self.helperInstalled = false; self.outdatedReason = nil; self.status = nil }
         }
     }
 

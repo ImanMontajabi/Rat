@@ -1,1 +1,0 @@
-Connections through a VPN or a proxy carry a tag in the list and the inspector: `VPN · Windscribe · utun3`, `Proxy · ssh`, `Proxy · System HTTPS`. Loopback connections to a local proxy program (ssh, Tor, Clash, V2Ray, mitmproxy, …) are tagged even without the firewall helper. Type `vpn` or `proxy` in the search field, or use the new route filter, to see only those connections.

@@ -20,7 +20,8 @@ struct AppIdentity: Hashable {
            ProcessGrouping.bundleRoot(of: owner) != nil {
             return resolve(processPath: owner)
         }
-        if let bundle = ProcessGrouping.bundleRoot(of: path) {
+        // A program the app installed outside its bundle (Windscribe's tunnels) is listed under the app.
+        if let bundle = ProcessGrouping.bundleRoot(of: path) ?? ProcessGrouping.companionApp(of: path) {
             // "Steam.AppBundle" holds Steam's client and helpers; other bundles show the name Finder shows.
             let name = bundle.hasSuffix(".AppBundle")
                 ? ((bundle as NSString).lastPathComponent as NSString).deletingPathExtension

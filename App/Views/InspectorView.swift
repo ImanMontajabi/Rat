@@ -147,12 +147,18 @@ struct ProcessInspector: View {
                     Text("The allow rules above are overridden while the whole app is denied.")
                         .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
                 }
+                if ledger.rules.policy(for: app.identity.ruleKey) == .allow, appRules.contains(where: { $0.verdict == .deny }) {
+                    Text("The deny rules above are overridden while the whole app is allowed.")
+                        .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
+                }
                 if ledger.rules.policy(for: app.identity.ruleKey) == .deny {
                     Group {
                         if !ledger.enforcer.helperInstalled {
                             Text("Not enforced: this needs the firewall helper (Settings > Security).").foregroundStyle(.orange)
                         } else if ledger.enforcer.status == nil {
                             Text("Not enforced: the firewall helper is not running (Settings > Security).").foregroundStyle(.orange)
+                        } else if ledger.enforcer.helperOutdated {
+                            Text("May not be enforced: the firewall helper needs an update (Settings > Security).").foregroundStyle(.orange)
                         } else if let e = ledger.enforcement(for: app.id) {
                             Text("Blocked by the firewall helper: \(e.processes) processes, \(e.ports) open connections cut.").foregroundStyle(.secondary)
                         } else {

@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 /// Entry point of the `rat-enforcerd` tool: `rat-enforcerd --denied <file> [--ports <file>] [--status <file>]
-/// [--proxied <file> --owner-uid <uid>] [--blocklist <legacy file to delete>] [--anchor <name>]`.
+/// [--proxied <file> --owner-uid <uid>] [--repair <file>] [--blocklist <legacy file to delete>] [--anchor <name>]`.
 public func runEnforcerTool(_ args: [String]) -> Never {
     func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
     guard let denied = value("--denied") else {
@@ -14,6 +14,7 @@ public func runEnforcerTool(_ args: [String]) -> Never {
     if let a = value("--anchor") { s.anchor = a }
     s.proxiedFile = value("--proxied")
     s.ownerUID = value("--owner-uid").flatMap { uid_t($0) }
+    s.repairFile = value("--repair")
     let daemon = EnforcerDaemon(settings: s)
     daemon.start()
     var sources: [DispatchSourceSignal] = []
