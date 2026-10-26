@@ -45,13 +45,14 @@ final class LiveProxyTests: XCTestCase {
         return p
     }
 
-    /// The clients' established loopback connections to the proxy, once they all show up, plus the proxy's listeners.
+    /// The sockets of the clients and of this process (the proxy's listeners and its ends of the tunnels), once
+    /// every client is connected. Other programs' connections are left out: the ledger would look up their names.
     private func liveConnections(of pids: [Int32], timeout: TimeInterval = 10) async throws -> [ObservedConnection] {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let conns = ConnectionSampler.sample()
             let ready = Set(conns.filter { pids.contains($0.pid) && $0.tcpState == "ESTABLISHED" && proxy.ports.contains($0.remotePort) }.map(\.pid))
-            if ready.count == pids.count && proxy.handshakes >= pids.count { return conns }
+            if ready.count == pids.count && proxy.handshakes >= pids.count { return conns.filter { pids.contains($0.pid) || $0.pid == getpid() } }
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         XCTFail("curl did not connect to the loopback proxy (handshakes: \(proxy.handshakes))")
