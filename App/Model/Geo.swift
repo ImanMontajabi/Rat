@@ -116,22 +116,73 @@ final class GeoService: @unchecked Sendable {
     }
 }
 
-/// Reverse-DNS cache used to name remote hosts.
-actor HostNames {
-    private var cache: [String: String] = [:]
+/// Reverse-DNS names for remote hosts. A pass never waits for DNS: `lookup` answers at once with the name if it is
+/// known, or the address itself while a background lookup runs (at most four at a time, so a slow or dead DNS
+/// server ties up four threads and nothing else). Addresses that have no name on the network (loopback,
+/// unspecified, link-local) are never looked up.
+final class HostNames: @unchecked Sendable {
+    /// How long a connection may wait for its name before it is judged by address alone.
+    static let grace: TimeInterval = 3
 
-    func name(for ip: String) async -> String {
-        if let c = cache[ip] { return c }
-        let n: String = await Task.detached {
-            var hints = addrinfo(); hints.ai_flags = AI_NUMERICHOST
-            var res: UnsafeMutablePointer<addrinfo>?
-            guard getaddrinfo(ip, nil, &hints, &res) == 0, let ai = res else { return ip }
-            defer { freeaddrinfo(res) }
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            return getnameinfo(ai.pointee.ai_addr, ai.pointee.ai_addrlen, &host, socklen_t(host.count), nil, 0, NI_NAMEREQD) == 0 ? String(cString: host) : ip
-        }.value
-        cache[ip] = n
-        return n
+    private let lock = NSLock()
+    private var cache: [String: String] = [:]
+    private var pending: [String: Date] = [:]
+    private let queue: OperationQueue = {
+        let q = OperationQueue()
+        q.name = "com.imanmontajabi.Rat.hostnames"
+        q.maxConcurrentOperationCount = 4
+        q.qualityOfService = .utility
+        return q
+    }()
+    private let resolve: @Sendable (String) -> String?
+
+    init(resolve: @escaping @Sendable (String) -> String? = HostNames.reverseLookup) { self.resolve = resolve }
+
+    /// The name to show (the address until a name is known) and whether it is settled: known, never to be looked
+    /// up, or waited for longer than `grace`.
+    func lookup(_ ip: String, now: Date = Date()) -> (name: String, settled: Bool) {
+        guard Self.hasNetworkName(ip) else { return (ip, true) }
+        return lock.withLock {
+            if let c = cache[ip] { return (c, true) }
+            if let started = pending[ip] { return (ip, now.timeIntervalSince(started) >= Self.grace) }
+            pending[ip] = now
+            queue.addOperation { [resolve] in
+                let name = resolve(ip) ?? ip
+                self.lock.withLock { self.cache[ip] = name; self.pending[ip] = nil }
+            }
+            return (ip, false)
+        }
+    }
+
+    func name(for ip: String) -> String { lookup(ip).name }
+
+    /// Whether DNS can name the address: not loopback (127.0.0.0/8, ::1), unspecified (0.0.0.0, ::) or link-local
+    /// (169.254.0.0/16, fe80::/10), nor anything that is not an address.
+    static func hasNetworkName(_ ip: String) -> Bool {
+        let literal = ip.split(separator: "%", maxSplits: 1).first.map(String.init) ?? ip   // fe80::1%en0
+        var v4 = in_addr(), v6 = in6_addr()
+        if inet_pton(AF_INET, literal, &v4) == 1 {
+            let b = withUnsafeBytes(of: v4.s_addr) { Array($0) }
+            return !(b[0] == 127 || b.allSatisfy { $0 == 0 } || (b[0] == 169 && b[1] == 254))
+        }
+        guard inet_pton(AF_INET6, literal, &v6) == 1 else { return false }
+        let b = withUnsafeBytes(of: v6) { Array($0) }
+        if b.allSatisfy({ $0 == 0 }) { return false }                                    // ::
+        if b[..<15].allSatisfy({ $0 == 0 }) && b[15] == 1 { return false }               // ::1
+        if b[0] == 0xfe && b[1] & 0xc0 == 0x80 { return false }                          // fe80::/10
+        if b[..<10].allSatisfy({ $0 == 0 }) && b[10] == 0xff && b[11] == 0xff {          // ::ffff:a.b.c.d
+            return hasNetworkName("\(b[12]).\(b[13]).\(b[14]).\(b[15])")
+        }
+        return true
+    }
+
+    static func reverseLookup(_ ip: String) -> String? {
+        var hints = addrinfo(); hints.ai_flags = AI_NUMERICHOST
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(ip, nil, &hints, &res) == 0, let ai = res else { return nil }
+        defer { freeaddrinfo(res) }
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        return getnameinfo(ai.pointee.ai_addr, ai.pointee.ai_addrlen, &host, socklen_t(host.count), nil, 0, NI_NAMEREQD) == 0 ? String(cString: host) : nil
     }
 }
 

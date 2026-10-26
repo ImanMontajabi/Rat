@@ -10,6 +10,9 @@ final class RatUITests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchEnvironment["RAT_DEMO_MAP"] = "1"
+        // Start from a fresh window: a window minimized in an earlier run would come back minimized, and every
+        // click and keystroke would miss it.
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         app.launch()
         XCTAssertTrue(el("app-row-Google Chrome").waitForExistence(timeout: 20), "the monitor window shows the demo apps")
     }
@@ -46,12 +49,18 @@ final class RatUITests: XCTestCase {
 
     private func isActive(_ profile: String) -> Bool { el("profile-\(profile)").descendants(matching: .any)["profile-active"].exists }
 
+    /// Types into the search field. Right after a menu closes the click may not focus the field, so it retries
+    /// until the field holds the text.
     private func search(_ text: String) {
         let f = el("search-field")
-        f.click()
-        f.typeKey("a", modifierFlags: .command)
-        f.typeKey(.delete, modifierFlags: [])
-        if !text.isEmpty { f.typeText(text) }
+        for _ in 0..<3 {
+            f.click()
+            f.typeKey("a", modifierFlags: .command)
+            f.typeKey(.delete, modifierFlags: [])
+            if !text.isEmpty { f.typeText(text) }
+            if (f.value as? String ?? "") == text { return }
+        }
+        XCTFail("could not type \(text) into the search field: \(f.value ?? "nil")")
     }
 
     // MARK: process tree
@@ -155,6 +164,29 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(waitValue(map, "London"), "a city: only the lines to it: \(map.value ?? "nil")")
         search("")
         XCTAssertTrue((map.value as? String ?? "").contains("Madrid"))
+    }
+
+    /// The Summary counts what the list shows, and says so while a filter is on.
+    func testSummaryFollowsTheFilter() {
+        let counts = el("summary-counts")
+        XCTAssertTrue(counts.waitForExistence(timeout: 5))
+        XCTAssertFalse(el("summary-filtered").exists, "no filter, no indicator")
+        func text() -> String { [counts.label, counts.value as? String ?? ""].filter { !$0.isEmpty }.joined(separator: " ") }
+        let all = text()
+        el("route-filter").click()
+        app.menuItems["Through a Proxy"].click()
+        XCTAssertTrue(el("summary-filtered").waitForExistence(timeout: 5))
+        let firefox = NSPredicate(format: "label == %@ OR value == %@", "1 process, 2 domains", "1 process, 2 domains")
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: firefox, evaluatedWith: counts)], timeout: 5) == .completed, "Firefox alone: \(text())")
+        XCTAssertTrue(app.staticTexts["Firefox"].exists, "Top Processes is the listed app")
+        el("route-filter").click()
+        app.menuItems["All Connections"].click()
+        XCTAssertTrue(waitGone(el("summary-filtered")))
+        search("London")
+        XCTAssertTrue(el("summary-filtered").waitForExistence(timeout: 5), "the search filters it too: \(text())")
+        search("")
+        XCTAssertTrue(waitGone(el("summary-filtered")))
+        XCTAssertEqual(text(), all)
     }
 
     func testSearchByName() {
