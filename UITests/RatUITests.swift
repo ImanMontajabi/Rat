@@ -136,6 +136,27 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(el("app-row-Steam").waitForExistence(timeout: 5))
     }
 
+    /// The map draws only what the list shows: the route chip and the search narrow its places too.
+    func testMapFollowsTheRouteChipAndSearch() {
+        let map = el("map-places")
+        XCTAssertTrue(map.waitForExistence(timeout: 5))
+        XCTAssertTrue((map.value as? String ?? "").contains("London"), "\(map.value ?? "nil")")
+        el("route-filter").click()
+        app.menuItems["Through a VPN"].click()
+        XCTAssertTrue(waitValue(map, "Paris"), "only the tunnelled connection: \(map.value ?? "nil")")
+        el("route-filter").click()
+        app.menuItems["Through a Proxy"].click()
+        XCTAssertTrue(waitValue(map, "Madrid, Proxy · Stockholm"), "the unmasked destination and its proxy: \(map.value ?? "nil")")
+        el("route-filter").click()
+        app.menuItems["All Connections"].click()
+        search("vpn")
+        XCTAssertTrue(waitValue(map, "Paris"), "the search word works like the chip: \(map.value ?? "nil")")
+        search("London")
+        XCTAssertTrue(waitValue(map, "London"), "a city: only the lines to it: \(map.value ?? "nil")")
+        search("")
+        XCTAssertTrue((map.value as? String ?? "").contains("Madrid"))
+    }
+
     func testSearchByName() {
         search("telegram")
         XCTAssertTrue(waitGone(el("app-row-Steam")))

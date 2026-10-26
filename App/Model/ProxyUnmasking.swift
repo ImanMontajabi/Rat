@@ -12,6 +12,8 @@ struct ProxyHop: Hashable {
     var serverGeo: GeoPoint?
 
     var label: String { "via \(process) proxy (\(listener)\(server.map { " → " + $0 } ?? ""))" }
+    /// The tag next to the unmasked destination: "Proxy · ssh".
+    var badge: String { "Proxy · \(process)" }
 }
 
 /// A destination unmasked from a client's loopback connection to a local proxy.
@@ -45,11 +47,17 @@ enum ProxyUnmasking {
             byPID[c.pid, default: []].append(c)
             if c.tcpState == "LISTEN", c.localPort != 0, listeners[c.localPort] == nil { listeners[c.localPort] = c }
         }
-        /// The proxy's one connection off the Mac, if it has exactly one server.
-        func server(of pid: Int32?) -> String? {
+        /// The proxy's one connection off the Mac, if it has exactly one server. A plain forwarding proxy's one
+        /// connection is the destination itself, not a server it tunnels through: same address, or the
+        /// destination's port from a program that is not a known tunnel (ssh, Tor, Clash reach their server on
+        /// a port of their own).
+        func server(of pid: Int32?, path: String?, destination: String, port: Int) -> String? {
             guard let pid else { return nil }
-            let off = Set((byPID[pid] ?? []).filter { $0.proto == .tcp && $0.isOutbound && !ProxyWatch.isLoopback($0.remoteAddress) }.map(\.remoteAddress))
-            return off.count == 1 ? off.first : nil
+            let off = (byPID[pid] ?? []).filter { $0.proto == .tcp && $0.isOutbound && !ProxyWatch.isLoopback($0.remoteAddress) }
+            guard Set(off.map(\.remoteAddress)).count == 1, let c = off.first else { return nil }
+            if c.remoteAddress == destination.lowercased() { return nil }
+            if Set(off.map(\.remotePort)) == [port], path.flatMap(NetworkRoutes.localProxyProgram(inPath:)) == nil { return nil }
+            return c.remoteAddress
         }
         func name(_ path: String?) -> String { path.map { ($0 as NSString).lastPathComponent } ?? "local" }
 
@@ -58,7 +66,7 @@ enum ProxyUnmasking {
         for f in flows where f.closed.map({ now.timeIntervalSince($0) < linger }) ?? true {
             proxyPorts.insert(f.proxyPort)
             let hop = ProxyHop(kind: f.kind.rawValue, process: name(f.proxyPath), listener: f.ipv6 ? "[::1]:\(f.proxyPort)" : "127.0.0.1:\(f.proxyPort)",
-                               server: server(of: f.proxyPID))
+                               server: server(of: f.proxyPID, path: f.proxyPath, destination: f.host, port: f.port))
             remotes.append(ProxiedRemote(pid: f.clientPID, path: f.clientPath, clientPort: f.clientPort, proxyPort: f.proxyPort, host: f.host, port: f.port, hop: hop,
                                          live: f.closed == nil))
             masked.insert(maskKey(pid: f.clientPID, localPort: f.clientPort, remotePort: f.proxyPort))
@@ -74,8 +82,10 @@ enum ProxyUnmasking {
             if argsCache[c.pid] == nil { argsCache[c.pid] = .some(arguments(c.pid)) }
             guard let args = argsCache[c.pid] ?? nil, !args.targets.isEmpty,
                   proxyPorts.contains(c.remotePort) || args.usesLocalProxy(port: c.remotePort) else { continue }
-            let hop = ProxyHop(kind: "command line", process: name(listener?.processPath), listener: "127.0.0.1:\(c.remotePort)", server: server(of: listener?.pid))
+            let address = c.remoteAddress.contains(":") ? "[\(c.remoteAddress)]:\(c.remotePort)" : "\(c.remoteAddress):\(c.remotePort)"
             for t in args.targets {
+                let hop = ProxyHop(kind: "command line", process: name(listener?.processPath), listener: address,
+                                   server: server(of: listener?.pid, path: listener?.processPath, destination: t.host, port: t.port))
                 remotes.append(ProxiedRemote(pid: c.pid, path: c.processPath, clientPort: c.localPort, proxyPort: c.remotePort, host: t.host, port: t.port, hop: hop))
             }
             masked.insert(key)

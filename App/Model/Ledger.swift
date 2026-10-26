@@ -439,6 +439,8 @@ final class Ledger: ObservableObject {
                 let process = (r.path as NSString).lastPathComponent
                 if seen.insert("proxy|\(r.host):\(r.port)|\(r.hop.listener)|\(process)").inserted {
                     var hop = r.hop
+                    // A forwarding proxy's one outside connection is the destination itself.
+                    if hop.server != nil, hop.server == address { hop.server = nil }
                     hop.serverGeo = hop.server.flatMap { isLocalAddress($0) ? nil : geo.lookup($0) }
                     let point = address.flatMap { isLocalAddress($0) ? nil : geo.lookup($0) }
                     let bytes = bytesByFlow[FlowCounter.key(pid: r.pid, proto: .tcp, localPort: r.clientPort, remotePort: r.proxyPort)]
