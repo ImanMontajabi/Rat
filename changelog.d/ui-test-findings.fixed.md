@@ -1,0 +1,1 @@
+Fixed three bugs the UI tests found: Allow/Deny and the Rules window took up to a sampling pass (1.5 s) to show a change, the active profile's checkmark in the Rules sidebar did not move when another profile was activated, and the Advanced tab of Settings was hidden in the toolbar's overflow menu.

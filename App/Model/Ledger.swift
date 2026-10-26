@@ -4,6 +4,7 @@ import RatMonitor
 import RatFilterCore
 import RatEnforce
 import os
+import Combine
 
 private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "ledger")
 
@@ -202,6 +203,7 @@ final class Ledger: ObservableObject {
     private let proxyResolver = ProxyResolver()
     let routes = RouteMarker()
     private var signingCache: [String: (identifier: String?, team: String?)] = [:]
+    private var rulesChanged: AnyCancellable?
     private var running = false
     private var demo = false
     private var lastSave = Date()
@@ -231,6 +233,9 @@ final class Ledger: ObservableObject {
         for b in saved.buckets { buckets[b.minute] = b }
         apps = Array(table.values)
         alerts.iconProvider = { [weak self] id in self?.table[id]?.identity.icon ?? NSImage() }
+        // Views observe the ledger and read rules through it (the policy toggles, the Rules window): a rule change
+        // redraws them at once, not on the next sampling pass (which demo mode never has).
+        rulesChanged = rules.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         #if DEBUG
         if demo { installDemoData() }
         #endif

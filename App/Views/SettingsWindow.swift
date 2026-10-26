@@ -22,7 +22,8 @@ struct SettingsView: View {
         #if DEBUG
         .onAppear { if let t = ProcessInfo.processInfo.environment["RAT_SETTINGS_TAB"] { tab = t } }
         #endif
-        .frame(width: 640)
+        // Wide enough for all ten tabs: at 640 points the GeoIP tab pushed Advanced into the toolbar's overflow menu.
+        .frame(width: 720)
         .preferredColorScheme(.dark)
     }
 }

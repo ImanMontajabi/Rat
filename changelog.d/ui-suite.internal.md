@@ -1,0 +1,1 @@
+A UI test suite (`RatUITests`, run with `scripts/test-ui.sh`) clicks through the process tree, VPN and proxy tags, search and route filters, Allow/Deny, the Rules window, profiles and every Settings tab on demo data, under its own bundle identifier so the running Rat is never touched.
