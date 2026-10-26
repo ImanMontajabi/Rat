@@ -42,4 +42,13 @@ final class NetworkRoutesTests: XCTestCase {
         _ = NetworkRoutes.systemProxies()
         XCTAssertTrue(NetworkRoutes.tunnelAddresses().values.allSatisfy(NetworkRoutes.isTunnel))
     }
+
+    func testLocalProxyPrograms() {
+        XCTAssertEqual(NetworkRoutes.localProxyProgram(inPath: "/usr/bin/ssh"), "ssh")
+        XCTAssertEqual(NetworkRoutes.localProxyProgram(inPath: "/opt/homebrew/bin/tor"), "Tor")
+        XCTAssertEqual(NetworkRoutes.localProxyProgram(inPath: "/opt/homebrew/bin/mitmdump"), "mitmproxy")
+        XCTAssertEqual(NetworkRoutes.localProxyProgram(inPath: "/Applications/ClashX.app/Contents/MacOS/ClashX"), "ClashX")
+        XCTAssertNil(NetworkRoutes.localProxyProgram(inPath: "/usr/local/bin/node"), "a dev server is no proxy")
+        XCTAssertNil(NetworkRoutes.localProxyProgram(inPath: "/usr/bin/sshd-keygen-wrapper"))
+    }
 }

@@ -216,9 +216,10 @@ struct RemoteSummary: View {
                 Text("\(r.proto) \(r.address):\(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).font(.caption).foregroundStyle(.secondary).help(Self.serviceHelp)
             }
             if let route = r.route {
-                Label(route, systemImage: route.hasPrefix("via VPN") ? "lock.shield" : "arrow.triangle.branch")
-                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                    .help(route.hasPrefix("via VPN") ? "This connection leaves through the VPN tunnel." : "This app talks to the system proxy, not to the server itself: the address and location shown are the proxy's, and a rule for a domain cannot match.")
+                HStack(spacing: 4) {
+                    RouteBadges(remote: RemoteHost(address: r.address, host: r.host, port: r.port, proto: r.proto, route: route))
+                    Text(route.label).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
             }
             if let n = r.network {
                 Text(n).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -253,6 +254,7 @@ struct RemoteInspector: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("inspector-title")
+            RouteBadges(remote: r)
             HStack(spacing: 8) { Pill(kind: .up, text: formatBytes(r.bytesOut)); Pill(kind: .down, text: formatBytes(r.bytesIn)) }
             Text("Bytes of the connections open now.").font(.caption).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
@@ -261,7 +263,7 @@ struct RemoteInspector: View {
                 if let p = r.process { kv("Process", p + (r.pid.map { " (pid \($0))" } ?? "")) }
                 if let n = r.network { kv("Network", n) }
                 if let g = r.geo { kv("Location", "\(g.city), \(g.country)") }
-                if let route = r.route { kv("Route", route) }
+                if let route = r.route { kv("Route", route.label) }
                 if let via = r.via {
                     kv("Proxy", via.label)
                     if let g = via.serverGeo { kv("Proxy at", "\(g.city), \(g.country)") }

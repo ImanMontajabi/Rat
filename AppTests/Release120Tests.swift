@@ -203,7 +203,7 @@ final class Release120Tests: XCTestCase {
                              c("192.168.178.39", "198.51.100.7", 3128, 60102),
                              c("127.0.0.1", "127.0.0.1", 7890, 60103)], [])
         let foo = try XCTUnwrap(ledger.apps.first { $0.id == "/Applications/Demo/Foo.app" })
-        func route(_ a: String) -> String? { foo.remotes.first { $0.address == a }?.route }
+        func route(_ a: String) -> String? { foo.remotes.first { $0.address == a }?.route?.label }
         XCTAssertEqual(route("203.0.113.30"), "via VPN (Windscribe)")
         XCTAssertNil(route("203.0.113.31"), "a split tunnel is told apart per socket")
         XCTAssertEqual(route("198.51.100.7"), "via System HTTPS Proxy (proxy.corp.example:3128)")

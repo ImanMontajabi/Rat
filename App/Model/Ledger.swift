@@ -43,8 +43,8 @@ struct RemoteHost: Identifiable, Hashable {
     var process: String? = nil
     /// Who runs the server's network (`AS13335 Cloudflare, Inc.`), from the offline ASN database.
     var network: String? = nil
-    /// "via VPN (Windscribe)" or "via System HTTPS Proxy (…)" when the connection takes that path.
-    var route: String? = nil
+    /// VPN tunnel, system proxy or local proxy the connection goes through, when it does.
+    var route: RouteTag? = nil
     /// Bytes of the connection's open sockets so far (nettop's per-connection counters; a closed socket drops out).
     var bytesIn: UInt64 = 0
     var bytesOut: UInt64 = 0
@@ -110,7 +110,15 @@ struct AppEntry: Identifiable {
         }
         return (direct, nodes.sorted { ($0.remotes.count, $1.name) > ($1.remotes.count, $0.name) })
     }
+}
 
+extension RemoteHost {
+    var isVPN: Bool { route?.isVPN ?? false }
+    /// Through a local or system proxy: unmasked behind one (`via`), or tagged as talking to one.
+    var isProxied: Bool { via != nil || (route?.isProxy ?? false) }
+}
+
+extension AppEntry {
     /// The connections a selection covers: the whole app, one process, or one connection.
     @MainActor func remotes(for selection: MonitorSelection?) -> [RemoteHost] {
         guard let selection, selection.appID == id else { return remotes }
@@ -309,6 +317,9 @@ final class Ledger: ObservableObject {
             noteProcess(c.pid, path: c.processPath, in: ident)
         }
         let alive = Set(conns.map(\.pid)).union(traffic.map(\.pid))
+        // Loopback listeners by port, to tag connections to a local proxy (ssh -D, Tor) that the helper did not unmask.
+        var listeners: [Int: (pid: Int32, path: String)] = [:]
+        for c in conns where c.proto == .tcp && c.tcpState == "LISTEN" && c.localPort != 0 && listeners[c.localPort] == nil { listeners[c.localPort] = (c.pid, c.processPath) }
         let bytesByFlow = Dictionary(flows.map { ($0.key, ($0.bytesIn, $0.bytesOut)) }, uniquingKeysWith: { a, b in (a.0 + b.0, a.1 + b.1) })
 
         routes.refresh(now: now, helperTunnels: enforcer.status?.tunnels)
@@ -374,7 +385,7 @@ final class Ledger: ObservableObject {
             let sig = e.remotes.isEmpty && perApp[id] == nil && proxiedByApp[id] == nil ? (nil as String?, nil as String?) : signing(for: e.identity)
             /// The verdict for one remote, counted and (for `.ask`) reported as an alert.
             /// `host` is the name shown (the address itself when there is none); a name that is an IP literal is no name.
-            func judge(host: String, address: String, port: Int, proto: Connection.Proto, route: String? = nil) -> Verdict {
+            func judge(host: String, address: String, port: Int, proto: Connection.Proto, route: RouteTag? = nil) -> Verdict {
                 let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), host: host == address || isIPLiteral(host) ? nil : host,
                                       address: address, port: port, proto: proto)
                 let matched = rules.engine.matchingRule(conn)
@@ -387,7 +398,7 @@ final class Ledger: ObservableObject {
                     askCount += 1
                     if warmedUp {
                         alerts.report(ConnectionAlert(appID: e.identity.ruleKey, appName: e.identity.name, host: host, address: address, port: port, proto: proto.rawValue.uppercased(),
-                                                      network: address.isEmpty || isLocalAddress(address) ? nil : geo.network(address)?.label, route: route))
+                                                      network: address.isEmpty || isLocalAddress(address) ? nil : geo.network(address)?.label, route: route?.label))
                     }
                 case .allow: break
                 }
@@ -407,7 +418,8 @@ final class Ledger: ObservableObject {
                 remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint,
                                           pid: c.pid, process: c.processName,
                                           network: isLocalAddress(c.remoteAddress) ? nil : geo.network(c.remoteAddress)?.label,
-                                          route: routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort),
+                                          route: routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort)
+                                            ?? RouteMarker.localProxy(remoteAddress: c.remoteAddress, remotePort: c.remotePort, pid: c.pid, listener: listeners[c.remotePort]),
                                           bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0))
                 indexByKey[key] = remotes.count - 1
 
@@ -620,8 +632,26 @@ final class Ledger: ObservableObject {
                                         pid: c.2, process: c.1, network: "AS64500 Example Networks",
                                         bytesIn: UInt64(250_000 * (i + 1)), bytesOut: UInt64(25_000 * (i + 1))))
             if c.0 == "git-remote-https" { e.launchedBy = "Warp (pid 700)" }
+            if c.3 == "demo3.example.com" { e.remotes[e.remotes.count - 1].route = .vpn(name: "Windscribe", interface: "utun3") }
             table[ident.id] = e
         }
+        // Firefox through local proxies: one destination unmasked behind `ssh -D 1080`, one connection to Tor that
+        // was not unmasked.
+        let firefox = AppIdentity.resolve(processPath: "/Applications/Demo/Firefox.app/Contents/MacOS/Firefox")
+        var fx = AppEntry(identity: firefox)
+        fx.lastActive = Date(); fx.totalIn = 3_000_000; fx.totalOut = 300_000; fx.pids = [880]
+        fx.rates = (0..<14).map { k in (rx: Double(k % 6), tx: Double(k % 3)) }
+        fx.processes["Firefox"] = ProcessStats(name: "Firefox", path: "/Applications/Demo/Firefox.app/Contents/MacOS/Firefox", pids: [880], totalIn: 3_000_000, totalOut: 300_000)
+        let stockholm = GeoPoint(coordinate: .init(latitude: 59.33, longitude: 18.07), city: "Stockholm", country: "Sweden")
+        fx.remotes = [
+            RemoteHost(address: "198.51.100.30", host: "news.example.org", port: 443, proto: "TCP",
+                       geo: GeoPoint(coordinate: .init(latitude: 40.42, longitude: -3.70), city: "Madrid", country: "Spain"),
+                       via: ProxyHop(kind: "SOCKS5", process: "ssh", listener: "127.0.0.1:1080", server: "192.0.2.10", serverGeo: stockholm),
+                       pid: 880, process: "Firefox", network: "AS64500 Example Networks", bytesIn: 900_000, bytesOut: 60_000),
+            RemoteHost(address: "127.0.0.1", host: "127.0.0.1", port: 9050, proto: "TCP", pid: 880, process: "Firefox",
+                       route: .localProxy(program: "Tor", listener: "127.0.0.1:9050"), bytesIn: 120_000, bytesOut: 9_000),
+        ]
+        table[firefox.id] = fx
         let chrome = "/Applications/Demo/Google Chrome.app", telegram = "/Applications/Demo/Telegram.app", steam = "/Applications/Demo/Steam.app"
         var pending = Rule(verdict: .deny, processPath: telegram, remoteDomain: "tracker.example", createdAt: Date(timeIntervalSinceNow: -60), note: "From a connection alert")
         pending.approved = false

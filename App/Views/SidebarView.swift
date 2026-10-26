@@ -15,6 +15,7 @@ struct SidebarView: View {
     @State private var search = ""
     @State private var onlyIncoming = false
     @State private var onlyDenied = false
+    @State private var routeFilter: RouteFilter = .all
     @State private var range: TimeRange = .fiveMinutes
     @State private var expandedGroups = Set<String>()
 
@@ -22,7 +23,11 @@ struct SidebarView: View {
 
     private var cutoff: Date { Date().addingTimeInterval(-range.seconds) }
 
+    /// The search text without its filter words, and the route filter they ask for ("vpn", "proxy").
+    private var query: (text: String, route: RouteFilter) { RouteFilter.parse(search, chip: routeFilter) }
+
     private var filtered: [AppEntry] {
+        let (search, route) = query
         var list = ledger.apps.filter { $0.lastActive >= cutoff && ($0.totalIn + $0.totalOut > 0 || !$0.remotes.isEmpty || $0.listening > 0) }
         if !settings.includeLocalNetwork {
             list = list.filter { $0.remotes.isEmpty || $0.remotes.contains { !isLocalAddress($0.address) } || $0.totalIn + $0.totalOut > 0 }
@@ -31,6 +36,7 @@ struct SidebarView: View {
         if !settings.includeOtherUsers { list = list.filter { !$0.otherUsers } }
         if onlyIncoming { list = list.filter { $0.listening > 0 } }
         if onlyDenied { list = list.filter { ledger.rules.policy(for: $0.identity.ruleKey) == .deny } }
+        if route != .all { list = list.filter { $0.remotes.contains(where: route.matches) } }
         if !search.isEmpty {
             list = list.filter { a in
                 a.identity.name.localizedCaseInsensitiveContains(search) ||
@@ -75,7 +81,7 @@ struct SidebarView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if settings.groupBy == .process {
-                        ForEach(rows) { app in ProcessRow(app: app, selection: $selection) }
+                        ForEach(rows) { app in ProcessRow(app: app, selection: $selection, filter: query.route) }
                     } else {
                         ForEach(groups) { g in groupRow(g) }
                     }
@@ -99,7 +105,7 @@ struct SidebarView: View {
             .padding(.vertical, 8).padding(.horizontal, 6).contentShape(Rectangle())
             .onTapGesture { if !expandedGroups.insert(g.id).inserted { expandedGroups.remove(g.id) } }
             if expandedGroups.contains(g.id) {
-                ForEach(g.apps) { app in ProcessRow(app: app, selection: $selection).padding(.leading, 18) }
+                ForEach(g.apps) { app in ProcessRow(app: app, selection: $selection, filter: query.route).padding(.leading, 18) }
             }
         }
     }
@@ -141,6 +147,14 @@ struct SidebarView: View {
             chip("arrow.down.left.circle", on: $onlyIncoming, help: "Only apps accepting incoming connections")
             chip("xmark.rectangle", on: $onlyDenied, help: "Only denied apps")
             Menu {
+                Picker("Route", selection: $routeFilter) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
+            } label: {
+                Image(systemName: routeFilter.symbol).foregroundStyle(routeFilter == .all ? Color.secondary : .accentColor)
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("Only connections through a VPN or a proxy (or type vpn / proxy in the search field)")
+            .accessibilityIdentifier("route-filter")
+            Menu {
                 ForEach(TimeRange.allCases) { r in Button(r.title) { range = r } }
             } label: { Label(range.rawValue, systemImage: "clock").font(.callout) }
             .menuStyle(.borderlessButton).fixedSize()
@@ -177,12 +191,43 @@ struct SidebarView: View {
                 }
             }
             HStack {
-                Text(settings.groupBy == .process ? "\(rows.count) apps" : "\(groups.count) groups").font(.caption).foregroundStyle(.secondary)
+                Text(settings.groupBy == .process ? "\(rows.count) app\(rows.count == 1 ? "" : "s")" : "\(groups.count) group\(groups.count == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Text("Last \(range.title)").font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(10)
+    }
+}
+
+/// Which connections the list shows: all, or only those through a VPN or a proxy.
+enum RouteFilter: String, CaseIterable, Identifiable {
+    case all, vpn, proxy, either
+    var id: String { rawValue }
+    var title: String { ["all": "All Connections", "vpn": "Through a VPN", "proxy": "Through a Proxy", "either": "Through a VPN or Proxy"][rawValue]! }
+    var symbol: String { ["all": "point.3.connected.trianglepath.dotted", "vpn": "lock.shield", "proxy": "arrow.triangle.branch", "either": "shield.lefthalf.filled"][rawValue]! }
+    /// Splits the filter words off a search ("vpn", "proxy", or "is:vpn", "is:proxy"); both words mean either.
+    /// Without one, the chip's choice applies.
+    static func parse(_ search: String, chip: RouteFilter) -> (text: String, route: RouteFilter) {
+        var vpn = false, proxy = false, words: [Substring] = []
+        for w in search.split(separator: " ") {
+            switch w.lowercased() {
+            case "vpn", "is:vpn": vpn = true
+            case "proxy", "is:proxy": proxy = true
+            default: words.append(w)
+            }
+        }
+        let route: RouteFilter = vpn && proxy ? .either : vpn ? .vpn : proxy ? .proxy : chip
+        return (words.joined(separator: " "), route)
+    }
+
+    func matches(_ r: RemoteHost) -> Bool {
+        switch self {
+        case .all: return true
+        case .vpn: return r.isVPN
+        case .proxy: return r.isProxied
+        case .either: return r.isVPN || r.isProxied
+        }
     }
 }
 
@@ -193,13 +238,15 @@ struct ProcessRow: View {
     @EnvironmentObject var ledger: Ledger
     let app: AppEntry
     @Binding var selection: MonitorSelection?
+    /// Shows only the connections through a VPN or a proxy.
+    var filter: RouteFilter = .all
     @State private var open = false
     @State private var openProcesses = Set<String>()
 
     private var selectedHere: Bool { selection?.appID == app.id }
 
     var body: some View {
-        let tree: (direct: [RemoteHost], processes: [ProcessNode]) = open ? app.tree : ([], [])
+        let tree: (direct: [RemoteHost], processes: [ProcessNode]) = open ? filtered(app.tree) : ([], [])
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Disclosure(open: open, label: app.identity.name) { withAnimation(.easeInOut(duration: 0.15)) { open.toggle() } }
@@ -240,6 +287,12 @@ struct ProcessRow: View {
 
     private func select(_ s: MonitorSelection) { selection = selection == s ? nil : s }
 
+    private func filtered(_ t: (direct: [RemoteHost], processes: [ProcessNode])) -> (direct: [RemoteHost], processes: [ProcessNode]) {
+        guard filter != .all else { return t }
+        let nodes = t.processes.map { n -> ProcessNode in var n = n; n.remotes = n.remotes.filter(filter.matches); return n }
+        return (t.direct.filter(filter.matches), nodes.filter { !$0.remotes.isEmpty })
+    }
+
     @ViewBuilder private func processRow(_ node: ProcessNode) -> some View {
         let isOpen = openProcesses.contains(node.name)
         let s = MonitorSelection(appID: app.id, process: node.name)
@@ -270,9 +323,7 @@ struct ProcessRow: View {
         let s = MonitorSelection(appID: app.id, process: process, remote: r.id)
         return HStack(spacing: 6) {
             Text(r.host).lineLimit(1).truncationMode(.middle)
-            if let via = r.via {
-                Text("via \(via.process)").foregroundStyle(.orange).lineLimit(1).help(via.label)
-            }
+            RouteBadges(remote: r, compact: true)
             Spacer(minLength: 4)
             Text("\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
             if r.bytesIn + r.bytesOut > 0 {
