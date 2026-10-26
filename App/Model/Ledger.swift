@@ -132,13 +132,10 @@ final class Ledger: ObservableObject {
     private var startedAt = Date()
 
     init(directory: URL? = nil, helperInstalled: Bool? = nil) {
-        #if DEBUG
-        // Demo mode never reads or writes the real data folder.
-        let demoDir = ProcessInfo.processInfo.environment["RAT_DEMO_MAP"] != nil ? FileManager.default.temporaryDirectory.appendingPathComponent("rat-demo-\(UUID())") : nil
-        store = StateStore.standard(base: directory ?? demoDir)
-        #else
-        store = StateStore.standard(base: directory)
-        #endif
+        // Demo mode never reads or writes the real data folder, and sees no helper: its files are not the daemon's.
+        let demo = directory == nil && Preferences.isDemo
+        store = StateStore.standard(base: demo ? FileManager.default.temporaryDirectory.appendingPathComponent("rat-demo-\(UUID())") : directory)
+        let helperInstalled = demo ? false : helperInstalled
         rules = RulesModel(directory: store.directory)
         geoDatabases = GeoDatabases(directory: store.directory, geo: geo)
         enforcer = Enforcer(supportDirectory: store.directory, helperInstalled: helperInstalled,
@@ -158,7 +155,7 @@ final class Ledger: ObservableObject {
         apps = Array(table.values)
         alerts.iconProvider = { [weak self] id in self?.table[id]?.identity.icon ?? NSImage() }
         #if DEBUG
-        if ProcessInfo.processInfo.environment["RAT_DEMO_MAP"] != nil { installDemoData() }
+        if demo { installDemoData() }
         #endif
     }
 
