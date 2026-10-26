@@ -109,7 +109,14 @@ final class RatUITests: XCTestCase {
     // MARK: VPN and proxy tags
 
     func testVPNAndProxyTagsRender() {
+        // Collapsed, the app's row already shows where its connections go.
+        XCTAssertTrue(el("app-row-Telegram").descendants(matching: .any)["badge-VPN · Windscribe"].waitForExistence(timeout: 5), "the app row")
+        XCTAssertTrue(el("app-row-Firefox").descendants(matching: .any)["badge-Proxy · Tor"].exists, "the first tag; more fold into a count when the row is narrow")
+        XCTAssertFalse(el("app-row-Steam").descendants(matching: .any)["badge-VPN · Windscribe"].exists, "no tag without such connections")
         expand("Telegram")
+        XCTAssertTrue(el("process-row-Telegram Helper").waitForExistence(timeout: 5))
+        XCTAssertTrue(el("process-row-Telegram Helper").descendants(matching: .any)["badge-VPN · Windscribe"].exists, "the process row")
+        expand("Telegram Helper")
         let vpn = el("remote-row-demo3.example.com")
         XCTAssertTrue(vpn.waitForExistence(timeout: 5))
         XCTAssertTrue(vpn.label.contains("VPN · Windscribe"), vpn.label)

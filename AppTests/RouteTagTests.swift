@@ -37,7 +37,9 @@ final class RouteTagTests: XCTestCase {
         await ledger.ingest([
             ObservedConnection(pid: 50, processPath: "/usr/bin/ssh", proto: .tcp, remoteAddress: "", remotePort: 0, localPort: 1080, tcpState: "LISTEN"),
             ObservedConnection(pid: 60, processPath: client, proto: .tcp, remoteAddress: "127.0.0.1", remotePort: 1080, localPort: 51000, tcpState: "ESTABLISHED"),
-            ObservedConnection(pid: 60, processPath: client, proto: .tcp, remoteAddress: "203.0.113.9", remotePort: 443, localPort: 51001, tcpState: "ESTABLISHED"),
+            // Bound to a Wi-Fi address: not through a VPN, whether or not one is on while the test runs.
+            ObservedConnection(pid: 60, processPath: client, proto: .tcp, remoteAddress: "203.0.113.9", remotePort: 443, localPort: 51001, tcpState: "ESTABLISHED",
+                               localAddress: "192.168.1.5"),
         ], [])
         let foo = try XCTUnwrap(ledger.apps.first { $0.id == "/Applications/Demo/Foo.app" })
         let loop = try XCTUnwrap(foo.remotes.first { $0.address == "127.0.0.1" })

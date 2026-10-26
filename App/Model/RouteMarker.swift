@@ -10,9 +10,16 @@ enum RouteTag: Hashable {
     case systemProxy(kind: String, host: String, port: Int)
     /// A loopback connection to a local proxy program whose destination was not seen (`ssh -D`, Tor, Clash).
     case localProxy(program: String, listener: String)
+    /// The VPN client's own connection to its server: the tunnel's carrier, outside the tunnel.
+    case vpnServer(name: String)
 
     var isVPN: Bool { if case .vpn = self { return true }; return false }
-    var isProxy: Bool { !isVPN }
+    var isProxy: Bool {
+        switch self {
+        case .systemProxy, .localProxy: return true
+        case .vpn, .vpnServer: return false
+        }
+    }
 
     /// Short tag: "VPN · Windscribe · utun3", "Proxy · System HTTPS", "Proxy · ssh".
     var badge: String {
@@ -20,6 +27,7 @@ enum RouteTag: Hashable {
         case let .vpn(name, interface): return name == interface ? "VPN · \(interface)" : "VPN · \(name) · \(interface)"
         case let .systemProxy(kind, _, _): return "Proxy · System \(kind)"
         case let .localProxy(program, _): return "Proxy · \(program)"
+        case let .vpnServer(name): return "VPN server · \(name)"
         }
     }
 
@@ -29,6 +37,7 @@ enum RouteTag: Hashable {
         case let .vpn(name, _): return "via VPN (\(name))"
         case let .systemProxy(kind, host, port): return "via System \(kind) Proxy (\(host):\(port))"
         case let .localProxy(program, listener): return "via \(program) proxy (\(listener))"
+        case let .vpnServer(name): return "\(name)'s connection to its VPN server"
         }
     }
 
@@ -43,6 +52,7 @@ enum RouteTag: Hashable {
         case let .vpn(_, interface): return "This connection leaves through the VPN tunnel (\(interface))."
         case .systemProxy: return "This app talks to the system proxy, not to the server itself: the address and location shown are the proxy's, and a rule for a domain cannot match."
         case .localProxy: return "This app talks to a local proxy on this Mac. Where the proxy sends it was not seen: the firewall helper reads the proxy request when it is installed."
+        case .vpnServer: return "The VPN client's own connection to its server. It carries the tunnel, so it does not go through it."
         }
     }
 }
@@ -55,6 +65,12 @@ final class RouteMarker {
     private(set) var tunnelAddresses: [String: String] = [:]
     private(set) var tunnelNames: [String: String] = [:]
     private(set) var proxies: [NetworkRoutes.ProxyEndpoint] = []
+    /// The tunnel the Internet's routes point at (a full-tunnel VPN), from the routing table.
+    private(set) var internetTunnel: String?
+    /// Executable paths of the VPN clients holding the tunnels → the VPN's name.
+    private(set) var tunnelClients: [String: String] = [:]
+    /// Interface the routing table picks per remote address, for sockets without an address of their own.
+    private var routeCache: [String: String?] = [:]
     private var proxyAddresses: [String: Set<String>] = [:]
     private var pendingLookups = Set<String>()
     private var lastRefresh = Date.distantPast
@@ -65,11 +81,15 @@ final class RouteMarker {
         guard now.timeIntervalSince(lastRefresh) >= Self.interval else { return }
         lastRefresh = now
         tunnelAddresses = NetworkRoutes.tunnelAddresses()
+        routeCache = [:]
         let interfaces = Set(tunnelAddresses.values)
-        if interfaces.isEmpty { tunnelNames = [:] } else {
+        if interfaces.isEmpty { tunnelNames = [:]; tunnelClients = [:]; internetTunnel = nil } else {
             let services = NetworkRoutes.vpnServiceNames()
             let owners = (helperTunnels ?? [:]).merging(NetworkRoutes.tunnelOwners()) { helper, _ in helper }
             tunnelNames = Dictionary(uniqueKeysWithValues: interfaces.map { ($0, Self.name(interface: $0, service: services[$0], owner: owners[$0])) })
+            tunnelClients = [:]
+            for i in interfaces { if let o = owners[i] { tunnelClients[o] = tunnelNames[i] } }
+            internetTunnel = NetworkRoutes.internetTunnel().flatMap { interfaces.contains($0) ? $0 : nil }
         }
         proxies = NetworkRoutes.systemProxies()
         for p in proxies where !p.isLoopback && !isIPLiteral(p.host) && proxyAddresses[p.host] == nil && pendingLookups.insert(p.host).inserted {
@@ -90,8 +110,19 @@ final class RouteMarker {
         return interface
     }
 
-    func route(localAddress: String, remoteAddress: String, remotePort: Int) -> RouteTag? {
+    /// The path one connection takes. The socket's own address decides first: bound to a tunnel's address, it
+    /// goes through that tunnel (split tunnels are told apart per socket; a socket opened on Wi-Fi before the VPN
+    /// came up stays on Wi-Fi). A socket without an address of its own goes where the routing table sends its
+    /// server. The VPN client's own connection outside the tunnel is the tunnel's carrier.
+    func route(localAddress: String, remoteAddress: String, remotePort: Int, processPath: String? = nil) -> RouteTag? {
         if let iface = tunnelAddresses[localAddress] { return .vpn(name: tunnelNames[iface] ?? iface, interface: iface) }
+        if let path = processPath, let name = tunnelClients[path], HostNames.hasNetworkName(remoteAddress) { return .vpnServer(name: name) }
+        if Self.unspecified(localAddress), HostNames.hasNetworkName(remoteAddress), !tunnelAddresses.isEmpty {
+            if routeCache[remoteAddress] == nil { routeCache[remoteAddress] = .some(NetworkRoutes.routeInterface(to: remoteAddress)) }
+            if let iface = routeCache[remoteAddress] ?? nil, Set(tunnelAddresses.values).contains(iface) {
+                return .vpn(name: tunnelNames[iface] ?? iface, interface: iface)
+            }
+        }
         if let p = NetworkRoutes.proxy(for: remoteAddress, port: remotePort, among: proxies, addresses: proxyAddresses) {
             return .systemProxy(kind: p.kind.rawValue, host: p.host, port: p.port)
         }
@@ -105,9 +136,15 @@ final class RouteMarker {
         return .localProxy(program: program, listener: remoteAddress.contains(":") ? "[\(remoteAddress)]:\(remotePort)" : "\(remoteAddress):\(remotePort)")
     }
 
+    /// No address of its own: not bound, or bound to the wildcard.
+    static func unspecified(_ address: String) -> Bool { ["", "*", "0.0.0.0", "::"].contains(address) }
+
     /// Test hook: fixed tunnels and proxies instead of the Mac's.
-    func set(tunnelAddresses: [String: String], tunnelNames: [String: String], proxies: [NetworkRoutes.ProxyEndpoint], proxyAddresses: [String: Set<String>] = [:]) {
+    func set(tunnelAddresses: [String: String], tunnelNames: [String: String], proxies: [NetworkRoutes.ProxyEndpoint], proxyAddresses: [String: Set<String>] = [:],
+             tunnelClients: [String: String] = [:], routes: [String: String] = [:]) {
         self.tunnelAddresses = tunnelAddresses; self.tunnelNames = tunnelNames; self.proxies = proxies; self.proxyAddresses = proxyAddresses
+        self.tunnelClients = tunnelClients
+        routeCache = routes.mapValues { .some($0) }
         lastRefresh = .distantFuture
     }
 

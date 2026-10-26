@@ -442,7 +442,7 @@ final class Ledger: ObservableObject {
                 remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint,
                                           pid: c.pid, process: c.processName,
                                           network: isLocalAddress(c.remoteAddress) ? nil : geo.network(c.remoteAddress)?.label,
-                                          route: routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort)
+                                          route: routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort, processPath: c.processPath)
                                             ?? RouteMarker.localProxy(remoteAddress: c.remoteAddress, remotePort: c.remotePort, pid: c.pid, listener: listeners[c.remotePort]),
                                           bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0))
                 indexByKey[key] = remotes.count - 1
@@ -648,7 +648,7 @@ final class Ledger: ObservableObject {
             ("Google Chrome", "Google Chrome Helper", 412, "cdn.example.net", "198.51.100.5", "UDP", 443, "Frankfurt", "Germany", 50.11, 8.68),
             ("Google Chrome", "Google Chrome Helper", 413, "video.example.net", "198.51.100.6", "TCP", 443, "Paris", "France", 48.857, 2.352),
             ("Telegram", "Telegram", 520, "demo2.example.com", "203.0.113.3", "TCP", 443, "Frankfurt", "Germany", 50.11, 8.68),
-            ("Telegram", "Telegram", 520, "demo3.example.com", "203.0.113.4", "TCP", 5222, "Paris", "France", 48.857, 2.352),
+            ("Telegram", "Telegram Helper", 521, "demo3.example.com", "203.0.113.4", "TCP", 5222, "Paris", "France", 48.857, 2.352),
             ("Steam", "Steam", 630, "demo4.example.com", "203.0.113.5", "TCP", 443, "Stockholm", "Sweden", 59.33, 18.07),
             ("Steam", "Steam Helper", 641, "demo5.example.com", "203.0.113.6", "UDP", 27015, "Madrid", "Spain", 40.42, -3.70),
             ("macOS", "mDNSResponder", 90, "dns.example", "192.0.2.53", "UDP", 53, "Amsterdam", "Netherlands", 52.37, 4.89),
