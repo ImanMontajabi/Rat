@@ -11,41 +11,16 @@ struct SidebarView: View {
     @Binding var selection: MonitorSelection?
     @Binding var showChart: Bool
     @Binding var showInspector: Bool
+    /// The search field, its chips and the time range; the map shows what they leave.
+    @Binding var filter: MonitorFilter
 
-    @State private var search = ""
-    @State private var onlyIncoming = false
-    @State private var onlyDenied = false
-    @State private var routeFilter: RouteFilter = .all
-    @State private var range: TimeRange = .fiveMinutes
     @State private var expandedGroups = Set<String>()
 
     // MARK: data
 
-    private var cutoff: Date { Date().addingTimeInterval(-range.seconds) }
-
-    /// The search text without its filter words, and the route filter they ask for ("vpn", "proxy").
-    private var query: (text: String, route: RouteFilter) { RouteFilter.parse(search, chip: routeFilter) }
-
-    private var filtered: [AppEntry] {
-        let (search, route) = query
-        var list = ledger.apps.filter { $0.lastActive >= cutoff && ($0.totalIn + $0.totalOut > 0 || !$0.remotes.isEmpty || $0.listening > 0) }
-        if !settings.includeLocalNetwork {
-            list = list.filter { $0.remotes.isEmpty || $0.remotes.contains { !isLocalAddress($0.address) } || $0.totalIn + $0.totalOut > 0 }
-        }
-        if !settings.includeNetworkExtensions { list = list.filter { !$0.identity.isExtension } }
-        if !settings.includeOtherUsers { list = list.filter { !$0.otherUsers } }
-        if onlyIncoming { list = list.filter { $0.listening > 0 } }
-        if onlyDenied { list = list.filter { ledger.rules.policy(for: $0.identity.ruleKey) == .deny } }
-        if route != .all { list = list.filter { $0.remotes.contains(where: route.matches) } }
-        if !search.isEmpty {
-            list = list.filter { a in
-                a.identity.name.localizedCaseInsensitiveContains(search) ||
-                a.processes.keys.contains { $0.localizedCaseInsensitiveContains(search) } ||
-                a.remotes.contains { $0.host.localizedCaseInsensitiveContains(search) || $0.address.localizedCaseInsensitiveContains(search) || ($0.geo?.country.localizedCaseInsensitiveContains(search) ?? false) || ($0.geo?.city.localizedCaseInsensitiveContains(search) ?? false) }
-            }
-        }
-        return list
-    }
+    private var query: (text: String, route: RouteFilter) { filter.query }
+    private var range: TimeRange { filter.range }
+    private var filtered: [AppEntry] { filter.apps(ledger, settings: settings) }
 
     private var rows: [AppEntry] {
         let list = filtered
@@ -143,19 +118,19 @@ struct SidebarView: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search", text: $search).textFieldStyle(.plain).accessibilityIdentifier("search-field")
-            chip("arrow.down.left.circle", on: $onlyIncoming, help: "Only apps accepting incoming connections").accessibilityIdentifier("only-incoming")
-            chip("xmark.rectangle", on: $onlyDenied, help: "Only denied apps").accessibilityIdentifier("only-denied")
+            TextField("Search", text: $filter.search).textFieldStyle(.plain).accessibilityIdentifier("search-field")
+            chip("arrow.down.left.circle", on: $filter.onlyIncoming, help: "Only apps accepting incoming connections").accessibilityIdentifier("only-incoming")
+            chip("xmark.rectangle", on: $filter.onlyDenied, help: "Only denied apps").accessibilityIdentifier("only-denied")
             Menu {
-                Picker("Route", selection: $routeFilter) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
+                Picker("Route", selection: $filter.route) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
             } label: {
-                Image(systemName: routeFilter.symbol).foregroundStyle(routeFilter == .all ? Color.secondary : .accentColor)
+                Image(systemName: filter.route.symbol).foregroundStyle(filter.route == .all ? Color.secondary : .accentColor)
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .help("Only connections through a VPN or a proxy (or type vpn / proxy in the search field)")
             .accessibilityIdentifier("route-filter")
             Menu {
-                ForEach(TimeRange.allCases) { r in Button(r.title) { range = r } }
+                ForEach(TimeRange.allCases) { r in Button(r.title) { filter.range = r } }
             } label: { Label(range.rawValue, systemImage: "clock").font(.callout) }
             .menuStyle(.borderlessButton).fixedSize()
             .accessibilityIdentifier("time-range")
@@ -197,6 +172,59 @@ struct SidebarView: View {
             }
         }
         .padding(10)
+    }
+}
+
+/// What the Network Monitor shows: the search, the chips next to it and the time range. The list and the map
+/// apply the same filter, so the map draws only the listed apps' matching connections.
+struct MonitorFilter: Equatable {
+    var search = ""
+    var onlyIncoming = false
+    var onlyDenied = false
+    /// The route chip; "vpn" or "proxy" in the search overrides it.
+    var route: RouteFilter = .all
+    var range: TimeRange = .fiveMinutes
+
+    /// The search text without its filter words, and the route filter in effect.
+    var query: (text: String, route: RouteFilter) { RouteFilter.parse(search, chip: route) }
+
+    /// The apps the list shows.
+    @MainActor func apps(_ ledger: Ledger, settings: AppSettings, now: Date = Date()) -> [AppEntry] {
+        let (text, route) = query
+        let cutoff = now.addingTimeInterval(-range.seconds)
+        var list = ledger.apps.filter { $0.lastActive >= cutoff && ($0.totalIn + $0.totalOut > 0 || !$0.remotes.isEmpty || $0.listening > 0) }
+        if !settings.includeLocalNetwork {
+            list = list.filter { $0.remotes.isEmpty || $0.remotes.contains { !isLocalAddress($0.address) } || $0.totalIn + $0.totalOut > 0 }
+        }
+        if !settings.includeNetworkExtensions { list = list.filter { !$0.identity.isExtension } }
+        if !settings.includeOtherUsers { list = list.filter { !$0.otherUsers } }
+        if onlyIncoming { list = list.filter { $0.listening > 0 } }
+        if onlyDenied { list = list.filter { ledger.rules.policy(for: $0.identity.ruleKey) == .deny } }
+        if route != .all { list = list.filter { $0.remotes.contains(where: route.matches) } }
+        if !text.isEmpty {
+            list = list.filter { a in
+                a.identity.name.localizedCaseInsensitiveContains(text) ||
+                a.processes.keys.contains { $0.localizedCaseInsensitiveContains(text) } ||
+                a.remotes.contains { Self.remote($0, contains: text) }
+            }
+        }
+        return list
+    }
+
+    /// Whether the map draws one of a listed app's connections: it is on the route asked for and, when the
+    /// search names neither the app nor the connection's process, the search finds the connection itself
+    /// ("Paris" draws only the lines to Paris).
+    func matches(_ r: RemoteHost, of app: AppEntry) -> Bool {
+        let (text, route) = query
+        guard route.matches(r) else { return false }
+        guard !text.isEmpty, !app.identity.name.localizedCaseInsensitiveContains(text) else { return true }
+        return (r.process?.localizedCaseInsensitiveContains(text) ?? false) || Self.remote(r, contains: text)
+    }
+
+    private static func remote(_ r: RemoteHost, contains text: String) -> Bool {
+        r.host.localizedCaseInsensitiveContains(text) || r.address.localizedCaseInsensitiveContains(text) ||
+            (r.geo?.country.localizedCaseInsensitiveContains(text) ?? false) || (r.geo?.city.localizedCaseInsensitiveContains(text) ?? false) ||
+            (r.via?.serverGeo?.city.localizedCaseInsensitiveContains(text) ?? false)
     }
 }
 

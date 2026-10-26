@@ -1,0 +1,1 @@
+The map shows only what the list shows: the search, the VPN and proxy filter (chip or the words vpn / proxy), and the other filters narrow its lines and pins too; searching a city draws only the lines to it.

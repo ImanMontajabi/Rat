@@ -7,12 +7,13 @@ struct MonitorWindow: View {
     @State private var selection: MonitorSelection?
     @State private var showInspector = true
     @State private var showChart = true
+    @State private var filter = MonitorFilter()
 
     var body: some View {
         HStack(spacing: 0) {
-            SidebarView(selection: $selection, showChart: $showChart, showInspector: $showInspector)
+            SidebarView(selection: $selection, showChart: $showChart, showInspector: $showInspector, filter: $filter)
                 .frame(width: 400)
-            MapPane(selection: selection)
+            MapPane(selection: selection, filter: filter)
             if showInspector {
                 InspectorView(selection: selection)
                     .frame(width: 330)

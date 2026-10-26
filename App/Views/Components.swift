@@ -11,7 +11,7 @@ struct RouteBadges: View {
         HStack(spacing: 4) {
             if let route = remote.route { badge(compact ? route.shortBadge : route.badge, symbol: route.isVPN ? "lock.shield" : "arrow.triangle.branch", color: route.isVPN ? .teal : .orange, help: route.help) }
             if let via = remote.via, !(remote.route?.isProxy ?? false) {
-                badge("Proxy · \(via.process)", symbol: "arrow.triangle.branch", color: .orange, help: "\(via.label), \(via.kind)")
+                badge(via.badge, symbol: "arrow.triangle.branch", color: .orange, help: "\(via.label), \(via.kind)")
             }
         }
     }
