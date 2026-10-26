@@ -1,1 +1,0 @@
-A slow or unreachable DNS server no longer stalls the Network Monitor: host names are looked up in the background (at most four at a time) and loopback, unspecified and link-local addresses are never looked up. A connection whose name is still pending is judged by the rules a moment later (at most 3 seconds), so domain rules still match.

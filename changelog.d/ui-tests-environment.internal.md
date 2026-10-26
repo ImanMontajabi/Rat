@@ -1,1 +1,0 @@
-scripts/test-ui.sh switches a non-Latin keyboard layout to U.S. or ABC for the run and restores it, and the UI tests ignore saved window state, so a window minimized in an earlier run no longer breaks every test.
