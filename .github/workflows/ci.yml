@@ -20,8 +20,11 @@ jobs:
     name: Changelog and version
     runs-on: ubuntu-latest
     steps:
+      # The PR head and the base commit the event names, not the branch tips: when a stacked PR is retargeted
+      # while its parent merges, origin/main may already contain this PR's own fragment.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Version file matches project.yml
@@ -30,7 +33,7 @@ jobs:
       - name: Changelog fragment
         env:
           SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
-          BASE: origin/${{ github.base_ref }}
+          BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "$SKIP" = true ]; then
             python3 -I scripts/changelog.py check
