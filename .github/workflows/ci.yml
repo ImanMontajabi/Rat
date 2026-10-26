@@ -62,6 +62,8 @@ jobs:
         shell: bash
 
       - name: App tests (RatTests)
+        env:
+          TEST_RUNNER_RAT_SKIP_GOLDENS: "1" # snapshot goldens are compared locally (rendered at another scale here)
         run: |
           set -o pipefail
           xcodegen generate --quiet
