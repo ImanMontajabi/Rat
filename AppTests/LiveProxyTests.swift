@@ -45,14 +45,15 @@ final class LiveProxyTests: XCTestCase {
         return p
     }
 
-    /// The sockets of the clients and of this process (the proxy's listeners and its ends of the tunnels), once
-    /// every client is connected. Other programs' connections are left out: the ledger would look up their names.
+    /// The clients' sockets and the proxy's listeners, once every client is connected. Everything else is left
+    /// out: the ledger looks up the name of each address, and on the CI runner the lookup of ::1 (the proxy's end
+    /// of a tunnel) takes a minute.
     private func liveConnections(of pids: [Int32], timeout: TimeInterval = 10) async throws -> [ObservedConnection] {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let conns = ConnectionSampler.sample()
             let ready = Set(conns.filter { pids.contains($0.pid) && $0.tcpState == "ESTABLISHED" && proxy.ports.contains($0.remotePort) }.map(\.pid))
-            if ready.count == pids.count && proxy.handshakes >= pids.count { return conns.filter { pids.contains($0.pid) || $0.pid == getpid() } }
+            if ready.count == pids.count && proxy.handshakes >= pids.count { return conns.filter { pids.contains($0.pid) || $0.pid == getpid() && $0.tcpState == "LISTEN" } }
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         XCTFail("curl did not connect to the loopback proxy (handshakes: \(proxy.handshakes))")
