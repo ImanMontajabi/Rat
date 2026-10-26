@@ -10,8 +10,9 @@ on:
 permissions:
   contents: read
 
+# Label and title edits get their own group: they re-run only the changelog check and must not cancel a build.
 concurrency:
-  group: ci-${{ github.event.pull_request.number }}
+  group: ci-${{ github.event.pull_request.number }}-${{ contains(fromJSON('["labeled", "unlabeled", "edited"]'), github.event.action) && 'meta' || 'code' }}
   cancel-in-progress: true
 
 jobs:
@@ -44,7 +45,7 @@ jobs:
   test:
     name: Build and test
     # Label changes only re-run the changelog check.
-    if: github.event.action != 'labeled' && github.event.action != 'unlabeled' && github.event.action != 'edited'
+    if: ${{ !contains(fromJSON('["labeled", "unlabeled", "edited"]'), github.event.action) }}
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -78,7 +79,7 @@ jobs:
 
   package:
     name: Release build and DMG
-    if: github.event.action != 'labeled' && github.event.action != 'unlabeled' && github.event.action != 'edited'
+    if: ${{ !contains(fromJSON('["labeled", "unlabeled", "edited"]'), github.event.action) }}
     runs-on: macos-26
     timeout-minutes: 45
     steps:
