@@ -147,6 +147,10 @@ struct ProcessInspector: View {
                     Text("The allow rules above are overridden while the whole app is denied.")
                         .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
                 }
+                if ledger.rules.policy(for: app.identity.ruleKey) == .allow, appRules.contains(where: { $0.verdict == .deny }) {
+                    Text("The deny rules above are overridden while the whole app is allowed.")
+                        .font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
+                }
                 if ledger.rules.policy(for: app.identity.ruleKey) == .deny {
                     Group {
                         if !ledger.enforcer.helperInstalled {

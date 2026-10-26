@@ -413,8 +413,10 @@ final class Ledger: ObservableObject {
                 let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), host: host == address || isIPLiteral(host) ? nil : host,
                                       address: address, port: port, proto: proto)
                 let matched = rules.engine.matchingRule(conn)
-                // Matches what is enforced: an app denied from the process list is denied for every server.
-                let verdict = wholeAppDenied.contains(e.identity.ruleKey) ? .deny : (matched?.verdict ?? rules.engine.defaultVerdict)
+                // Matches what is enforced: an app denied from the process list is denied for every server, and one
+                // allowed there is allowed past its own narrower deny rules (none of its sockets is blocked).
+                let verdict: Verdict = wholeAppDenied.contains(e.identity.ruleKey) ? .deny
+                    : rules.allowOverrides(matched, appID: e.identity.ruleKey) ? .allow : (matched?.verdict ?? rules.engine.defaultVerdict)
                 if matched == nil, verdict != .ask, warmedUp { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
                 switch verdict {
                 case .deny: denyCount += 1

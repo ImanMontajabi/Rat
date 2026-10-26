@@ -149,6 +149,13 @@ final class RulesModel: ObservableObject {
                                   profileID: ruleSet.activeProfileID, note: "From the process list"))
     }
 
+    /// The process list's ✓ allows the whole app, whatever narrower Deny rules it has (alerts may have made some,
+    /// one domain or address at a time), as its ✗ wins over narrower Allow rules. Rules for any process stay in force.
+    func allowOverrides(_ matched: Rule?, appID: String) -> Bool {
+        guard let m = matched, m.verdict == .deny, m.processPath != nil || m.signingID != nil || m.teamID != nil else { return false }
+        return policy(for: appID) == .allow
+    }
+
     func rules(for appID: String) -> [Rule] {
         ruleSet.rules.filter { $0.processPath == appID }
     }
