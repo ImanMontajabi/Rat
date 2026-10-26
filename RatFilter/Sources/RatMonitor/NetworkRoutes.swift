@@ -117,6 +117,26 @@ public enum NetworkRoutes {
         return displayNames[hit] ?? hit.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
     }
 
+    // MARK: local proxies
+
+    /// Executables that run a proxy or tunnel on the Mac (`ssh -D`, Tor, Clash, mitmproxy, …), by lowercase name.
+    static let localProxyPrograms: [String: String] = [
+        "ssh": "ssh", "autossh": "autossh", "tor": "Tor", "mitmproxy": "mitmproxy", "mitmdump": "mitmproxy", "mitmweb": "mitmproxy",
+        "privoxy": "Privoxy", "polipo": "Polipo", "squid": "Squid", "tinyproxy": "tinyproxy", "3proxy": "3proxy",
+        "clash": "Clash", "clash-meta": "Clash", "mihomo": "Clash", "v2ray": "V2Ray", "xray": "Xray", "sing-box": "sing-box",
+        "hysteria": "Hysteria", "trojan": "Trojan", "trojan-go": "Trojan", "naive": "NaiveProxy", "ss-local": "Shadowsocks",
+        "sslocal": "Shadowsocks", "gost": "gost", "glider": "glider", "brook": "Brook", "tuic-client": "TUIC", "redsocks": "redsocks",
+        "wireproxy": "wireproxy", "cloudflared": "cloudflared", "obfs4proxy": "obfs4proxy", "lyrebird": "Tor", "snowflake-client": "Tor",
+        "proxychains4": "proxychains", "dnscrypt-proxy": "dnscrypt-proxy",
+    ]
+
+    /// The local proxy a loopback listener belongs to: a known proxy program, or a known VPN/proxy app
+    /// ("ClashX", "Hiddify"). Nil for anything else (a dev server on port 3000 is no proxy).
+    public static func localProxyProgram(inPath path: String) -> String? {
+        let exe = (path as NSString).lastPathComponent.lowercased()
+        return localProxyPrograms[exe] ?? knownApp(inPath: path)
+    }
+
     // MARK: system proxies
 
     public struct ProxyEndpoint: Equatable, Hashable, Sendable {

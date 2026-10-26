@@ -1,0 +1,1 @@
+Apps expand into a tree: the main process's connections first, then each helper or XPC service (and each macOS service) with its PIDs, traffic and own connections. Every connection shows the bytes of its open sockets, command-line tools show the app that started them, and selecting an app, a process or one connection scopes the map and the inspector.

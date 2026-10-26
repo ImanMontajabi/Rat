@@ -1,5 +1,33 @@
 import SwiftUI
 
+/// The tags of a connection that does not go straight to its server: `VPN · Windscribe · utun3` (teal),
+/// `Proxy · ssh` (orange) for a local or system proxy, including destinations unmasked behind a local proxy.
+struct RouteBadges: View {
+    let remote: RemoteHost
+    /// Narrow rows leave out the tunnel interface.
+    var compact = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let route = remote.route { badge(compact ? route.shortBadge : route.badge, symbol: route.isVPN ? "lock.shield" : "arrow.triangle.branch", color: route.isVPN ? .teal : .orange, help: route.help) }
+            if let via = remote.via, !(remote.route?.isProxy ?? false) {
+                badge("Proxy · \(via.process)", symbol: "arrow.triangle.branch", color: .orange, help: "\(via.label), \(via.kind)")
+            }
+        }
+    }
+
+    private func badge(_ text: String, symbol: String, color: Color, help: String) -> some View {
+        Label(text, systemImage: symbol)
+            .labelStyle(.titleAndIcon).font(.system(size: 9, weight: .semibold)).lineLimit(1)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .foregroundStyle(color)
+            .background(color.opacity(0.15), in: Capsule())
+            .fixedSize()
+            .help(help)
+            .accessibilityIdentifier("badge-\(text)")
+    }
+}
+
 struct Pill: View {
     enum Kind { case up, down }
     let kind: Kind

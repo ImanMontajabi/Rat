@@ -2,12 +2,16 @@ import SwiftUI
 
 struct InspectorView: View {
     @EnvironmentObject var ledger: Ledger
-    let selection: String?
+    let selection: MonitorSelection?
 
     var body: some View {
         ScrollView {
-            if let id = selection, let app = ledger.apps.first(where: { $0.id == id }) {
-                ProcessInspector(app: app)
+            if let s = selection, let app = ledger.apps.first(where: { $0.id == s.appID }) {
+                if let id = s.remote, let r = app.remotes.first(where: { $0.id == id }) {
+                    RemoteInspector(app: app, remote: r)
+                } else {
+                    ProcessInspector(app: app, process: s.process)
+                }
             } else {
                 SummaryInspector()
             }
@@ -69,27 +73,53 @@ struct ProcessInspector: View {
     @EnvironmentObject var ledger: Ledger
     @Environment(\.openWindow) private var openWindow
     let app: AppEntry
+    /// One of the app's processes (a helper), or nil for the whole app.
+    var process: String? = nil
     @State private var proc = true
     @State private var rules = true
     @State private var sig = false
     @State private var details = false
     @State private var geo = false
 
+    private var stats: ProcessStats? { process.flatMap { app.processes[$0] } }
+    private var remotes: [RemoteHost] { app.remotes(for: process.map { MonitorSelection(appID: app.id, process: $0) }) }
+
     var body: some View {
         let (ident, team) = app.identity.signing()
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Image(nsImage: app.identity.icon).resizable().frame(width: 40, height: 40)
-                Text(app.identity.name).font(.title2.weight(.bold))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(process ?? app.identity.name).font(.title2.weight(.bold)).lineLimit(2)
+                    if process != nil { Text("Process of \(app.identity.name)").font(.callout).foregroundStyle(.secondary) }
+                }
             }
-            HStack(spacing: 8) { Pill(kind: .up, text: formatBytes(app.totalOut)); Pill(kind: .down, text: formatBytes(app.totalIn)) }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("inspector-title")
+            HStack(spacing: 8) {
+                Pill(kind: .up, text: formatBytes(process == nil ? app.totalOut : stats?.totalOut ?? 0))
+                Pill(kind: .down, text: formatBytes(process == nil ? app.totalIn : stats?.totalIn ?? 0))
+            }
 
             SectionHeader(title: "Process", open: $proc)
             if proc {
-                kv("Path", app.identity.bundlePath ?? app.identity.id)
-                kv("Code ID", [team, ident].compactMap { $0 }.joined(separator: "/").nilIfEmpty ?? "unsigned")
-                kv("User", NSUserName())
-                kv("PIDs", app.pids.sorted().map(String.init).joined(separator: ", "))
+                if let process {
+                    kv("Path", stats?.path ?? process)
+                    kv("PIDs", (stats?.pids ?? []).sorted().map(String.init).joined(separator: ", ").nilIfEmpty ?? "not running")
+                    Text("Rules apply to the whole app: \(app.identity.name).").font(.caption).foregroundStyle(.secondary).padding(.leading, 6)
+                } else {
+                    kv("Path", app.identity.bundlePath ?? app.identity.id)
+                    kv("Code ID", [team, ident].compactMap { $0 }.joined(separator: "/").nilIfEmpty ?? "unsigned")
+                    kv("User", NSUserName())
+                    kv("PIDs", app.pids.sorted().map(String.init).joined(separator: ", "))
+                    let others = app.processes.keys.filter { $0 != app.mainProcess }.sorted()
+                    if !others.isEmpty, app.identity.bundlePath != nil { kv("Helpers", others.joined(separator: ", ")) }
+                    if let by = app.launchedBy {
+                        kv("Started by", by)
+                        Text("Rules for this tool are its own: allowing or denying \(by.components(separatedBy: " (pid").first ?? by) does not cover it.")
+                            .font(.caption).foregroundStyle(.secondary).padding(.leading, 6).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
             SectionHeader(title: "Rules", open: $rules)
             if rules {
@@ -126,7 +156,7 @@ struct ProcessInspector: View {
             if sig { kv("Identifier", ident ?? "none"); kv("Team", team ?? "none") }
             SectionHeader(title: "Connection Details", open: $details)
             if details {
-                if app.identity.isSystem {
+                if app.identity.isSystem && process == nil {
                     // The "macOS" row holds many services: grouped by service, never attributed to a guessed app.
                     let groups = Dictionary(grouping: Array(app.remotes.prefix(80)), by: { $0.process ?? "unknown" }).sorted { $0.key < $1.key }
                     ForEach(groups, id: \.key) { name, list in
@@ -138,41 +168,58 @@ struct ProcessInspector: View {
                             if let note = SharedServices.note(for: name) {
                                 Text("Works for other apps: \(note)").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                             }
-                            ForEach(list) { remoteRow($0, showProcess: false) }
+                            ForEach(list) { RemoteSummary(remote: $0, showProcess: false) }
                         }.padding(.leading, 6).padding(.bottom, 4)
                     }
                 } else {
-                    ForEach(app.remotes.prefix(50)) { r in
-                        remoteRow(r, showProcess: r.process != nil && r.process != app.identity.mainProcessName).padding(.leading, 6)
+                    if let process, let note = SharedServices.note(for: process) {
+                        Text("Works for other apps: \(note)").font(.caption).foregroundStyle(.secondary).padding(.leading, 6).fixedSize(horizontal: false, vertical: true)
+                    }
+                    ForEach(remotes.prefix(50)) { r in
+                        RemoteSummary(remote: r, showProcess: process == nil && r.process != nil && r.process != app.mainProcess).padding(.leading, 6)
                     }
                 }
-                if app.remotes.isEmpty { Text("None").foregroundStyle(.secondary).padding(.leading, 6) }
+                if remotes.isEmpty { Text("None").foregroundStyle(.secondary).padding(.leading, 6) }
             }
             SectionHeader(title: "Geographic Information", open: $geo)
             if geo {
-                let places = Set(app.remotes.flatMap { [$0.geo, $0.via?.serverGeo] }.compactMap { $0 }.map { "\($0.city), \($0.country)" }).sorted()
+                let places = Set(remotes.flatMap { [$0.geo, $0.via?.serverGeo] }.compactMap { $0 }.map { "\($0.city), \($0.country)" }).sorted()
                 if places.isEmpty { Text("No locations for these connections").foregroundStyle(.secondary).padding(.leading, 6) }
                 ForEach(places, id: \.self) { Text($0).padding(.leading, 6) }
             }
         }
     }
 
-    /// One remote: the destination, then protocol, address, port and usual service, then the hops (subprocess, proxy).
-    @ViewBuilder private func remoteRow(_ r: RemoteHost, showProcess: Bool) -> some View {
+    private func kv(_ k: String, _ v: String) -> some View {
+        HStack(alignment: .top) {
+            Text(k + ":").foregroundStyle(.secondary).frame(width: 64, alignment: .trailing)
+            Text(v).textSelection(.enabled)
+        }.font(.callout)
+    }
+}
+
+/// One remote: the destination, then protocol, address, port and usual service, then the hops (subprocess, proxy).
+struct RemoteSummary: View {
+    let remote: RemoteHost
+    var showProcess = true
+
+    var body: some View {
+        let r = remote
         VStack(alignment: .leading, spacing: 0) {
             Text(r.host).lineLimit(1)
             if let via = r.via {
                 // The real destination first, then the proxy hop it went through.
                 Text((r.address.isEmpty || r.address == r.host ? "\(r.proto) port \(r.port)" : "\(r.proto) \(r.address):\(r.port)") + serviceSuffix(proto: r.proto, port: r.port))
-                    .font(.caption).foregroundStyle(.secondary).help(serviceHelp)
+                    .font(.caption).foregroundStyle(.secondary).help(Self.serviceHelp)
                 ProxyBadge(hop: via)
             } else {
-                Text("\(r.proto) \(r.address):\(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).font(.caption).foregroundStyle(.secondary).help(serviceHelp)
+                Text("\(r.proto) \(r.address):\(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).font(.caption).foregroundStyle(.secondary).help(Self.serviceHelp)
             }
             if let route = r.route {
-                Label(route, systemImage: route.hasPrefix("via VPN") ? "lock.shield" : "arrow.triangle.branch")
-                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                    .help(route.hasPrefix("via VPN") ? "This connection leaves through the VPN tunnel." : "This app talks to the system proxy, not to the server itself: the address and location shown are the proxy's, and a rule for a domain cannot match.")
+                HStack(spacing: 4) {
+                    RouteBadges(remote: RemoteHost(address: r.address, host: r.host, port: r.port, proto: r.proto, route: route))
+                    Text(route.label).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
             }
             if let n = r.network {
                 Text(n).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -184,7 +231,47 @@ struct ProcessInspector: View {
         }
     }
 
-    private var serviceHelp: String { "The name is the service usually on this port. The port alone does not prove what the connection carries." }
+    static let serviceHelp = "The name is the service usually on this port. The port alone does not prove what the connection carries."
+}
+
+/// One connection: where it goes, how (process, VPN, proxy), who runs the network, where the server is, and how
+/// much it carried.
+struct RemoteInspector: View {
+    @EnvironmentObject var ledger: Ledger
+    @Environment(\.openWindow) private var openWindow
+    let app: AppEntry
+    let remote: RemoteHost
+
+    var body: some View {
+        let r = remote
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(nsImage: app.identity.icon).resizable().frame(width: 40, height: 40)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(r.host).font(.title2.weight(.bold)).lineLimit(2).truncationMode(.middle)
+                    Text([app.identity.name, r.process].compactMap { $0 }.removingDuplicates().joined(separator: " › ")).font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("inspector-title")
+            RouteBadges(remote: r)
+            HStack(spacing: 8) { Pill(kind: .up, text: formatBytes(r.bytesOut)); Pill(kind: .down, text: formatBytes(r.bytesIn)) }
+            Text("Bytes of the connections open now.").font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                kv("Address", r.address.isEmpty ? "not looked up" : r.address)
+                kv("Port", "\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port))
+                if let p = r.process { kv("Process", p + (r.pid.map { " (pid \($0))" } ?? "")) }
+                if let n = r.network { kv("Network", n) }
+                if let g = r.geo { kv("Location", "\(g.city), \(g.country)") }
+                if let route = r.route { kv("Route", route.label) }
+                if let via = r.via {
+                    kv("Proxy", via.label)
+                    if let g = via.serverGeo { kv("Proxy at", "\(g.city), \(g.country)") }
+                }
+            }
+            Button("Manage Rules…") { openWindow(id: "rules") }
+        }
+    }
 
     private func kv(_ k: String, _ v: String) -> some View {
         HStack(alignment: .top) {
@@ -209,3 +296,7 @@ struct ProxyBadge: View {
 }
 
 private extension String { var nilIfEmpty: String? { isEmpty ? nil : self } }
+
+private extension Array where Element: Hashable {
+    func removingDuplicates() -> [Element] { var seen = Set<Element>(); return filter { seen.insert($0).inserted } }
+}

@@ -1,5 +1,51 @@
 import Foundation
 import RatMonitor
+import RatEnforce
+
+/// The path a connection takes off the Mac, shown as a tag in the tree and the inspector.
+enum RouteTag: Hashable {
+    /// Its socket's address is on a tunnel interface: the traffic leaves through the VPN.
+    case vpn(name: String, interface: String)
+    /// It talks to the proxy set in System Settings, not to the server itself.
+    case systemProxy(kind: String, host: String, port: Int)
+    /// A loopback connection to a local proxy program whose destination was not seen (`ssh -D`, Tor, Clash).
+    case localProxy(program: String, listener: String)
+
+    var isVPN: Bool { if case .vpn = self { return true }; return false }
+    var isProxy: Bool { !isVPN }
+
+    /// Short tag: "VPN · Windscribe · utun3", "Proxy · System HTTPS", "Proxy · ssh".
+    var badge: String {
+        switch self {
+        case let .vpn(name, interface): return name == interface ? "VPN · \(interface)" : "VPN · \(name) · \(interface)"
+        case let .systemProxy(kind, _, _): return "Proxy · System \(kind)"
+        case let .localProxy(program, _): return "Proxy · \(program)"
+        }
+    }
+
+    /// Sentence form, as in alerts: "via VPN (Windscribe)".
+    var label: String {
+        switch self {
+        case let .vpn(name, _): return "via VPN (\(name))"
+        case let .systemProxy(kind, host, port): return "via System \(kind) Proxy (\(host):\(port))"
+        case let .localProxy(program, listener): return "via \(program) proxy (\(listener))"
+        }
+    }
+
+    /// For narrow rows: the VPN's name without its interface ("VPN · Windscribe").
+    var shortBadge: String {
+        if case let .vpn(name, interface) = self { return "VPN · \(name == interface ? interface : name)" }
+        return badge
+    }
+
+    var help: String {
+        switch self {
+        case let .vpn(_, interface): return "This connection leaves through the VPN tunnel (\(interface))."
+        case .systemProxy: return "This app talks to the system proxy, not to the server itself: the address and location shown are the proxy's, and a rule for a domain cannot match."
+        case .localProxy: return "This app talks to a local proxy on this Mac. Where the proxy sends it was not seen: the firewall helper reads the proxy request when it is installed."
+        }
+    }
+}
 
 /// Marks connections that leave through a VPN tunnel or go to a system proxy (#2): "via VPN (Windscribe)",
 /// "via System HTTPS Proxy (proxy.example:3128)". Refreshed every few seconds, so a VPN that just connected is
@@ -44,12 +90,19 @@ final class RouteMarker {
         return interface
     }
 
-    func route(localAddress: String, remoteAddress: String, remotePort: Int) -> String? {
-        if let iface = tunnelAddresses[localAddress] { return "via VPN (\(tunnelNames[iface] ?? iface))" }
+    func route(localAddress: String, remoteAddress: String, remotePort: Int) -> RouteTag? {
+        if let iface = tunnelAddresses[localAddress] { return .vpn(name: tunnelNames[iface] ?? iface, interface: iface) }
         if let p = NetworkRoutes.proxy(for: remoteAddress, port: remotePort, among: proxies, addresses: proxyAddresses) {
-            return "via System \(p.kind.rawValue) Proxy (\(p.host):\(p.port))"
+            return .systemProxy(kind: p.kind.rawValue, host: p.host, port: p.port)
         }
         return nil
+    }
+
+    /// A loopback connection to another program's listener that is a proxy (`ssh -D 1080`, Tor on 9050).
+    static func localProxy(remoteAddress: String, remotePort: Int, pid: Int32, listener: (pid: Int32, path: String)?) -> RouteTag? {
+        guard ProxyWatch.isLoopback(remoteAddress), let listener, listener.pid != pid,
+              let program = NetworkRoutes.localProxyProgram(inPath: listener.path) else { return nil }
+        return .localProxy(program: program, listener: remoteAddress.contains(":") ? "[\(remoteAddress)]:\(remotePort)" : "\(remoteAddress):\(remotePort)")
     }
 
     /// Test hook: fixed tunnels and proxies instead of the Mac's.
