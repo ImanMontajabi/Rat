@@ -3,7 +3,7 @@ import MapKit
 
 struct MapPane: View {
     @EnvironmentObject var ledger: Ledger
-    let selection: String?
+    let selection: MonitorSelection?
     @State private var position: MapCameraPosition = .region(MapPane.region(fitting: []))
 
     /// The visible region: every pin with some margin, never tighter than a regional view (15 degrees), so a lone
@@ -24,7 +24,7 @@ struct MapPane: View {
     private struct Arc: Identifiable { let id: String; let coords: [CLLocationCoordinate2D]; let highlighted: Bool; let proxied: Bool }
     private struct Node: Identifiable { let id: String; let point: GeoPoint; let highlighted: Bool; var proxy: Bool }
 
-    private var visibleApps: [AppEntry] { ledger.apps.filter { selection == nil || $0.id == selection } }
+    private var visibleApps: [AppEntry] { ledger.apps.filter { selection == nil || $0.id == selection?.appID } }
 
     private static func key(_ g: GeoPoint) -> String { "\(g.city)|\(g.country)" }
 
@@ -47,7 +47,7 @@ struct MapPane: View {
         }
         let me = ledger.myLocation
         for a in visibleApps {
-            for r in a.remotes {
+            for r in a.remotes(for: selection) {
                 if let server = r.via?.serverGeo {
                     add(server, proxy: true)
                     if let me { arc(from: me.coordinate, "me", to: server, proxied: false) }

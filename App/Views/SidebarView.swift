@@ -8,7 +8,7 @@ import AppKit
 struct SidebarView: View {
     @EnvironmentObject var ledger: Ledger
     @ObservedObject private var settings = AppSettings.shared
-    @Binding var selection: String?
+    @Binding var selection: MonitorSelection?
     @Binding var showChart: Bool
     @Binding var showInspector: Bool
 
@@ -34,7 +34,8 @@ struct SidebarView: View {
         if !search.isEmpty {
             list = list.filter { a in
                 a.identity.name.localizedCaseInsensitiveContains(search) ||
-                a.remotes.contains { $0.host.localizedCaseInsensitiveContains(search) || ($0.geo?.country.localizedCaseInsensitiveContains(search) ?? false) || ($0.geo?.city.localizedCaseInsensitiveContains(search) ?? false) }
+                a.processes.keys.contains { $0.localizedCaseInsensitiveContains(search) } ||
+                a.remotes.contains { $0.host.localizedCaseInsensitiveContains(search) || $0.address.localizedCaseInsensitiveContains(search) || ($0.geo?.country.localizedCaseInsensitiveContains(search) ?? false) || ($0.geo?.city.localizedCaseInsensitiveContains(search) ?? false) }
             }
         }
         return list
@@ -74,10 +75,7 @@ struct SidebarView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if settings.groupBy == .process {
-                        ForEach(rows) { app in
-                            ProcessRow(app: app, selected: selection == app.id)
-                                .onTapGesture { selection = selection == app.id ? nil : app.id }
-                        }
+                        ForEach(rows) { app in ProcessRow(app: app, selection: $selection) }
                     } else {
                         ForEach(groups) { g in groupRow(g) }
                     }
@@ -101,10 +99,7 @@ struct SidebarView: View {
             .padding(.vertical, 8).padding(.horizontal, 6).contentShape(Rectangle())
             .onTapGesture { if !expandedGroups.insert(g.id).inserted { expandedGroups.remove(g.id) } }
             if expandedGroups.contains(g.id) {
-                ForEach(g.apps) { app in
-                    ProcessRow(app: app, selected: selection == app.id).padding(.leading, 18)
-                        .onTapGesture { selection = selection == app.id ? nil : app.id }
-                }
+                ForEach(g.apps) { app in ProcessRow(app: app, selection: $selection).padding(.leading, 18) }
             }
         }
     }
@@ -142,13 +137,14 @@ struct SidebarView: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search", text: $search).textFieldStyle(.plain)
+            TextField("Search", text: $search).textFieldStyle(.plain).accessibilityIdentifier("search-field")
             chip("arrow.down.left.circle", on: $onlyIncoming, help: "Only apps accepting incoming connections")
             chip("xmark.rectangle", on: $onlyDenied, help: "Only denied apps")
             Menu {
                 ForEach(TimeRange.allCases) { r in Button(r.title) { range = r } }
             } label: { Label(range.rawValue, systemImage: "clock").font(.callout) }
             .menuStyle(.borderlessButton).fixedSize()
+            .accessibilityIdentifier("time-range")
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(.white.opacity(0.08), in: Capsule())
@@ -190,17 +186,23 @@ struct SidebarView: View {
     }
 }
 
+/// An app and, expanded, its tree: the main process's connections, then each other process (helpers, XPC
+/// services; for the macOS row, every service) with its own connections. Each level can be selected, which scopes
+/// the map and the inspector.
 struct ProcessRow: View {
     @EnvironmentObject var ledger: Ledger
     let app: AppEntry
-    let selected: Bool
+    @Binding var selection: MonitorSelection?
     @State private var open = false
+    @State private var openProcesses = Set<String>()
+
+    private var selectedHere: Bool { selection?.appID == app.id }
 
     var body: some View {
+        let tree: (direct: [RemoteHost], processes: [ProcessNode]) = open ? app.tree : ([], [])
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "chevron.right").font(.caption2).rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.secondary)
-                    .frame(width: 14).contentShape(Rectangle()).onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { open.toggle() } }
+                Disclosure(open: open, label: app.identity.name) { withAnimation(.easeInOut(duration: 0.15)) { open.toggle() } }
                 Image(nsImage: app.identity.icon).resizable().frame(width: 24, height: 24)
                 Text(app.identity.name).lineLimit(1).font(.system(size: 14, weight: .medium))
                 if app.identity.isExtension {
@@ -218,26 +220,90 @@ struct ProcessRow: View {
                 }
             }
             .padding(.vertical, 7).padding(.horizontal, 6)
-            .background(selected ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .background(selectedHere && selection?.process == nil && selection?.remote == nil ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+            .onTapGesture { select(MonitorSelection(appID: app.id)) }
+            .accessibilityElement(children: .contain)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { select(MonitorSelection(appID: app.id)) }
+            .accessibilityIdentifier("app-row-\(app.identity.name)")
             if open {
-                VStack(alignment: .leading, spacing: 3) {
-                    if app.remotes.isEmpty { Text("No outgoing connections").foregroundStyle(.secondary) }
-                    ForEach(app.remotes.prefix(30)) { r in
-                        HStack {
-                            Text(r.host).lineLimit(1)
-                            if app.identity.isSystem, let p = r.process { Text(p).foregroundStyle(.secondary).lineLimit(1) }
-                            if let via = r.via {
-                                Text("via \(via.process)").foregroundStyle(.orange).lineLimit(1).help(via.label)
-                            }
-                            Spacer()
-                            Text("\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).foregroundStyle(.secondary).monospacedDigit()
-                        }
-                    }
+                VStack(alignment: .leading, spacing: 1) {
+                    if tree.direct.isEmpty && tree.processes.isEmpty { Text("No outgoing connections").foregroundStyle(.secondary).padding(.leading, 44) }
+                    ForEach(tree.direct.prefix(30)) { r in remoteRow(r, indent: 44, process: app.mainProcess) }
+                    ForEach(tree.processes) { node in processRow(node) }
                 }
-                .font(.caption).padding(.leading, 52).padding(.trailing, 8).padding(.vertical, 4)
+                .font(.caption).padding(.trailing, 8).padding(.vertical, 4)
             }
         }
+    }
+
+    private func select(_ s: MonitorSelection) { selection = selection == s ? nil : s }
+
+    @ViewBuilder private func processRow(_ node: ProcessNode) -> some View {
+        let isOpen = openProcesses.contains(node.name)
+        let s = MonitorSelection(appID: app.id, process: node.name)
+        HStack(spacing: 6) {
+            Disclosure(open: isOpen, label: node.name) { if !openProcesses.insert(node.name).inserted { openProcesses.remove(node.name) } }
+            Image(systemName: app.identity.isSystem ? "gearshape.2" : "gearshape").foregroundStyle(.secondary)
+            Text(node.name).lineLimit(1).truncationMode(.middle).font(.caption.weight(.medium))
+            Text(node.pids.count == 1 ? "pid \(node.pids[0])" : node.pids.isEmpty ? "" : "\(node.pids.count) processes").foregroundStyle(.secondary).lineLimit(1)
+            Spacer(minLength: 4)
+            Text("\(node.remotes.count)").foregroundStyle(.secondary).monospacedDigit().help("Connections")
+            if node.totalIn + node.totalOut > 0 { Text(formatBytes(node.totalIn + node.totalOut)).foregroundStyle(.secondary).monospacedDigit() }
+        }
+        .padding(.vertical, 3).padding(.leading, 30).padding(.trailing, 4)
+        .background(selection == s ? Color.accentColor.opacity(0.85) : .clear, in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
+        .onTapGesture { select(s) }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { select(s) }
+        .accessibilityIdentifier("process-row-\(node.name)")
+        if isOpen {
+            if node.remotes.isEmpty { Text("No outgoing connections").foregroundStyle(.secondary).padding(.leading, 70) }
+            ForEach(node.remotes.prefix(30)) { r in remoteRow(r, indent: 70, process: node.name) }
+        }
+    }
+
+    private func remoteRow(_ r: RemoteHost, indent: CGFloat, process: String?) -> some View {
+        let s = MonitorSelection(appID: app.id, process: process, remote: r.id)
+        return HStack(spacing: 6) {
+            Text(r.host).lineLimit(1).truncationMode(.middle)
+            if let via = r.via {
+                Text("via \(via.process)").foregroundStyle(.orange).lineLimit(1).help(via.label)
+            }
+            Spacer(minLength: 4)
+            Text("\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            if r.bytesIn + r.bytesOut > 0 {
+                Text(formatBytes(r.bytesIn + r.bytesOut)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+                    .help("\(formatBytes(r.bytesIn)) received, \(formatBytes(r.bytesOut)) sent on the open connections")
+            }
+        }
+        .padding(.vertical, 2).padding(.leading, indent).padding(.trailing, 4)
+        .background(selection == s ? Color.accentColor.opacity(0.7) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .contentShape(Rectangle())
+        .onTapGesture { select(s) }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { select(s) }
+        .accessibilityIdentifier("remote-row-\(r.host)")
+    }
+}
+
+/// The chevron that opens a row, as a button so it is reachable by keyboard and UI tests.
+struct Disclosure: View {
+    let open: Bool
+    let label: String
+    let toggle: () -> Void
+    var body: some View {
+        Button(action: toggle) {
+            Image(systemName: "chevron.right").font(.caption2).rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.secondary)
+                .frame(width: 14, height: 14).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(open ? "Collapse \(label)" : "Expand \(label)")
+        .accessibilityIdentifier("disclose-\(label)")
     }
 }
 

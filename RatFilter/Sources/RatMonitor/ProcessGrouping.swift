@@ -39,6 +39,27 @@ public enum ProcessGrouping {
         return r > 0 ? r : pid
     }
 
+    /// The parent process, or 0 when it cannot be read.
+    public static func parentPID(of pid: pid_t) -> pid_t {
+        var info = proc_bsdinfo()
+        let n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        return n == Int32(MemoryLayout<proc_bsdinfo>.size) ? pid_t(info.pbi_ppid) : 0
+    }
+
+    /// The nearest application that started a command-line process (`git-remote-https` ← `git` ← `zsh` ← Warp):
+    /// the first parent inside an app bundle, or nil when the chain reaches launchd first. Display only: rules and
+    /// the daemon still treat the tool as its own app.
+    public static func launchingApp(of pid: pid_t, maxDepth: Int = 16, parent: (pid_t) -> pid_t = parentPID(of:),
+                                    path: (pid_t) -> String = ConnectionSampler.path(of:)) -> (pid: pid_t, path: String)? {
+        var current = parent(pid)
+        for _ in 0..<maxDepth where current > 1 {
+            let p = path(current)
+            if bundleRoot(of: p) != nil { return (current, p) }
+            current = parent(current)
+        }
+        return nil
+    }
+
     /// Path of the application a system helper works for, if it differs from the helper itself.
     public static func responsiblePath(of pid: pid_t) -> String? {
         let r = responsiblePID(of: pid)
