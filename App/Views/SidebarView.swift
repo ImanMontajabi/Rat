@@ -283,7 +283,7 @@ struct ProcessRow: View {
                 Disclosure(open: open, label: app.identity.name) { withAnimation(.easeInOut(duration: 0.15)) { open.toggle() } }
                 Image(nsImage: app.identity.icon).resizable().frame(width: 24, height: 24)
                 Text(app.identity.name).lineLimit(1).font(.system(size: 14, weight: .medium)).layoutPriority(1)
-                RouteSummaryBadges(remotes: app.remotes)
+                RouteSummaryBadges(remotes: app.remotes).layoutPriority(0.5) // after the name, before the spacer
                 if app.identity.isExtension {
                     Text("EXT").font(.system(size: 9, weight: .semibold)).padding(.horizontal, 4).padding(.vertical, 1)
                         .overlay(RoundedRectangle(cornerRadius: 3).stroke(.secondary)).foregroundStyle(.secondary)
