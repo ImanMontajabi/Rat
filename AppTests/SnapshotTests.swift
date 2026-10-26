@@ -47,6 +47,11 @@ final class SnapshotTests: XCTestCase {
 
     private func assertMatchesGolden(_ rep: NSBitmapImageRep, _ name: String, tolerance: Double = 0.02, file: StaticString = #filePath, line: UInt = #line) throws {
         let url = Self.snapshotDir.appendingPathComponent("\(name).png")
+        // Pixels depend on the display scale and the Xcode/macOS that renders them: CI renders (catching crashes and
+        // layout errors) but compares only on the machine the goldens were recorded on.
+        if ProcessInfo.processInfo.environment["RAT_SKIP_GOLDENS"] != nil {
+            throw XCTSkip("golden comparison skipped (RAT_SKIP_GOLDENS); run locally")
+        }
         if ProcessInfo.processInfo.environment["RAT_RECORD_SNAPSHOTS"] != nil {
             try FileManager.default.createDirectory(at: Self.snapshotDir, withIntermediateDirectories: true)
             try rep.representation(using: .png, properties: [:])!.write(to: url)

@@ -9,6 +9,7 @@ fragments into CHANGELOG.md.
     scripts/changelog.py check [--base origin/main]    fragments are valid, and this branch adds one
     scripts/changelog.py render [--version 1.3.0]      print the unreleased notes (nightly builds, previews)
     scripts/changelog.py release 1.3.0                 write them into CHANGELOG.md and delete the fragments
+    scripts/changelog.py release 1.3.0 --from-ref origin/release   only the fragments that ref contains
     scripts/changelog.py section 1.3.0                 print one released version's section of CHANGELOG.md
 """
 import argparse
@@ -65,14 +66,16 @@ class Fragment:
         return "\n".join([f"- {first}"] + rest)
 
 
-def fragments():
+def fragments(only=None):
+    """All fragments, or those whose file names are in `only`."""
     if not FRAGMENTS.is_dir():
         return []
-    return [Fragment(p) for p in sorted(FRAGMENTS.iterdir()) if p.is_file() and p.name not in IGNORED]
+    return [Fragment(p) for p in sorted(FRAGMENTS.iterdir())
+            if p.is_file() and p.name not in IGNORED and (only is None or p.name in only)]
 
 
-def render(version=None, date=None, level=2):
-    frags = [f for f in fragments() if not f.problems()]
+def render(version=None, date=None, level=2, only=None):
+    frags = [f for f in fragments(only) if not f.problems()]
     head = "#" * level
     title = f"{head} [{version}] - {date}" if version else f"{head} Unreleased"
     out = [title, ""]
@@ -150,15 +153,19 @@ def cmd_section(a):
 def cmd_release(a):
     if section(a.version):
         sys.exit(f"CHANGELOG.md already has a section for {a.version}")
-    problems = [p for f in fragments() for p in f.problems()]
+    # After a release, main may already hold fragments merged later: those stay for the next release.
+    only = None
+    if a.from_ref:
+        only = {pathlib.Path(n).name for n in git("ls-tree", "--name-only", a.from_ref, "changelog.d/").splitlines()}
+    problems = [p for f in fragments(only) for p in f.problems()]
     if problems:
         sys.exit("\n".join(problems))
-    body = render(a.version, a.date or datetime.date.today().isoformat())
+    body = render(a.version, a.date or datetime.date.today().isoformat(), only=only)
     text = CHANGELOG.read_text(encoding="utf-8")
     if MARKER not in text:
         sys.exit(f"CHANGELOG.md lacks the {MARKER} line")
     CHANGELOG.write_text(text.replace(MARKER, f"{MARKER}\n\n{body.rstrip()}", 1), encoding="utf-8")
-    for f in fragments():
+    for f in fragments(only):
         f.path.unlink()
     sys.stdout.write(body)
 
@@ -185,6 +192,7 @@ def main():
     rel = sub.add_parser("release", help="compile fragments into CHANGELOG.md and delete them")
     rel.add_argument("version")
     rel.add_argument("--date")
+    rel.add_argument("--from-ref", help="compile only the fragments present in this git ref")
     rel.set_defaults(func=cmd_release)
     a = p.parse_args()
     a.func(a)

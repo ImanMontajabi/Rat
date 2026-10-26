@@ -1,0 +1,142 @@
+name: Release
+
+# Stable releases come from the `release` branch only: merge a PR from main into release. When Version is higher
+# than the last stable tag, this tags v<Version>, builds the DMG and publishes the release with the notes compiled
+# from changelog.d/ (or the version's section of CHANGELOG.md when it is already there). Afterwards it opens a PR
+# into main that writes those notes into CHANGELOG.md, deletes the released fragments and bumps Version to the
+# next minor: the rulesets let nothing push to main directly, CI included.
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      release: ${{ steps.gate.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Is Version new?
+        id: gate
+        run: |
+          set -euo pipefail
+          scripts/version.sh check
+          version="$(scripts/version.sh get)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          last="$(git tag -l 'v*' | grep -v -e '-' | sed 's/^v//' | sort -V | tail -n1)"
+          highest="$(printf '%s\n%s\n' "$version" "${last:-0.0.0}" | sort -V | tail -n1)"
+          if [ "$version" = "${last:-}" ] || [ "$highest" != "$version" ]; then
+            echo "::notice::Version $version is not higher than the last release v$last: nothing to publish."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing $version (previous v${last:-none})."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    runs-on: macos-26
+    timeout-minutes: 45
+    # Add required reviewers to this environment (Settings › Environments) to approve each release by hand.
+    environment:
+      name: stable
+      url: https://github.com/${{ github.repository }}/releases/tag/v${{ needs.gate.outputs.version }}
+    permissions:
+      contents: write # tag and release
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-macos
+        with:
+          dmg: "true"
+
+      - name: Build Rat.app
+        run: scripts/build-release.sh "$RUNNER_TEMP/out" "${{ github.run_number }}"
+
+      - name: Pack DMG
+        run: scripts/make-dmg.sh "$RUNNER_TEMP/out/Rat.app" "$RUNNER_TEMP/out/Rat-v$VERSION-arm64.dmg"
+
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          sha="$(cut -d' ' -f1 "$RUNNER_TEMP"/out/*.dmg.sha256)"
+          {
+            # The version's CHANGELOG.md section when prepared by hand, else the fragments on this branch.
+            python3 -I scripts/changelog.py section "$VERSION" 2>/dev/null || python3 -I scripts/changelog.py render --version "$VERSION"
+            echo
+            echo "Ad-hoc signed, Apple Silicon, macOS 14+. First launch: right-click Rat › Open. Update the helper afterwards if Settings › Security asks for it."
+            echo
+            echo "SHA-256 of \`Rat-v$VERSION-arm64.dmg\`: \`$sha\`"
+          } | sed '1{/^## /d;}' > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" "$RUNNER_TEMP"/out/*.dmg "$RUNNER_TEMP"/out/*.dmg.sha256 \
+            --target "$GITHUB_SHA" --latest --title "Rat v$VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+
+  # The notes go into CHANGELOG.md on main and Version moves to the next minor, as a PR: main is protected.
+  changelog-pr:
+    needs: [gate, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the branch
+      pull-requests: write # open the PR (needs "Allow GitHub Actions to create pull requests" in Settings › Actions)
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Compile CHANGELOG.md and bump Version
+        id: bump
+        run: |
+          set -euo pipefail
+          git fetch origin release
+          if ! python3 -I scripts/changelog.py section "$VERSION" >/dev/null 2>&1; then
+            python3 -I scripts/changelog.py release "$VERSION" --from-ref origin/release
+          fi
+          next="$(scripts/version.sh next-minor)"
+          current="$(scripts/version.sh get)"
+          if [ "$(printf '%s\n%s\n' "$current" "$next" | sort -V | tail -n1)" != "$current" ]; then scripts/version.sh set "$next"; fi
+          echo "next=$(scripts/version.sh get)" >> "$GITHUB_OUTPUT"
+
+      - name: Open the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.bump.outputs.next }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then echo "::notice::main already has the v$VERSION notes and Version $NEXT."; exit 0; fi
+          branch="chore/release-v$VERSION-changelog"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add -A CHANGELOG.md changelog.d Version project.yml
+          git commit -m "chore: CHANGELOG for v$VERSION, Version $NEXT"
+          git push --force origin "$branch"
+          body="Compiles the released changelog.d fragments into CHANGELOG.md under v$VERSION and moves Version to $NEXT for the next development cycle. Opened by the release workflow, which cannot push to main."
+          if ! gh pr create --base main --head "$branch" --title "chore: CHANGELOG for v$VERSION, Version $NEXT" \
+                 --label skip-changelog --label ci --body "$body"; then
+            echo "::warning::Could not open the PR (allow Actions to create PRs in Settings › Actions › General). Open it by hand: https://github.com/$GITHUB_REPOSITORY/compare/main...$branch"
+          fi

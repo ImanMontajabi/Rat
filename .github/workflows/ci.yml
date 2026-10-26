@@ -1,0 +1,107 @@
+name: CI
+
+# Every pull request: the changelog fragment and Version checks, the package and app unit tests, and a Release
+# build packed into a DMG (downloadable from the run for testing). Runs for every base branch so stacked PRs are
+# checked too. RatUITests need a logged-in GUI session and run locally (scripts/test-ui.sh).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+
+permissions:
+  contents: read
+
+# Label and title edits get their own group: they re-run only the changelog check and must not cancel a build.
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}-${{ contains(fromJSON('["labeled", "unlabeled", "edited"]'), github.event.action) && 'meta' || 'code' }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    name: Changelog and version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Version file matches project.yml
+        run: scripts/version.sh check
+
+      - name: Changelog fragment
+        env:
+          SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+          BASE: origin/${{ github.base_ref }}
+        run: |
+          if [ "$SKIP" = true ]; then
+            python3 -I scripts/changelog.py check
+            echo "::notice::skip-changelog label: no fragment required."
+          else
+            python3 -I scripts/changelog.py check --base "$BASE"
+          fi
+
+      - name: Notes preview
+        run: python3 -I scripts/changelog.py render >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    name: Build and test
+    # Label changes only re-run the changelog check.
+    if: ${{ !contains(fromJSON('["labeled", "unlabeled", "edited"]'), github.event.action) }}
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-macos
+
+      - name: Package tests (RatFilter)
+        working-directory: RatFilter
+        env:
+          RAT_GEOIP_DB: ${{ github.workspace }}/App/Vendor/dbip-city-lite.mmdb
+          RAT_GEOIP_ASN_DB: ${{ github.workspace }}/App/Vendor/dbip-asn-lite.mmdb
+        run: swift test 2>&1 | tail -n 40; exit "${PIPESTATUS[0]}"
+        shell: bash
+
+      - name: App tests (RatTests)
+        env:
+          TEST_RUNNER_RAT_SKIP_GOLDENS: "1" # snapshot goldens are compared locally (rendered at another scale here)
+        run: |
+          set -o pipefail
+          xcodegen generate --quiet
+          xcodebuild -project Rat.xcodeproj -scheme Rat -destination 'platform=macOS,arch=arm64' \
+            -resultBundlePath "$RUNNER_TEMP/RatTests.xcresult" test 2>&1 | grep -E '(Test Suite|Test Case.*(passed|failed)|error:|Executed|\*\* TEST)' | tail -n 200
+        shell: bash
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: RatTests.xcresult
+          path: ${{ runner.temp }}/RatTests.xcresult
+          if-no-files-found: ignore
+
+  package:
+    name: Release build and DMG
+    if: ${{ !contains(fromJSON('["labeled", "unlabeled", "edited"]'), github.event.action) }}
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-macos
+        with:
+          dmg: "true"
+
+      - name: Build Rat.app
+        run: scripts/build-release.sh "$RUNNER_TEMP/out" "${{ github.run_number }}"
+
+      - name: Pack DMG
+        run: scripts/make-dmg.sh "$RUNNER_TEMP/out/Rat.app" "$RUNNER_TEMP/out/Rat-pr${{ github.event.pull_request.number }}-arm64.dmg"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Rat-pr${{ github.event.pull_request.number }}-arm64
+          path: |
+            ${{ runner.temp }}/out/*.dmg
+            ${{ runner.temp }}/out/*.dmg.sha256
+          retention-days: 7

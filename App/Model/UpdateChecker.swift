@@ -21,7 +21,7 @@ enum UpdateChecker {
     /// Silent check at launch when automatic checks are on and the last one is over a day old.
     @MainActor static func checkIfDue() async {
         let settings = AppSettings.shared
-        guard settings.autoCheckUpdates else { return }
+        guard settings.autoCheckUpdates, !Preferences.isDemo, !Preferences.isTesting else { return }
         if let last = settings.lastUpdateCheck, Date().timeIntervalSince(last) < 86_400 { return }
         if let release = await latest(includePreReleases: settings.showPreReleases),
            isNewer(release.tag, than: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") {

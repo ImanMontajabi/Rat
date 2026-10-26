@@ -9,10 +9,20 @@ enum Preferences {
         || ProcessInfo.processInfo.environment["XCTestSessionIdentifier"] != nil
         || NSClassFromString("XCTestCase") != nil
 
+    /// Demo mode (Debug builds launched with `RAT_DEMO_MAP`, as screenshots and the UI tests do): fixed data, and
+    /// nothing real is read or written: not the data folder, the preferences, the helper or the update check.
+    static let isDemo: Bool = {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["RAT_DEMO_MAP"] != nil
+        #else
+        return false
+        #endif
+    }()
+
     static let store: UserDefaults = {
-        guard isTesting else { return UserDefaults.standard }
-        let name = "com.imanmontajabi.Rat.tests"
-        UserDefaults.standard.removePersistentDomain(forName: name)   // every test run starts from defaults
+        guard isTesting || isDemo else { return UserDefaults.standard }
+        let name = isDemo ? "com.imanmontajabi.Rat.demo" : "com.imanmontajabi.Rat.tests"
+        UserDefaults.standard.removePersistentDomain(forName: name)   // every run starts from defaults
         return UserDefaults(suiteName: name) ?? UserDefaults.standard
     }()
 }
