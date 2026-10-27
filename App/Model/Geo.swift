@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import RatGeo
+import RatFilterCore
 import os
 
 private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "geo")
@@ -198,9 +199,4 @@ func registrableDomain(_ host: String) -> String {
     return parts.suffix(2).joined(separator: ".")
 }
 
-func isLocalAddress(_ a: String) -> Bool {
-    LocalRanges.shared.contains(a) || a.hasPrefix("127.") || a.hasPrefix("10.") || a.hasPrefix("192.168.") || a.hasPrefix("169.254.") || a == "::1" ||
-    a.hasPrefix("fe80:") || a.hasPrefix("fc") || a.hasPrefix("fd") || (a.hasPrefix("172.") && (Int(a.split(separator: ".")[1]) ?? 0).clamped(16...31))
-}
-
-private extension Int { func clamped(_ r: ClosedRange<Int>) -> Bool { r.contains(self) } }
+func isLocalAddress(_ a: String) -> Bool { LocalNetwork.contains(a) }

@@ -286,6 +286,8 @@ final class Ledger: ObservableObject {
 
     func shutdown() {
         rules.purgeSessionRules()
+        // Rules for this session end with it: the daemon stops following them too.
+        enforcer.syncRules(daemonRules)
         save()
     }
 
@@ -554,12 +556,45 @@ final class Ledger: ObservableObject {
     func refreshEnforcement() {
         enforcer.syncApps(deniedAppPaths)
         enforcer.syncPorts(deniedPorts, loopback: deniedLoopbackPorts)
+        enforcer.syncRules(daemonRules)
         enforcer.refreshStatus()
     }
 
     /// What the helper is doing for one app: its processes and blocked ports, or nil if the helper sees none.
     func enforcement(for appID: String) -> EnforcerStatus.App? {
-        enforcer.status?.deniedApps[table[appID]?.identity.ruleKey ?? appID]
+        let key = table[appID]?.identity.ruleKey ?? appID
+        return enforcer.status?.deniedApps[key] ?? enforcer.status?.ruleDenied?[key]
+    }
+
+    /// Names of the servers of apps a deny rule names, as Rat judged them, kept after their connection closed (the
+    /// next connection to the same server is judged by its name at once), newest last, at most `daemonNamesLimit`.
+    private var daemonNames: [String: String] = [:]
+    private var daemonNameOrder: [String] = []
+    static let daemonNamesLimit = 2048
+
+    /// What the daemon needs to judge sockets by the rules itself (`DaemonRules`): the active rules, and for the apps
+    /// a deny rule names (or one of whose processes it names), the names Rat judged their servers by and their code
+    /// signatures. Empty while no deny rule names a process, so the file changes only when it matters.
+    var daemonRules: DaemonRules {
+        let active = rules.engine.activeRules
+        let denied = active.compactMap { $0.verdict == .deny ? $0.processPath : nil }
+        guard !denied.isEmpty else { daemonNames.removeAll(); daemonNameOrder.removeAll(); return DaemonRules() }
+        func inside(_ p: String, _ prefix: String) -> Bool { p == prefix || p.hasPrefix(prefix + "/") }
+        var signatures: [String: DaemonRules.Signature] = [:]
+        for e in table.values {
+            let key = e.identity.ruleKey
+            guard denied.contains(where: { p in inside(key, p) || inside(p, key) || e.processes.values.contains { inside($0.path, p) } }) else { continue }
+            if let s = signingCache[e.identity.id] { signatures[key] = DaemonRules.Signature(signingID: s.identifier, teamID: s.team) }
+            for r in e.remotes where r.verdict != nil && r.via == nil && !r.address.isEmpty {
+                let name = r.host == r.address || isIPLiteral(r.host) ? "" : r.host
+                if daemonNames.updateValue(name, forKey: r.address) == nil { daemonNameOrder.append(r.address) }
+            }
+        }
+        if daemonNameOrder.count > Self.daemonNamesLimit {
+            for a in daemonNameOrder.prefix(daemonNameOrder.count - Self.daemonNamesLimit) { daemonNames[a] = nil }
+            daemonNameOrder.removeFirst(daemonNameOrder.count - Self.daemonNamesLimit)
+        }
+        return DaemonRules(rules: active, names: daemonNames, signatures: signatures, localRanges: AppSettings.shared.additionalLocalRanges)
     }
 
     /// Apps denied outright. The root daemon blocks every socket of their processes (helpers included), by local

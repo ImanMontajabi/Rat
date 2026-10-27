@@ -5,6 +5,22 @@
 SUP="${RAT_SUPPORT:-$(eval echo ~${SUDO_USER:-$USER})/Library/Application Support/com.imanmontajabi.Rat}"
 echo "== denied-apps.txt (written by Rat when an app is denied)"
 if [ -s "$SUP/denied-apps.txt" ]; then sed 's/^/  /' "$SUP/denied-apps.txt"; else echo "  (empty: no app is denied)"; fi
+echo "== deny-rules.json (rules for one process or connection, followed by rat-enforcerd itself)"
+if [ -s "$SUP/deny-rules.json" ]; then
+  /usr/bin/python3 -I - "$SUP/deny-rules.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+denies = [r for r in d.get("rules", []) if r.get("verdict") == "deny" and r.get("processPath") and r.get("enabled", True)]
+for r in denies:
+    who = r["processPath"].rsplit("/", 1)[-1] + (" > " + r["executable"].rsplit("/", 1)[-1] if r.get("executable") else "")
+    what = r.get("remoteAddress") or r.get("remoteHost") or r.get("remoteDomain") or "any server"
+    if r.get("ports"): what += f":{r['ports'][0]}" + (f"-{r['ports'][1]}" if r['ports'][1] != r['ports'][0] else "")
+    if r.get("proto"): what += f" ({r['proto'].upper()})"
+    print(f"  deny {who} -> {what}  [{r.get('listLevel') or 'rule'}]")
+if not denies: print("  (no deny rule names a process)")
+print(f"  {len(d.get('rules', []))} active rules, {len(d.get('names', {}))} server names")
+PY
+else echo "  (none)"; fi
 echo "== rat-enforcerd status"
 ST=/var/run/com.imanmontajabi.rat.enforcer.json
 if [ -r "$ST" ]; then
@@ -18,6 +34,10 @@ for app, a in sorted(s["deniedApps"].items()):
     print(f"  {a['processes']:3} processes, {a['ports']:3} open connections cut   {app}")
 if not s["deniedApps"]:
     print("  no process of a denied app is running")
+if s.get("denyRules") is not None:
+    print(f"  deny rules followed by the daemon: {s['denyRules']}")
+    for app, a in sorted((s.get("ruleDenied") or {}).items()):
+        print(f"  {a['processes']:3} processes, {a['ports']:3} sockets cut by rules   {app}")
 if s.get("proxyCapture") is not None:
     print(f"  proxy unmasking on lo0: {'on' if s['proxyCapture'] else 'OFF (no BPF device)'}   loopback connections cut: {s.get('blockedLoopbackPorts', 0)}")
 PY
