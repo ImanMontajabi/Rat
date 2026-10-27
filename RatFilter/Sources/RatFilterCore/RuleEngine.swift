@@ -37,15 +37,46 @@ public final class RuleEngine: @unchecked Sendable {
     /// The winning rule, if any. Specificity first, then deny over allow, then newest.
     public func matchingRule(_ c: Connection) -> Rule? {
         let snapshot = lock.withLock { set }
-        return active(snapshot).filter { $0.matches(c) }.max { a, b in
-            if a.specificity != b.specificity { return a.specificity < b.specificity }
-            if (a.verdict == .deny) != (b.verdict == .deny) { return a.verdict != .deny }
-            return a.createdAt < b.createdAt
-        }
+        return active(snapshot).filter { $0.matches(c) }.max(by: Self.weaker)
     }
 
     public func evaluate(_ c: Connection) -> Verdict {
         matchingRule(c)?.verdict ?? lock.withLock { set.silentVerdict ?? .ask }
+    }
+
+    /// What the rules decide for a connection, and the rule that decided (nil: Silent Mode or Ask).
+    public struct Decision: Equatable, Sendable {
+        public var verdict: Verdict
+        public var rule: Rule?
+        public init(verdict: Verdict, rule: Rule?) { self.verdict = verdict; self.rule = rule }
+    }
+
+    /// The process list's ✗/✓ decide first, the narrowest level first: one connection's, then one process's, then
+    /// the app's. They win over the app's other rules (alerts made many narrow ones, one domain or address at a
+    /// time), but a ✓ does not lift a deny rule for any process. Without a ✗/✓ the most specific rule decides
+    /// (`matchingRule`), or Silent Mode.
+    public func decide(_ c: Connection) -> Decision {
+        let snapshot = lock.withLock { set }
+        let matching = active(snapshot).filter { $0.matches(c) }
+        let listed = matching.filter { $0.effectiveListLevel != nil }.max { a, b in
+            if a.effectiveListLevel! != b.effectiveListLevel! { return a.effectiveListLevel! < b.effectiveListLevel! }
+            return Self.weaker(a, b)
+        }
+        if let l = listed {
+            if l.verdict == .allow, let any = matching.filter(\.isForAnyProcess).max(by: Self.weaker), any.verdict == .deny {
+                return Decision(verdict: .deny, rule: any)
+            }
+            return Decision(verdict: l.verdict, rule: l)
+        }
+        let m = matching.max(by: Self.weaker)
+        return Decision(verdict: m?.verdict ?? snapshot.silentVerdict ?? .ask, rule: m)
+    }
+
+    /// Ordering of matching rules: specificity first, then deny over allow, then newest.
+    static func weaker(_ a: Rule, _ b: Rule) -> Bool {
+        if a.specificity != b.specificity { return a.specificity < b.specificity }
+        if (a.verdict == .deny) != (b.verdict == .deny) { return a.verdict != .deny }
+        return a.createdAt < b.createdAt
     }
 
     /// Merge imported rules. Imported rules arrive unapproved and disabled when requested; ids already present are skipped.

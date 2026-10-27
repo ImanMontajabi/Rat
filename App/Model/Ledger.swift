@@ -202,9 +202,9 @@ final class Ledger: ObservableObject {
             refreshEnforcement()
         }
         center.isStillPending = { [unowned self] a in
-            let c = Connection(process: ProcessIdentity(path: a.appID), host: a.host == a.address ? nil : a.host, address: a.address, port: a.port,
-                               proto: a.proto == "UDP" ? .udp : .tcp)
-            return rules.engine.evaluate(c) == .ask
+            let c = Connection(process: ProcessIdentity(path: a.appID), executable: a.executable, host: a.host == a.address ? nil : a.host,
+                               address: a.address, port: a.port, proto: a.proto == "UDP" ? .udp : .tcp)
+            return rules.engine.decide(c).verdict == .ask
         }
         return center
     }()
@@ -406,25 +406,27 @@ final class Ledger: ObservableObject {
             var remotes: [RemoteHost] = []
             var seen = Set<String>()
             var indexByKey: [String: Int] = [:]
+            var deniedKeys = Set<String>()
             let sig = e.remotes.isEmpty && perApp[id] == nil && proxiedByApp[id] == nil ? (nil as String?, nil as String?) : signing(for: e.identity)
             /// The verdict for one remote, counted and (for `.ask`) reported as an alert.
             /// `host` is the name shown (the address itself when there is none); a name that is an IP literal is no name.
-            func judge(host: String, address: String, port: Int, proto: Connection.Proto, route: RouteTag? = nil) -> Verdict {
-                let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), host: host == address || isIPLiteral(host) ? nil : host,
-                                      address: address, port: port, proto: proto)
-                let matched = rules.engine.matchingRule(conn)
-                // Matches what is enforced: an app denied from the process list is denied for every server, and one
-                // allowed there is allowed past its own narrower deny rules (none of its sockets is blocked).
-                let verdict: Verdict = wholeAppDenied.contains(e.identity.ruleKey) ? .deny
-                    : rules.allowOverrides(matched, appID: e.identity.ruleKey) ? .allow : (matched?.verdict ?? rules.engine.defaultVerdict)
-                if matched == nil, verdict != .ask, warmedUp { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
+            /// `executable` is the process that holds the socket, for rules about one of the app's processes.
+            func judge(host: String, address: String, port: Int, proto: Connection.Proto, executable: String, route: RouteTag? = nil) -> Verdict {
+                let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), executable: executable,
+                                      host: host == address || isIPLiteral(host) ? nil : host, address: address, port: port, proto: proto)
+                // The process list's ✗/✓ decide first, narrowest first (`RuleEngine.decide`). Matches what is
+                // enforced: an app the helper blocks as a whole (`deniedAppPaths`) is denied for every server.
+                let decision = rules.engine.decide(conn)
+                let verdict: Verdict = decision.rule?.effectiveListLevel == nil && wholeAppDenied.contains(e.identity.ruleKey) ? .deny : decision.verdict
+                if decision.rule == nil, verdict != .ask, warmedUp { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
                 switch verdict {
                 case .deny: denyCount += 1
                 case .ask:
                     askCount += 1
                     if warmedUp {
                         alerts.report(ConnectionAlert(appID: e.identity.ruleKey, appName: e.identity.name, host: host, address: address, port: port, proto: proto.rawValue.uppercased(),
-                                                      network: address.isEmpty || isLocalAddress(address) ? nil : geo.network(address)?.label, route: route?.label))
+                                                      network: address.isEmpty || isLocalAddress(address) ? nil : geo.network(address)?.label, route: route?.label,
+                                                      executable: executable))
                     }
                 case .allow: break
                 }
@@ -436,6 +438,8 @@ final class Ledger: ObservableObject {
                 // Several sockets to the same server and port are one row; their bytes add up.
                 if let i = indexByKey[key] {
                     remotes[i].bytesIn += bytes?.0 ?? 0; remotes[i].bytesOut += bytes?.1 ?? 0
+                    // Each of them has its own local port, and all are cut.
+                    if deniedKeys.contains(key), c.localPort != 0 { portsNow.insert(c.localPort) }
                     continue
                 }
                 guard seen.insert(key).inserted else { continue }
@@ -453,9 +457,10 @@ final class Ledger: ObservableObject {
                 // A connection whose name is still being looked up is judged on a later pass (at most
                 // `HostNames.grace` later), so a rule for its domain matches and an alert names it.
                 guard named else { continue }
-                let verdict = judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp, route: remotes.last?.route)
+                let verdict = judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
+                                    executable: c.processPath, route: remotes.last?.route)
                 remotes[remotes.count - 1].verdict = verdict
-                if verdict == .deny, c.localPort != 0 { portsNow.insert(c.localPort) }
+                if verdict == .deny { deniedKeys.insert(key); if c.localPort != 0 { portsNow.insert(c.localPort) } }
             }
             for r in proxiedByApp[id] ?? [] {
                 // A rule that denies the real destination cuts the client's loopback connection to the proxy.
@@ -473,7 +478,7 @@ final class Ledger: ObservableObject {
                                               network: address.flatMap { isLocalAddress($0) ? nil : geo.network($0)?.label },
                                               bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0))
                 }
-                let verdict = judge(host: r.host, address: address ?? "", port: r.port, proto: .tcp)
+                let verdict = judge(host: r.host, address: address ?? "", port: r.port, proto: .tcp, executable: r.path)
                 if fresh { remotes[remotes.count - 1].verdict = verdict }
                 if verdict == .deny, r.live { loopbackNow.insert(r.clientPort) }
             }
@@ -531,6 +536,20 @@ final class Ledger: ObservableObject {
         refreshEnforcement()
     }
 
+    /// ✗/✓ for one process of an app (`executable`: its path). Enforced from the next pass, by the ports of its sockets.
+    func setProcessPolicy(_ p: Policy?, app appID: String, executable: String) {
+        rules.setProcessPolicy(p, app: table[appID]?.identity.ruleKey ?? appID, executable: executable)
+        alerts.revalidate()
+        refreshEnforcement()
+    }
+
+    /// ✗/✓ for one connection of one process. Enforced from the next pass, by the ports of the sockets it matches.
+    func setConnectionPolicy(_ p: Policy?, app appID: String, executable: String, _ endpoint: RulesModel.Endpoint) {
+        rules.setConnectionPolicy(p, app: table[appID]?.identity.ruleKey ?? appID, executable: executable, endpoint)
+        alerts.revalidate()
+        refreshEnforcement()
+    }
+
     /// Hands the helper what to block. Only ports of denied sockets are ever blocked, never server addresses.
     func refreshEnforcement() {
         enforcer.syncApps(deniedAppPaths)
@@ -555,7 +574,8 @@ final class Ledger: ObservableObject {
             // The red X in the process list denies the whole app, whatever narrower allow rules it has
             // (alerts in 1.0.0 created many: one domain, one address). Otherwise the list shows Deny and nothing
             // is blocked.
-            if rules.policy(for: key) == .deny { out.insert(key); continue }
+            // A ✓ on one of its processes or connections is an exception: then only the sockets the rules deny are cut.
+            if rules.policy(for: key) == .deny { if !rules.hasNarrowerAllow(app: key) { out.insert(key) }; continue }
             let mine = rules.rules(for: key).filter { $0.enabled && ($0.profileID == nil || $0.profileID == active) }
             if mine.contains(where: { $0.verdict == .allow }) { continue }
             let probe = Connection(process: ProcessIdentity(path: key), address: "203.0.113.9", port: 443, proto: .tcp)
