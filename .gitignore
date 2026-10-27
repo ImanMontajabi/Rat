@@ -10,3 +10,4 @@ Rat.xcodeproj/
 # DB-IP database is downloaded by scripts/fetch-geoip.sh (125 MB); it is bundled into the app at build time
 App/Vendor/*.mmdb
 App/Vendor/*.gz
+__pycache__/
