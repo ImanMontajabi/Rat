@@ -130,30 +130,73 @@ final class RulesModel: ObservableObject {
 
     // MARK: per-app policy (the allow/deny buttons in the process list)
 
-    private func isWholeAppRule(_ r: Rule, _ appID: String) -> Bool {
-        r.processPath == appID && r.remoteDomain == nil && r.remoteHost == nil && r.remoteAddress == nil && r.ports == nil
-            && r.proto == nil && r.signingID == nil && r.teamID == nil
+    // The ✗/✓ of a row: one rule per row in the active profile, replaced when the button changes. Which of them
+    // decides is `RuleEngine.decide`: the narrowest level first, over the app's rules from alerts.
+
+    private func activeHere(_ r: Rule) -> Bool { r.profileID == nil || r.profileID == ruleSet.activeProfileID }
+
+    private func policy(where match: (Rule) -> Bool) -> Policy? {
+        ruleSet.rules.first { match($0) && $0.enabled && activeHere($0) }.map { $0.verdict == .deny ? .deny : .allow }
     }
 
-    func policy(for appID: String) -> Policy? {
-        let rule = ruleSet.rules.first {
-            isWholeAppRule($0, appID) && $0.enabled && ($0.profileID == nil || $0.profileID == ruleSet.activeProfileID)
-        }
-        return rule.map { $0.verdict == .deny ? .deny : .allow }
+    private func setPolicy(_ p: Policy?, where match: (Rule) -> Bool, make: (Verdict) -> Rule) {
+        ruleSet.rules.removeAll { match($0) && activeHere($0) }
+        guard let p else { return }
+        var r = make(p == .allow ? .allow : .deny)
+        r.approved = !ruleSet.markNewRulesAsUnapproved
+        r.profileID = ruleSet.activeProfileID
+        r.note = "From the process list"
+        ruleSet.rules.append(r)
     }
+
+    private func isWholeAppRule(_ r: Rule, _ appID: String) -> Bool { r.processPath == appID && r.isWholeApp }
+
+    func policy(for appID: String) -> Policy? { policy { isWholeAppRule($0, appID) } }
 
     func setPolicy(_ p: Policy?, for appID: String) {
-        ruleSet.rules.removeAll { isWholeAppRule($0, appID) && ($0.profileID == nil || $0.profileID == ruleSet.activeProfileID) }
-        guard let p else { return }
-        ruleSet.rules.append(Rule(verdict: p == .allow ? .allow : .deny, processPath: appID, approved: !ruleSet.markNewRulesAsUnapproved,
-                                  profileID: ruleSet.activeProfileID, note: "From the process list"))
+        setPolicy(p, where: { isWholeAppRule($0, appID) }) { Rule(verdict: $0, processPath: appID, listLevel: .app) }
     }
 
-    /// The process list's ✓ allows the whole app, whatever narrower Deny rules it has (alerts may have made some,
-    /// one domain or address at a time), as its ✗ wins over narrower Allow rules. Rules for any process stay in force.
-    func allowOverrides(_ matched: Rule?, appID: String) -> Bool {
-        guard let m = matched, m.verdict == .deny, m.processPath != nil || m.signingID != nil || m.teamID != nil else { return false }
-        return policy(for: appID) == .allow
+    /// One process of an app (`executable`: the path of a helper, an updater, or the system service working for it).
+    private func isProcessRule(_ r: Rule, _ appID: String, _ executable: String) -> Bool {
+        r.listLevel == .process && r.processPath == appID && r.executable == executable
+    }
+
+    func processPolicy(app appID: String, executable: String) -> Policy? { policy { isProcessRule($0, appID, executable) } }
+
+    func setProcessPolicy(_ p: Policy?, app appID: String, executable: String) {
+        setPolicy(p, where: { isProcessRule($0, appID, executable) }) { Rule(verdict: $0, processPath: appID, executable: executable, listLevel: .process) }
+    }
+
+    /// One connection of one process: the server by name when it has one (else its address), its port and protocol.
+    struct Endpoint: Hashable {
+        var host: String?
+        var address: String
+        var port: Int
+        var proto: Connection.Proto
+        /// The name a rule keeps: none for a raw address, or for a name that is an address.
+        var name: String? { host.flatMap { $0 == address || isIPLiteral($0) ? nil : $0 } }
+    }
+
+    private func isConnectionRule(_ r: Rule, _ appID: String, _ executable: String, _ e: Endpoint) -> Bool {
+        r.listLevel == .connection && r.processPath == appID && r.executable == executable && r.ports == e.port...e.port && r.proto == e.proto
+            && (e.name.map { r.remoteHost == $0 && r.remoteAddress == nil } ?? (r.remoteAddress == e.address && r.remoteHost == nil))
+    }
+
+    func connectionPolicy(app appID: String, executable: String, _ e: Endpoint) -> Policy? { policy { isConnectionRule($0, appID, executable, e) } }
+
+    func setConnectionPolicy(_ p: Policy?, app appID: String, executable: String, _ e: Endpoint) {
+        setPolicy(p, where: { isConnectionRule($0, appID, executable, e) }) {
+            Rule(verdict: $0, processPath: appID, executable: executable, listLevel: .connection,
+                 remoteHost: e.name, remoteAddress: e.name == nil ? e.address : nil, ports: e.port...e.port, proto: e.proto)
+        }
+    }
+
+    /// Whether a ✓ on one of the app's processes or connections makes an exception to the app's ✗: then the app is
+    /// not blocked as a whole, only the sockets the rules deny.
+    func hasNarrowerAllow(app appID: String) -> Bool {
+        ruleSet.rules.contains { $0.processPath == appID && $0.enabled && activeHere($0) && $0.verdict == .allow
+            && ($0.listLevel == .process || $0.listLevel == .connection) }
     }
 
     func rules(for appID: String) -> [Rule] {

@@ -17,6 +17,8 @@ struct ConnectionAlert: Identifiable, Equatable {
     var network: String? = nil
     /// "via VPN (…)" or "via System … Proxy (…)" when the connection takes that path.
     var route: String? = nil
+    /// The process that opened the connection (a helper of the app), so a ✗/✓ on that process answers the alert.
+    var executable: String? = nil
     var key: String { "\(appID)|\(registrableDomain(host))" }
 }
 
