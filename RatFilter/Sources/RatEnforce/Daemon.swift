@@ -7,6 +7,12 @@ import RatMonitor
 public typealias CommandRunner = (_ executable: String, _ arguments: [String], _ stdin: String?) -> Int32
 
 public func runCommand(_ executable: String, _ arguments: [String], _ stdin: String?) -> Int32 {
+    // The daemon's threads have no pool that is drained: without this one each call's pipe stays open (see
+    // `captureCommand`).
+    autoreleasepool { runCommandOnce(executable, arguments, stdin) }
+}
+
+private func runCommandOnce(_ executable: String, _ arguments: [String], _ stdin: String?) -> Int32 {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: executable)
     p.arguments = arguments
@@ -27,6 +33,13 @@ public func runCommand(_ executable: String, _ arguments: [String], _ stdin: Str
 public typealias CommandCapture = (_ executable: String, _ arguments: [String]) -> String
 
 public func captureCommand(_ executable: String, _ arguments: [String]) -> String {
+    // Foundation autoreleases the pipe's file handle. The daemon's loop runs on a thread whose pool is never drained,
+    // so without a pool here every call kept one descriptor open: after a few hundred `pfctl` runs the daemon hit
+    // launchd's limit of 256, could not start pfctl any more and stopped enforcing.
+    autoreleasepool { captureCommandOnce(executable, arguments) }
+}
+
+private func captureCommandOnce(_ executable: String, _ arguments: [String]) -> String {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: executable)
     p.arguments = arguments
@@ -227,7 +240,7 @@ public final class EnforcerDaemon {
 
     public func loop() {
         while true {
-            let busy = tick()
+            let busy = autoreleasepool { tick() }
             if trace, busy { traceTicks += 1; traceTime += lastTickDuration; if traceTicks == 400 { FileHandle.standardError.write(Data("avg tick \(Int(traceTime / 400 * 1e6)) us, reloads \(reloads)\n".utf8)); traceTicks = 0; traceTime = 0 } }
             Thread.sleep(forTimeInterval: busy ? settings.interval : settings.idleInterval)
         }
