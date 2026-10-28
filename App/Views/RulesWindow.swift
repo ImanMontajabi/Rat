@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import RatFilterCore
+import RatMonitor
 
 /// Rules manager. Layout follows Little Snitch's Rules window: a sidebar of rule sets (rules, profiles,
 /// rule groups, networks, maintenance) and a rules table with Active / Process / Description / Status columns.
@@ -12,12 +13,50 @@ struct RulesWindow: View {
     @State private var addingProfile = false
     @State private var newGroup = ""
     @State private var addingGroup = false
+    /// The row the inspector opened the window on, listed under Apps / Processes even before it has rules.
+    @State private var pinned: RulesModel.Target?
 
     enum Category: Hashable {
         case all, unapproved, invalid
         case profile(UUID)
         case group(UUID)
         case networks
+        /// An app, one of its processes or one connection (the Apps / Processes section).
+        case target(RulesModel.Target)
+    }
+
+    /// One app under Apps / Processes: the processes its rules name, and the pinned connection.
+    struct RuleApp: Identifiable {
+        var app: String
+        var name: String
+        var processes: [String]
+        var connection: RulesModel.Target?
+        var id: String { app }
+    }
+
+    /// The apps the rules name (a rule's `processPath`), each with the processes its rules name, by name.
+    static func ruleApps(_ rules: [Rule], pinned: RulesModel.Target?) -> [RuleApp] {
+        var exes: [String: Set<String>] = [:]
+        for r in rules { if let p = r.processPath { exes[p, default: []].formUnion(r.executable.map { [$0] } ?? []) } }
+        if let t = pinned { exes[t.app, default: []].formUnion(t.executable.map { [$0] } ?? []) }
+        func base(_ path: String) -> String { (path as NSString).lastPathComponent }
+        return exes.map { app, set in
+            RuleApp(app: app, name: displayName(app),
+                    processes: set.sorted { base($0).localizedCaseInsensitiveCompare(base($1)) == .orderedAscending },
+                    connection: pinned?.app == app && pinned?.endpoint != nil ? pinned : nil)
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// An app's name in the Rules window: the bundle's name, or the program's for a path outside one.
+    static func displayName(_ path: String) -> String {
+        if path == "macOS" { return "macOS" }
+        if ProcessGrouping.bundleRoot(of: path) == path { return AppIdentity.resolve(processPath: path).name }
+        return (path as NSString).lastPathComponent
+    }
+
+    static func connectionName(_ t: RulesModel.Target) -> String {
+        guard let e = t.endpoint else { return "" }
+        return "\(e.name ?? e.address) : \(e.port) (\(e.proto.rawValue.uppercased()))"
     }
 
     var body: some View {
@@ -49,6 +88,26 @@ struct RulesWindow: View {
                         }
                     }
                     Button { addingProfile = true } label: { Label("New Profile…", systemImage: "plus") }.buttonStyle(.plain).foregroundStyle(.secondary)
+                }
+                Section("Apps / Processes") {
+                    ForEach(Self.ruleApps(rules.ruleSet.rules, pinned: pinned)) { e in
+                        Label(e.name, systemImage: e.app == "macOS" ? "gearshape.2" : "app")
+                            .badge(rules.rules(for: RulesModel.Target(app: e.app)).count)
+                            .tag(Category.target(RulesModel.Target(app: e.app)))
+                            .accessibilityIdentifier("rules-app-\(e.name)")
+                        ForEach(e.processes, id: \.self) { exe in
+                            let t = RulesModel.Target(app: e.app, executable: exe)
+                            Label((exe as NSString).lastPathComponent, systemImage: "gearshape").padding(.leading, 14)
+                                .badge(rules.rules(for: t).count)
+                                .tag(Category.target(t))
+                                .accessibilityIdentifier("rules-process-\((exe as NSString).lastPathComponent)")
+                            if let c = e.connection, c.executable == exe {
+                                Label(Self.connectionName(c), systemImage: "arrow.up.right").lineLimit(1).truncationMode(.middle).padding(.leading, 28)
+                                    .tag(Category.target(c))
+                                    .accessibilityIdentifier("rules-connection-\(c.endpoint?.name ?? c.endpoint?.address ?? "")")
+                            }
+                        }
+                    }
                 }
                 Section("Rule Groups") {
                     ForEach(rules.ruleSet.groups) { g in
@@ -86,6 +145,8 @@ struct RulesWindow: View {
         }
         .frame(minWidth: 940, minHeight: 540)
         .preferredColorScheme(.dark)
+        .onAppear(perform: takeFocus)
+        .onChange(of: rules.focus) { _, _ in takeFocus() }
         .alert("New Profile", isPresented: $addingProfile) {
             TextField("Enter a profile name", text: $newProfile)
             Button("Create Profile") { rules.addProfile(named: newProfile); newProfile = "" }
@@ -96,6 +157,14 @@ struct RulesWindow: View {
             Button("Create Group") { if !newGroup.isEmpty { rules.ruleSet.groups.append(RuleGroup(name: newGroup)) }; newGroup = "" }
             Button("Cancel", role: .cancel) { newGroup = "" }
         }
+    }
+
+    /// Opens on the row the inspector's Manage Rules… named.
+    private func takeFocus() {
+        guard let f = ledger.rules.focus else { return }
+        pinned = f
+        category = .target(f)
+        ledger.rules.focus = nil
     }
 }
 
@@ -116,7 +185,22 @@ struct RulesList: View {
         case .profile(let id): return rules.ruleSet.profiles.first { $0.id == id }?.name ?? "Profile"
         case .group(let id): return rules.ruleSet.groups.first { $0.id == id }?.name ?? "Rule Group"
         case .networks: return ""
+        case .target(let t):
+            switch t.level {
+            case .app: return RulesWindow.displayName(t.app)
+            case .process: return (t.executable! as NSString).lastPathComponent
+            case .connection: return RulesWindow.connectionName(t)
+            }
         }
+    }
+
+    private var target: RulesModel.Target? { if case .target(let t) = category { t } else { nil } }
+
+    /// The app's code signature when it is running, so rules by signing ID match its connections.
+    private var signing: (String?, String?) {
+        guard let t = target, let a = ledger.apps.first(where: { $0.identity.ruleKey == t.app }) else { return (nil, nil) }
+        let s = a.identity.signing()
+        return (s.identifier, s.team)
     }
 
     private var subtitle: String {
@@ -124,12 +208,19 @@ struct RulesList: View {
         case .invalid: return "Possibly ineffective: the applications they refer to were deleted, renamed or moved."
         case .profile: return "Rules that are not assigned to a profile are effective in all profiles."
         case .unapproved: return "Review these rules, then approve or reject them."
+        case .target(let t):
+            let app = RulesWindow.displayName(t.app)
+            switch t.level {
+            case .app: return "Rules naming \(app) or a program inside it, in the active profile."
+            case .process: return "Rules for this process of \(app), and \(app)’s rules for every process."
+            case .connection: return "Every rule that matches this connection of \((t.executable! as NSString).lastPathComponent) (\(app)), rules for any process too."
+            }
         default: return ""
         }
     }
 
     private var visible: [Rule] {
-        rules.ruleSet.rules.filter { r in
+        (target.map { rules.rules(for: $0, signing: signing) } ?? rules.ruleSet.rules).filter { r in
             switch category {
             case .all: return true
             case .unapproved: return !r.approved
@@ -137,6 +228,7 @@ struct RulesList: View {
             case .group(let id): return r.groupID == id
             case .invalid: return r.processPath.map { !FileManager.default.fileExists(atPath: $0) } ?? false
             case .networks: return false
+            case .target: return true
             }
         }
         .filter { search.isEmpty || $0.summary.localizedCaseInsensitiveContains(search) }
@@ -147,8 +239,8 @@ struct RulesList: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(title).font(.title2.weight(.semibold))
-                    Text("\(visible.count) \(visible.count == 1 ? "rule" : "rules")").foregroundStyle(.secondary)
+                    Text(title).font(.title2.weight(.semibold)).lineLimit(1).truncationMode(.middle).accessibilityIdentifier("rules-title")
+                    Text("\(visible.count) \(visible.count == 1 ? "rule" : "rules")").foregroundStyle(.secondary).accessibilityIdentifier("rules-count")
                     Spacer()
                     if case .profile(let id) = category, id != rules.ruleSet.activeProfileID {
                         Button("Activate") { rules.activate(id) }.accessibilityIdentifier("activate-profile")
@@ -215,7 +307,8 @@ struct RulesList: View {
         .searchable(text: $search, placement: .toolbar, prompt: "Search rules")
         .toolbar {
             ToolbarItemGroup {
-                Button { editing = Rule(verdict: .allow, profileID: rules.ruleSet.activeProfileID) } label: { Label("New Rule", systemImage: "plus") }
+                // Filled in from the app, process or connection the window shows.
+                Button { editing = rules.newRule(for: target) } label: { Label("New Rule", systemImage: "plus") }
                 Button(role: .destructive) { selection.forEach(rules.reject); selection = [] } label: { Label("Delete", systemImage: "trash") }.disabled(selection.isEmpty)
                 Button { importRules() } label: { Label("Import Rules…", systemImage: "square.and.arrow.down") }
                 Button { exportRules() } label: { Label("Export Rules…", systemImage: "square.and.arrow.up") }
@@ -225,7 +318,10 @@ struct RulesList: View {
     }
 
     private func processName(_ r: Rule) -> String {
-        if let p = r.processPath { return AppIdentity.resolve(processPath: p.hasSuffix(".app") ? p : p).name }
+        if let p = r.processPath {
+            let name = AppIdentity.resolve(processPath: p).name
+            return r.executable.map { name + " › " + ($0 as NSString).lastPathComponent } ?? name
+        }
         return r.signingID ?? r.teamID.map { "Team \($0)" } ?? "Any Process"
     }
 
@@ -300,6 +396,8 @@ struct RuleEditor: View {
 
     @State private var processScope: ProcessScope = .any
     @State private var processValue = ""
+    /// Only this process of the app (its executable path); empty = every process.
+    @State private var executableValue = ""
     @State private var remoteScope: RemoteScope = .any
     @State private var remoteValue = ""
     @State private var portText = ""
@@ -310,12 +408,15 @@ struct RuleEditor: View {
             Picker("Action", selection: $rule.verdict) { Text("Allow").tag(Verdict.allow); Text("Deny").tag(Verdict.deny) }.pickerStyle(.segmented)
             Section("Process") {
                 Picker("Match", selection: $processScope) { ForEach(ProcessScope.allCases) { Text($0.rawValue).tag($0) } }
-                if processScope != .any { TextField(processScope == .app ? "Path, e.g. /Applications/Safari.app" : "Value", text: $processValue) }
+                if processScope != .any {
+                    TextField(processScope == .app ? "Path, e.g. /Applications/Safari.app" : "Value", text: $processValue).accessibilityIdentifier("rule-process")
+                    TextField("Only this process (executable path, optional)", text: $executableValue).accessibilityIdentifier("rule-executable")
+                }
             }
             Section("Server") {
                 Picker("Match", selection: $remoteScope) { ForEach(RemoteScope.allCases) { Text($0.rawValue).tag($0) } }
-                if remoteScope != .any { TextField("Value", text: $remoteValue) }
-                TextField("Port or range (e.g. 443 or 8000-8100)", text: $portText)
+                if remoteScope != .any { TextField("Value", text: $remoteValue).accessibilityIdentifier("rule-server") }
+                TextField("Port or range (e.g. 443 or 8000-8100)", text: $portText).accessibilityIdentifier("rule-port")
                 Picker("Protocol", selection: $protocolChoice) { Text("Any").tag(0); Text("TCP").tag(1); Text("UDP").tag(2) }.pickerStyle(.segmented)
             }
             Section("Where it applies") {
@@ -351,8 +452,10 @@ struct RuleEditor: View {
 
     private var preview: Rule {
         var r = rule
-        r.processPath = nil; r.teamID = nil; r.signingID = nil
+        r.processPath = nil; r.teamID = nil; r.signingID = nil; r.executable = nil
         switch processScope { case .any: break; case .app: r.processPath = processValue; case .team: r.teamID = processValue; case .signing: r.signingID = processValue }
+        let exe = executableValue.trimmingCharacters(in: .whitespaces)
+        if processScope != .any, !exe.isEmpty { r.executable = exe }
         r.remoteDomain = nil; r.remoteHost = nil; r.remoteAddress = nil
         switch remoteScope { case .any: break; case .domain: r.remoteDomain = remoteValue; case .host: r.remoteHost = remoteValue; case .address: r.remoteAddress = remoteValue }
         r.ports = parsedPorts ?? nil
@@ -364,6 +467,7 @@ struct RuleEditor: View {
         if let p = rule.processPath { processScope = .app; processValue = p }
         else if let t = rule.teamID { processScope = .team; processValue = t }
         else if let s = rule.signingID { processScope = .signing; processValue = s }
+        if let e = rule.executable { executableValue = e }
         if let d = rule.remoteDomain { remoteScope = .domain; remoteValue = d }
         else if let h = rule.remoteHost { remoteScope = .host; remoteValue = h }
         else if let a = rule.remoteAddress { remoteScope = .address; remoteValue = a }

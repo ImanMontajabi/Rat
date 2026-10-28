@@ -277,6 +277,12 @@ struct ProcessRow: View {
     @State private var open = false
     @State private var openProcesses = Set<String>()
 
+    init(app: AppEntry, selection: Binding<MonitorSelection?>, filter: RouteFilter = .all, open: Bool = false, openProcesses: Set<String> = []) {
+        self.app = app; _selection = selection; self.filter = filter
+        // Snapshot tests start a row open.
+        _open = State(initialValue: open); _openProcesses = State(initialValue: openProcesses)
+    }
+
     private var selectedHere: Bool { selection?.appID == app.id }
 
     var body: some View {
@@ -340,6 +346,7 @@ struct ProcessRow: View {
             Spacer(minLength: 4)
             Text("\(node.remotes.count)").foregroundStyle(.secondary).monospacedDigit().help("Connections")
             if node.totalIn + node.totalOut > 0 { Text(formatBytes(node.totalIn + node.totalOut)).foregroundStyle(.secondary).monospacedDigit() }
+            rowPolicy(app.ruleTarget(process: node.name), service: node.name, subject: "this process")
         }
         .padding(.vertical, 3).padding(.leading, 30).padding(.trailing, 4)
         .background(selection == s ? Color.accentColor.opacity(0.85) : .clear, in: RoundedRectangle(cornerRadius: 6))
@@ -358,23 +365,46 @@ struct ProcessRow: View {
     private func remoteRow(_ r: RemoteHost, indent: CGFloat, process: String?) -> some View {
         let s = MonitorSelection(appID: app.id, process: process, remote: r.id)
         return HStack(spacing: 6) {
-            Text(r.host).lineLimit(1).truncationMode(.middle)
-            RouteBadges(remote: r, compact: true)
-            Spacer(minLength: 4)
-            Text("\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
-            if r.bytesIn + r.bytesOut > 0 {
-                Text(formatBytes(r.bytesIn + r.bytesOut)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
-                    .help("\(formatBytes(r.bytesIn)) received, \(formatBytes(r.bytesOut)) sent on the open connections")
+            HStack(spacing: 6) {
+                Text(r.host).lineLimit(1).truncationMode(.middle)
+                RouteBadges(remote: r, compact: true)
+                Spacer(minLength: 4)
+                Text("\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+                if r.bytesIn + r.bytesOut > 0 {
+                    Text(formatBytes(r.bytesIn + r.bytesOut)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+                        .help("\(formatBytes(r.bytesIn)) received, \(formatBytes(r.bytesOut)) sent on the open connections")
+                }
             }
+            // The row reads as one element (its label carries the tags); its ✗/✓ stay buttons of their own.
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { select(s) }
+            .accessibilityIdentifier("remote-row-\(r.host)")
+            HStack(spacing: 0) { rowPolicy(app.ruleTarget(process: process, remote: r), service: r.process ?? process, subject: "this connection") }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("remote-policy-\(r.host)")
         }
         .padding(.vertical, 2).padding(.leading, indent).padding(.trailing, 4)
         .background(selection == s ? Color.accentColor.opacity(0.7) : .clear, in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .onTapGesture { select(s) }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { select(s) }
-        .accessibilityIdentifier("remote-row-\(r.host)")
+    }
+
+    /// The ✗/✓ of a process or connection row: its own choice, or the one it follows from its process or app shown
+    /// muted. None for a row no rule can name (a local connection), and a lock for services that work for every app.
+    @ViewBuilder private func rowPolicy(_ target: RulesModel.Target?, service: String?, subject: String) -> some View {
+        if let target {
+            let p = ledger.rules.rowPolicy(target)
+            if p.own == nil, app.identity.isSystem, let service, SharedServices.note(for: service) != nil {
+                Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(.secondary).frame(width: 44)
+                    .help("\(service) works for every app: denying it would cut them all. Use a rule for one service in the Rules window.")
+                    .accessibilityIdentifier("policy-locked")
+            } else {
+                PolicyToggle(policy: p.own, inherited: p.inherited, compact: true, subject: subject) { ledger.setPolicy($0, for: target) }
+            }
+        } else {
+            Color.clear.frame(width: 44, height: 1)
+        }
     }
 }
 

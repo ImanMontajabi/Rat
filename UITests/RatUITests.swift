@@ -47,6 +47,11 @@ final class RatUITests: XCTestCase {
         XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: e)], timeout: timeout) == .completed
     }
 
+    /// Waits until a text shows `text` (as its label or its value, whichever the element reports).
+    private func waitText(_ e: XCUIElement, _ text: String, timeout: TimeInterval = 5) -> Bool {
+        XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "label == %@ OR value == %@", text, text), evaluatedWith: e)], timeout: timeout) == .completed
+    }
+
     private func isActive(_ profile: String) -> Bool { el("profile-\(profile)").descendants(matching: .any)["profile-active"].exists }
 
     /// Types into the search field. Right after a menu closes the click may not focus the field, so it retries
@@ -99,6 +104,98 @@ final class RatUITests: XCTestCase {
         el("app-row-Google Chrome").click()
         XCTAssertTrue(waitGone(el("inspector-title")), "clicking the selected app again shows the Summary")
         XCTAssertTrue(app.staticTexts["Summary"].exists)
+    }
+
+    // MARK: three levels: app, process, connection
+
+    /// A process row and a connection row have their own ✗/✓; without a choice of their own they show the wider
+    /// row's (Chrome is allowed as a whole in the demo data) as "inherited".
+    func testProcessAndConnectionRowsHaveTheirOwnToggles() {
+        expand("Google Chrome")
+        expand("Google Chrome Helper")
+        let helper = el("process-row-Google Chrome Helper")
+        XCTAssertTrue(helper.waitForExistence(timeout: 5))
+        let helperDeny = helper.buttons["policy-deny"], helperAllow = helper.buttons["policy-allow"]
+        XCTAssertEqual(helperAllow.value as? String, "inherited", "follows the app's ✓")
+        XCTAssertEqual(helperDeny.value as? String, "off")
+        let video = el("remote-policy-video.example.net")
+        XCTAssertTrue(video.waitForExistence(timeout: 5))
+        XCTAssertEqual(video.buttons["policy-allow"].value as? String, "inherited")
+
+        helperDeny.click()
+        XCTAssertTrue(waitValue(helperDeny, "on"), "the helper is denied on its own")
+        XCTAssertTrue(waitValue(video.buttons["policy-deny"], "inherited"), "its connection follows the helper now")
+        XCTAssertEqual(el("app-row-Google Chrome").buttons["policy-allow"].value as? String, "on", "the app keeps its ✓")
+        XCTAssertEqual(el("remote-policy-demo0.example.com").buttons["policy-allow"].value as? String, "inherited", "the main process's connections still follow the app")
+
+        video.buttons["policy-allow"].click()
+        XCTAssertTrue(waitValue(video.buttons["policy-allow"], "on"), "an exception for one connection")
+        XCTAssertEqual(el("remote-policy-cdn.example.net").buttons["policy-deny"].value as? String, "inherited", "the helper's other connection stays denied")
+        XCTAssertEqual(helperDeny.value as? String, "on")
+
+        helperDeny.click()
+        XCTAssertTrue(waitValue(helperDeny, "off"), "clicking the active choice clears it")
+        XCTAssertTrue(waitValue(helperAllow, "inherited"))
+    }
+
+    /// Services that work for every app have no one-click Deny of their own either.
+    func testSharedServicesAreLocked() {
+        expand("macOS")
+        let dns = el("process-row-mDNSResponder")
+        XCTAssertTrue(dns.waitForExistence(timeout: 5))
+        XCTAssertTrue(dns.descendants(matching: .any)["policy-locked"].exists, "mDNSResponder")
+        XCTAssertFalse(dns.buttons["policy-deny"].exists)
+        XCTAssertTrue(el("process-row-apsd").descendants(matching: .any)["policy-locked"].exists, "apsd")
+    }
+
+    /// The inspector lists the rules about the selected row and sets that row's ✗/✓.
+    func testInspectorShowsTheSelectedRowsRules() {
+        expand("Steam")
+        el("process-row-Steam Helper").click()
+        XCTAssertTrue(inspectorTitle().contains("Steam Helper"), inspectorTitle())
+        let rules = el("inspector-rules")
+        XCTAssertTrue(rules.waitForExistence(timeout: 5))
+        XCTAssertEqual(rules.value as? String, "1", "Steam's UDP rule covers its helper")
+        expand("Steam Helper")
+        el("remote-row-demo5.example.com").click()
+        XCTAssertTrue(inspectorTitle().contains("demo5.example.com"), inspectorTitle())
+        XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "the UDP 27015 rule matches this connection")
+        let deny = el("inspector-policy").buttons["policy-deny"]
+        XCTAssertTrue(deny.waitForExistence(timeout: 5))
+        deny.click()
+        XCTAssertTrue(waitValue(deny, "on"))
+        XCTAssertTrue(waitValue(el("inspector-rules"), "2"), "the connection's own ✗ is listed")
+        XCTAssertEqual(el("remote-policy-demo5.example.com").buttons["policy-deny"].value as? String, "on", "the list shows the same choice")
+        el("app-row-Telegram").click()
+        XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "Telegram's rule from an alert")
+    }
+
+    /// Manage Rules… opens the Rules window on the selected process, and New Rule starts from it.
+    func testManageRulesOpensOnTheSelection() {
+        expand("Steam")
+        el("process-row-Steam Helper").click()
+        let manage = el("manage-rules")
+        XCTAssertTrue(manage.waitForExistence(timeout: 5))
+        manage.click()
+        let window = app.windows["Rules"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        let title = el("rules-title")
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitText(title, "Steam Helper"), "\(title.label) \(title.value ?? "nil")")
+        XCTAssertTrue(waitText(el("rules-count"), "1 rule"))
+        XCTAssertTrue(el("rules-app-Steam").exists, "the Apps / Processes section lists the app")
+        XCTAssertTrue(el("rules-process-Steam Helper").exists, "and the process the window opened on")
+
+        window.toolbars.buttons["New Rule"].click()
+        let exe = el("rule-executable")
+        XCTAssertTrue(exe.waitForExistence(timeout: 5))
+        XCTAssertEqual(exe.value as? String, "/Applications/Demo/Steam.app/Contents/MacOS/Steam Helper")
+        XCTAssertEqual(el("rule-process").value as? String, "/Applications/Demo/Steam.app")
+        window.sheets.buttons["Cancel"].click()
+        XCTAssertTrue(waitGone(exe))
+
+        el("rules-app-Steam").click()
+        XCTAssertTrue(waitText(el("rules-title"), "Steam"))
     }
 
     func testCommandLineToolShowsWhoStartedIt() {

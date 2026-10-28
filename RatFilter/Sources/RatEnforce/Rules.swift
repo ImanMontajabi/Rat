@@ -1,4 +1,5 @@
 import Foundation
+import RatFilterCore
 import RatMonitor
 
 /// The apps whose network access is denied, one executable or bundle path per line (written by Rat, read by the daemon).
@@ -29,7 +30,7 @@ public struct DeniedApps: Equatable {
 
     /// The entry a process belongs to, if any.
     public func entry(for path: String, responsiblePath: () -> String?) -> String? {
-        func inside(_ p: String) -> String? { paths.first { p == $0 || p.hasPrefix($0 + "/") } }
+        func inside(_ p: String) -> String? { paths.first { ProgramPath.inside(p, $0) } }
         if let e = inside(path) { return e }
         if let app = ProcessGrouping.companionApp(of: path), let e = inside(app) { return e }
         if ProcessGrouping.actsForOthers(path), let r = responsiblePath() { return inside(r) }

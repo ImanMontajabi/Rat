@@ -109,29 +109,44 @@ struct Pill: View {
     }
 }
 
-/// Deny / allow button pair shown on each process row.
+/// Deny / allow button pair shown on each row of the process list. A process or connection row without a choice of
+/// its own shows the one it follows (`inherited`, from its process or app) muted; clicking sets its own.
 struct PolicyToggle: View {
     let policy: Policy?
+    var inherited: Policy? = nil
+    /// The smaller pair of the process and connection rows.
+    var compact = false
+    /// "this process", "this connection": for the help text.
+    var subject = "this app"
     let set: (Policy?) -> Void
 
     var body: some View {
-        HStack(spacing: 2) {
-            cell("xmark", active: policy == .deny, tint: .red) { set(policy == .deny ? nil : .deny) }
+        HStack(spacing: compact ? 0 : 2) {
+            cell("xmark", choice: .deny, tint: .red)
                 .accessibilityLabel("Deny").accessibilityIdentifier("policy-deny")
-            cell("checkmark", active: policy == .allow, tint: .green) { set(policy == .allow ? nil : .allow) }
+            cell("checkmark", choice: .allow, tint: .green)
                 .accessibilityLabel("Allow").accessibilityIdentifier("policy-allow")
         }
     }
 
-    private func cell(_ symbol: String, active: Bool, tint: Color, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 11, weight: .bold))
+    private func cell(_ symbol: String, choice: Policy, tint: Color) -> some View {
+        let active = policy == choice
+        let follows = policy == nil && inherited == choice
+        let undecided = policy == nil && inherited == nil
+        let fill: Color = active ? tint : follows ? tint.opacity(0.35) : undecided && !compact ? .blue : .gray.opacity(compact ? 0.2 : 0.35)
+        let verb = choice == .deny ? "Deny" : "Allow"
+        return Button { set(active ? nil : choice) } label: {
+            Image(systemName: symbol).font(.system(size: compact ? 9 : 11, weight: .bold))
+                .frame(width: compact ? 18 : 22, height: compact ? 16 : 20)
+                .foregroundStyle(active || follows || (undecided && !compact) ? .white : .secondary)
+                .background(fill, in: RoundedRectangle(cornerRadius: compact ? 4 : 5))
+                // The small pair is drawn small but hit like the app row's: a click just beside it still counts.
                 .frame(width: 22, height: 20)
-                .foregroundStyle(active ? .white : (policy == nil ? .white : .secondary))
-                .background(active ? tint : (policy == nil ? Color.blue : Color.gray.opacity(0.35)), in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityValue(active ? "on" : "off")
+        .help(active ? "\(verb) \(subject) (click to clear)" : follows ? "\(choice == .deny ? "Denied" : "Allowed") by the wider row; click to \(verb.lowercased()) \(subject) itself" : "\(verb) \(subject)")
+        .accessibilityValue(active ? "on" : follows ? "inherited" : "off")
     }
 }
 
