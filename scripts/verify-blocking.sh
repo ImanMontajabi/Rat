@@ -36,18 +36,23 @@ echo "1.1.1.1" > "$WORK/legacy-blocklist.txt"   # what 1.0.3 left behind; the da
 FAIL=0
 size() { /usr/bin/stat -f %z "$1" 2>/dev/null || echo 0; }
 # Local port of a process's established TCP connection, and the bytes waiting in its receive queue (netstat's
-# Recv-Q) for that connection to $IP:443.
+# Recv-Q) for that connection to a server (netstat's "address.port"; $IP.443 unless given).
 tcp_port() { /usr/sbin/lsof -a -p "$1" -iTCP -sTCP:ESTABLISHED -n -P -Fn 2>/dev/null | sed -n 's/^n.*:\([0-9]*\)->.*/\1/p' | head -1; }
 recvq() {
-  [ -n "$1" ] && /usr/sbin/netstat -anp tcp | awk -v lp=".$1" -v r="$IP.443" '$5 == r && substr($4, length($4) - length(lp) + 1) == lp { print $2; exit }'
+  [ -n "$1" ] && /usr/sbin/netstat -anp tcp | awk -v lp=".$1" -v r="${2:-$IP.443}" '$5 == r && substr($4, length($4) - length(lp) + 1) == lp { print $2; exit }'
 }
 # pf states of a local port: pf looks up its state table before any rule, so a state another ruleset kept would
 # carry the flow past Rat's anchor (the daemon kills those it finds after loading a port, `pfctl -k local -k remote`).
 port_states() { /sbin/pfctl -s states 2>/dev/null | grep -cE "[:.\[]$1[] ]" ; }
 all_states() { /sbin/pfctl -s info 2>/dev/null | awk '/current entries/ { print $3 }'; }
+# midstream <curl pid> <curl file> <python3 file> <command that denies curl…>   (MREMOTE: curl's server, $IP.443 unless set)
+# A rate-limited curl keeps reading what already arrived in its socket buffer after the cut (macOS grows it to
+# several MB; at 400 KB/s 4 MB takes 10 s), so growth alone proves nothing. The cut is proven when curl stops for
+# good having read no more than the buffer held at the deny (+64 KB for packets in flight while pf loads), and
+# python3 downloading from the same server keeps going.
 midstream() {
   mpid=$1; mout=$2; mpy=$3; shift 3
-  LP=$(tcp_port "$mpid"); Q=$(recvq "$LP"); Q=${Q:-0}; SB=$(port_states "${LP:-0}")
+  LP=$(tcp_port "$mpid"); Q=$(recvq "$LP" "${MREMOTE:-}"); Q=${Q:-0}; SB=$(port_states "${LP:-0}")
   M1=$(size "$mout"); P1=$(size "$mpy")
   "$@"
   last=$M1; still=0; steps=0
@@ -179,14 +184,8 @@ sleep 4
 A1=$(size "$WORK/pa.out"); B1=$(size "$WORK/pb.out")
 echo "  mid-stream through the proxy, before deny: curl $A1 bytes, python3 $B1 bytes"
 { [ "$A1" -gt 0 ] && [ "$B1" -gt 0 ]; } || { echo "  could not start both proxied downloads"; FAIL=1; }
-echo "/usr/bin/curl" > "$WORK/denied.txt"
-sleep 1.5
-A2=$(size "$WORK/pa.out"); B2=$(size "$WORK/pb.out")
-sleep 3
-A3=$(size "$WORK/pa.out"); B3=$(size "$WORK/pb.out")
-echo "  after deny: curl +$((A2 - A1)) then +$((A3 - A2)) bytes, python3 +$((B2 - B1)) then +$((B3 - B2)) bytes"
-[ "$A3" -eq "$A2" ] && echo "  ok denied curl's proxied stream is dead" || { echo "  FAIL denied curl kept downloading through the proxy"; FAIL=1; }
-[ "$B3" -gt "$B2" ] && echo "  ok allowed python3 kept downloading through the same proxy" || { echo "  FAIL allowed python3 was interrupted"; FAIL=1; }
+# curl's socket is to the proxy on lo0, with a loopback buffer of its own.
+MREMOTE="127.0.0.1.$PPORT" midstream $APID "$WORK/pa.out" "$WORK/pb.out" deny_curl
 echo "  anchor rules while curl is denied:"
 /sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep 'on lo0' | sed 's/^/    /'
 /sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -q 'on lo0' && echo "  ok loopback rules present" || { echo "  FAIL no loopback rule"; FAIL=1; }
