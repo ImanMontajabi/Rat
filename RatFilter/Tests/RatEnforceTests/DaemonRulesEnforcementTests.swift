@@ -60,6 +60,34 @@ final class DaemonRulesEnforcementTests: XCTestCase {
         XCTAssertTrue(d.deniedPIDs.isEmpty, "not denied as a whole app")
     }
 
+    /// The daemon lists every process only four times a second; a process started in between is noticed on the next
+    /// pass from the newest few the kernel lists, and its sockets are cut then.
+    func testAProcessStartedBetweenFullScansIsCutOnTheNextPass() throws {
+        let dir = try tempDir()
+        // pfctl is stubbed, so a rule for nc blocks nothing on this Mac.
+        let nc = "/usr/bin/nc"
+        let rule = Rule(verdict: .deny, processPath: nc, executable: nc, listLevel: .process)
+        let (d, _) = try daemon(dir, rules: DaemonRules(rules: [rule]))
+        let t0 = Date()
+        d.tick(now: t0)   // the full scan, before nc runs
+
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: nc)
+        p.arguments = ["-u", "203.0.113.5", "443"]
+        p.standardInput = Pipe(); p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        try p.run()
+        addTeardownBlock { p.terminate(); p.waitUntilExit() }
+        var port = 0
+        let deadline = Date().addingTimeInterval(5)
+        while port == 0, Date() < deadline {
+            port = ConnectionSampler.socketFDs(of: p.processIdentifier).lazy.compactMap { ConnectionSampler.connection(pid: p.processIdentifier, fd: $0, processPath: "")?.localPort }.first { $0 != 0 } ?? 0
+            if port == 0 { usleep(10_000) }
+        }
+        try XCTSkipIf(port == 0, "nc opened no socket here")
+        XCTAssertTrue(d.tick(now: t0.addingTimeInterval(0.01)), "found without waiting for the next full scan")
+        XCTAssertTrue(d.loadedPorts.contains(port))
+    }
+
     func testAnotherProcessesRuleLeavesThisOneAlone() throws {
         let dir = try tempDir()
         let (_, port) = try udpSocket(to: "203.0.113.5")

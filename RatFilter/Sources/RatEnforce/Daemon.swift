@@ -166,6 +166,12 @@ public final class EnforcerDaemon {
     private var verdictCache: [pid_t: String] = [:]
     private var firstSeen: [pid_t: Date] = [:]
     private var lastCleanup = Date.distantPast
+    /// Processes first seen less than a second ago and not denied: their path is read again every pass (see `tick`).
+    private var young: [pid_t] = []
+    /// The watched processes, as `watched` holds them (rebuilt when it changes, not on every pass).
+    private var ruledList: [(pid_t, Watched)] = []
+    private var watchedChanged = false
+    private var newest = [pid_t](repeating: 0, count: 32)
     public private(set) var deniedPIDs = Set<pid_t>()
     private var portsByApp: [String: (processes: Int, ports: Set<Int>)] = [:]
     public private(set) var lastTickDuration: TimeInterval = 0
@@ -258,16 +264,23 @@ public final class EnforcerDaemon {
         guard !denied.isEmpty || judge != nil else {
             verdictCache.removeAll(); deniedPIDs.removeAll(); portsByApp.removeAll()
             watched.removeAll(); socketVerdicts.removeAll(); portsByRuleApp.removeAll()
+            young.removeAll(); ruledList.removeAll(); lastCleanup = .distantPast
             settle(now: now, live: [], loopback: [])
             return false
         }
-        let pids = ConnectionSampler.allPIDs()
+        // Listing every process costs more than the rest of a pass, and at 300 passes a second it was most of the
+        // helper's CPU. A new process is listed first, so the newest few show whether one started; every process is
+        // listed then, and four times a second anyway (which also forgets the processes that exited).
+        let full = now.timeIntervalSince(lastCleanup) >= 0.25 || startedProcess()
+        let pids = full ? ConnectionSampler.allPIDs() : young
+        if full { young = [] }
         for pid in pids {
             let known = verdictCache[pid]
             if known == nil { firstSeen[pid] = now }
             // A new process is first a fork of its parent (a shell) and only then the program: until it is a second
             // old, its path is read again every pass so the exec is noticed.
             guard known == nil || (known == "" && now.timeIntervalSince(firstSeen[pid] ?? now) < 1) else { continue }
+            if full, known == nil || known == "" { young.append(pid) }
             let path = ConnectionSampler.path(of: pid)
             var responsible: String??
             let responsiblePath = { () -> String? in
@@ -278,27 +291,34 @@ public final class EnforcerDaemon {
             verdictCache[pid] = entry ?? ""
             if entry != nil {
                 deniedPIDs.insert(pid)
-                watched[pid] = .some(nil)
+                setWatched(pid, nil)
                 if trace { FileHandle.standardError.write(Data("denied pid \(pid) (\(entry!))\n".utf8)) }
             } else if let judge, !path.hasPrefix("pid ") {
                 // The app as Rat's list groups it, so a rule for the app or for one of its processes matches here too.
                 let app = ProcessGrouping.owner(of: path, responsiblePath: responsiblePath).ruleKey
-                watched[pid] = .some(judge.watches(app: app, executable: path) ? Watched(app: app, executable: path) : nil)
+                setWatched(pid, judge.watches(app: app, executable: path) ? Watched(app: app, executable: path) : nil)
             } else {
-                watched[pid] = .some(nil)
+                setWatched(pid, nil)
             }
         }
         // Forgetting processes that exited is the costly part (hundreds of entries), so it runs a few times a second;
         // reading the sockets of a process that just exited returns nothing in the meantime.
-        if now.timeIntervalSince(lastCleanup) >= 0.25 {
+        young = young.filter { verdictCache[$0] == "" && now.timeIntervalSince(firstSeen[$0] ?? now) < 1 }
+        if full, now.timeIntervalSince(lastCleanup) >= 0.25 {
             lastCleanup = now
             let current = Set(pids)
             verdictCache = verdictCache.filter { current.contains($0.key) }
             firstSeen = firstSeen.filter { current.contains($0.key) }
             deniedPIDs = deniedPIDs.filter { current.contains($0) }
+            let before = watched.count
             watched = watched.filter { current.contains($0.key) }
+            if watched.count != before { watchedChanged = true }
         }
-        let ruled = judge == nil ? [] : watched.compactMap { pid, w in w.map { (pid, $0) } }
+        if watchedChanged {
+            watchedChanged = false
+            ruledList = watched.compactMap { pid, w in w.map { (pid, $0) } }
+        }
+        let ruled = judge == nil ? [] : ruledList
         guard !deniedPIDs.isEmpty || !ruled.isEmpty else {
             portsByApp.removeAll(); portsByRuleApp.removeAll(); socketVerdicts.removeAll()
             settle(now: now, live: [], loopback: []); return false
@@ -353,6 +373,20 @@ public final class EnforcerDaemon {
         portsByRuleApp = byRuleApp
         settle(now: now, live: ports, loopback: Self.loopbackPortsToBlock(loopbackSockets, listening: listening))
         return true
+    }
+
+    /// Whether one of the newest processes is not known yet.
+    private func startedProcess() -> Bool {
+        let n = ConnectionSampler.newestPIDs(into: &newest)
+        for i in 0..<n where newest[i] > 0 && verdictCache[newest[i]] == nil { return true }
+        return false
+    }
+
+    private func setWatched(_ pid: pid_t, _ w: Watched?) {
+        let old = watched[pid]
+        watched[pid] = .some(w)
+        // Only a watched process entering or leaving changes the list the pass reads.
+        if w != nil || (old ?? nil) != nil { watchedChanged = true }
     }
 
     /// The loopback connections a denied app opened to another program (a local proxy, an `ssh -L` forward, any
@@ -543,12 +577,12 @@ public final class EnforcerDaemon {
             if let data = try? h.read(upToCount: Self.maxRulesFile + 1), data.count <= Self.maxRulesFile { d = DaemonRules.decode(data) }
         }
         let j = d.flatMap { $0.hasProcessDenies ? SocketJudge($0) : nil }
-        // Which processes are read depends only on the paths deny rules name; new names only judge sockets again.
-        if j?.watchedPaths != judge?.watchedPaths { watched.removeAll(); verdictCache.removeAll(); deniedPIDs.removeAll() }
+        // Which processes are read depends only on what deny rules name; new names only judge sockets again.
+        if j?.watchList != judge?.watchList { watched.removeAll(); watchedChanged = true; verdictCache.removeAll(); deniedPIDs.removeAll() }
         judge = j
         socketVerdicts.removeAll()
         denyRuleCount = d?.rules.filter { $0.enabled && $0.verdict == .deny && $0.processPath != nil }.count ?? 0
-        if trace { FileHandle.standardError.write(Data("deny rules: \(denyRuleCount), watching \(j?.watchedPaths.count ?? 0) paths\n".utf8)) }
+        if trace { FileHandle.standardError.write(Data("deny rules: \(denyRuleCount), watching \(j?.watchList.count ?? 0) programs\n".utf8)) }
     }
 
     /// Re-reads the deny list and port list when they changed. Checked every 50 ms with one `stat` each

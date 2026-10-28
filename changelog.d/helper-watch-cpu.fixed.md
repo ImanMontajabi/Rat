@@ -1,0 +1,1 @@
+The helper uses much less CPU while a ✗ is set on one process or connection: it reads only the processes the rule can match, not every process of the app, and lists the Mac's processes only when one has started.
