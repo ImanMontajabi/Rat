@@ -73,6 +73,9 @@ struct RemoteHost: Identifiable, Hashable {
     var incoming = false
     /// A long-lived connection that mostly receives: a download, a server push, a media stream (`StreamDetector`).
     var stream = false
+    /// Bytes per second on the last pass (the growth of `bytesIn`/`bytesOut`; 0 on its first pass), for the map's flows.
+    var rateIn = 0.0
+    var rateOut = 0.0
 }
 
 /// One executable of an app (its main binary, a helper, an XPC service working for it), by name.
@@ -141,6 +144,14 @@ extension RemoteHost {
     var isVPN: Bool { route?.isVPN ?? false }
     /// Through a local or system proxy: unmasked behind one (`via`), or tagged as talking to one.
     var isProxied: Bool { via != nil || (route?.isProxy ?? false) }
+    /// Stays near this Mac (`isLocalTraffic`), so Hide Local leaves it out. A connection through a proxy leaves the
+    /// Mac even when its socket goes to 127.0.0.1.
+    var isLocal: Bool { !isProxied && isLocalTraffic(address: address, proto: proto, port: port) }
+}
+
+extension AppEntry {
+    /// Every connection it has stays near this Mac: Hide Local hides it. An app without connections is not.
+    var onlyLocal: Bool { !remotes.isEmpty && remotes.allSatisfy(\.isLocal) }
 }
 
 extension AppEntry {
@@ -253,6 +264,8 @@ final class Ledger: ObservableObject {
     private let proxyResolver = ProxyResolver()
     /// Which sockets are long-lived download streams, by their counters on each pass.
     var streams = StreamDetector()
+    /// Each row's byte counters on the last pass (app id and row id), for its rate.
+    private var rowBytes: [String: (in: UInt64, out: UInt64)] = [:]
     let routes = RouteMarker()
     private var signingCache: [String: (identifier: String?, team: String?)] = [:]
     private var rulesChanged: AnyCancellable?
@@ -374,8 +387,8 @@ final class Ledger: ObservableObject {
         return s
     }
 
-    func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter], flows: [FlowCounter] = []) async {
-        let now = Date()
+    /// `now` is the pass's time (tests give their own, so rates do not depend on how fast the machine runs).
+    func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter], flows: [FlowCounter] = [], now: Date = Date()) async {
         // Which connections a peer started: their local port is a listener's.
         let conns = SocketDirection.mark(conns)
         let dt = max(now.timeIntervalSince(lastTick), 0.2)
@@ -447,6 +460,7 @@ final class Ledger: ObservableObject {
         var denyCount = 0, askCount = 0, listenCount = 0
         let wholeAppDenied = deniedAppPaths
         var portsNow = Set<Int>(), loopbackNow = Set<Int>(), liveSockets = Set<String>()
+        var bytesNow: [String: (in: UInt64, out: UInt64)] = [:]
         for id in table.keys {
             var e = table[id]!
             let rx = rxByApp[id] ?? 0, tx = txByApp[id] ?? 0
@@ -547,10 +561,21 @@ final class Ledger: ObservableObject {
                 if fresh { remotes[remotes.count - 1].verdict = verdict }
                 if verdict == .deny, r.live { loopbackNow.insert(r.clientPort) }
             }
+            // A row's rate is how much its open sockets' counters grew since the last pass; a closed socket makes
+            // the sum drop, which counts as nothing rather than as negative traffic.
+            for i in remotes.indices {
+                let key = id + "|" + remotes[i].id
+                bytesNow[key] = (remotes[i].bytesIn, remotes[i].bytesOut)
+                guard let before = rowBytes[key] else { continue }
+                remotes[i].rateIn = remotes[i].bytesIn > before.in ? Double(remotes[i].bytesIn - before.in) / dt : 0
+                remotes[i].rateOut = remotes[i].bytesOut > before.out ? Double(remotes[i].bytesOut - before.out) / dt : 0
+            }
             e.remotes = remotes
             table[id] = e
         }
         streams.keep(only: liveSockets)
+        rowBytes = bytesNow
+        uidCache = uidCache.filter { alive.contains($0.key) }
         deniedCount = denyCount; unconfirmedCount = askCount; incomingCount = listenCount
         deniedPorts = portsNow
         deniedLoopbackPorts = loopbackNow
@@ -726,7 +751,10 @@ final class Ledger: ObservableObject {
     /// connections (the same set the map draws). Unfiltered, the totals are the session's.
     func summary(_ filter: MonitorFilter, settings: AppSettings? = nil) -> MonitorSummary {
         guard filter.isActive else {
-            return MonitorSummary(filtered: false, apps: apps, remotes: apps.flatMap(\.remotes), bytesIn: sessionIn, bytesOut: sessionOut,
+            // Hide Local is a standing preference, not a filter: the totals stay the session's.
+            let shown = filter.hideLocal ? apps.filter { !$0.onlyLocal } : apps
+            let remotes = shown.flatMap(\.remotes).filter { !(filter.hideLocal && $0.isLocal) }
+            return MonitorSummary(filtered: false, apps: shown, remotes: remotes, bytesIn: sessionIn, bytesOut: sessionOut,
                                   denied: deniedCount, unconfirmed: unconfirmedCount, incoming: incomingCount)
         }
         let listed = filter.apps(self, settings: settings ?? .shared)
@@ -772,7 +800,8 @@ final class Ledger: ObservableObject {
     /// Fixed data for visual checks and snapshot tests: no sampling, no alerts, no real addresses.
     func installDemoData() {
         demo = true
-        myLocation = GeoPoint(coordinate: .init(latitude: 52.52, longitude: 13.405), city: "Berlin", country: "Germany")
+        myLocation = GeoPoint(coordinate: .init(latitude: 52.52, longitude: 13.405), city: "Berlin", country: "Germany", countryCode: "DE")
+        let codes = ["United Kingdom": "GB", "Netherlands": "NL", "Germany": "DE", "France": "FR", "Sweden": "SE", "Spain": "ES"]
         // (app, process, pid, host, address, proto, port, city, country, lat, lon): each app's main process and helpers,
         // the macOS row's services, and a command-line tool. Documentation addresses only (RFC 5737).
         let conns: [(String, String, Int32, String, String, String, Int, String, String, Double, Double)] = [
@@ -809,7 +838,7 @@ final class Ledger: ObservableObject {
             stats.pids.insert(c.2); stats.totalIn += UInt64(400_000 * (i + 1)); stats.totalOut += UInt64(40_000 * (i + 1))
             e.processes[c.1] = stats
             e.remotes.append(RemoteHost(address: c.4, host: c.3, port: c.6, proto: c.5,
-                                        geo: GeoPoint(coordinate: .init(latitude: c.9, longitude: c.10), city: c.7, country: c.8),
+                                        geo: GeoPoint(coordinate: .init(latitude: c.9, longitude: c.10), city: c.7, country: c.8, countryCode: codes[c.8] ?? ""),
                                         pid: c.2, process: c.1, network: "AS64500 Example Networks",
                                         bytesIn: UInt64(250_000 * (i + 1)), bytesOut: UInt64(25_000 * (i + 1))))
             if c.0 == "git-remote-https" { e.launchedBy = "Warp (pid 700)" }
@@ -817,6 +846,11 @@ final class Ledger: ObservableObject {
             // A peer connected to Steam's Remote Play port; Telegram's main connection is a long download.
             if c.3 == "demo4.example.com" { e.remotes[e.remotes.count - 1].incoming = true }
             if c.3 == "demo2.example.com" { e.remotes[e.remotes.count - 1].stream = true }
+            // Traffic on the last pass, for the map's flows: a download from London, a call to Paris (both ways), an
+            // upload to Madrid.
+            let rates: [String: (Double, Double)] = ["demo0.example.com": (180_000, 4_000), "video.example.net": (40_000, 35_000),
+                                                     "demo3.example.com": (20_000, 18_000), "demo5.example.com": (2_000, 300_000)]
+            if let (rx, tx) = rates[c.3] { e.remotes[e.remotes.count - 1].rateIn = rx; e.remotes[e.remotes.count - 1].rateOut = tx }
             table[ident.id] = e
         }
         // Firefox through local proxies: one destination unmasked behind `ssh -D 1080`, one connection to Tor that
@@ -826,16 +860,25 @@ final class Ledger: ObservableObject {
         fx.lastActive = Date(); fx.totalIn = 3_000_000; fx.totalOut = 300_000; fx.pids = [880]
         fx.rates = (0..<14).map { k in (rx: Double(k % 6), tx: Double(k % 3)) }
         fx.processes["Firefox"] = ProcessStats(name: "Firefox", path: "/Applications/Demo/Firefox.app/Contents/MacOS/Firefox", pids: [880], totalIn: 3_000_000, totalOut: 300_000)
-        let stockholm = GeoPoint(coordinate: .init(latitude: 59.33, longitude: 18.07), city: "Stockholm", country: "Sweden")
+        let stockholm = GeoPoint(coordinate: .init(latitude: 59.33, longitude: 18.07), city: "Stockholm", country: "Sweden", countryCode: "SE")
         fx.remotes = [
             RemoteHost(address: "198.51.100.30", host: "news.example.org", port: 443, proto: "TCP",
-                       geo: GeoPoint(coordinate: .init(latitude: 40.42, longitude: -3.70), city: "Madrid", country: "Spain"),
+                       geo: GeoPoint(coordinate: .init(latitude: 40.42, longitude: -3.70), city: "Madrid", country: "Spain", countryCode: "ES"),
                        via: ProxyHop(kind: "SOCKS5", process: "ssh", listener: "127.0.0.1:1080", server: "192.0.2.10", serverGeo: stockholm),
                        pid: 880, process: "Firefox", network: "AS64500 Example Networks", bytesIn: 900_000, bytesOut: 60_000),
             RemoteHost(address: "127.0.0.1", host: "127.0.0.1", port: 9050, proto: "TCP", pid: 880, process: "Firefox",
                        route: .localProxy(program: "Tor", listener: "127.0.0.1:9050"), bytesIn: 120_000, bytesOut: 9_000),
         ]
         table[firefox.id] = fx
+        // Traffic that stays near this Mac, for Hide Local: Bonjour, and a service that talks only to the LAN.
+        if var mac = table["macOS"] {
+            mac.remotes.append(RemoteHost(address: "224.0.0.251", host: "224.0.0.251", port: 5353, proto: "UDP", pid: 90, process: "mDNSResponder"))
+            mac.remotes.append(RemoteHost(address: "192.168.1.20", host: "192.168.1.20", port: 49152, proto: "TCP", pid: 96, process: "rapportd",
+                                          bytesIn: 40_000, bytesOut: 30_000))
+            mac.processes["rapportd"] = ProcessStats(name: "rapportd", path: "/usr/libexec/rapportd", pids: [96], totalIn: 40_000, totalOut: 30_000)
+            mac.pids.insert(96)
+            table["macOS"] = mac
+        }
         let chrome = "/Applications/Demo/Google Chrome.app", telegram = "/Applications/Demo/Telegram.app", steam = "/Applications/Demo/Steam.app"
         var pending = Rule(verdict: .deny, processPath: telegram, remoteDomain: "tracker.example", createdAt: Date(timeIntervalSinceNow: -60), note: "From a connection alert")
         pending.approved = false

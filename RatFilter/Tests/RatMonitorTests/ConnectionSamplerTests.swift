@@ -43,4 +43,20 @@ final class ConnectionSamplerTests: XCTestCase {
         // A chain that reaches launchd without an app names nobody.
         XCTAssertNil(ProcessGrouping.launchingApp(of: 300, parent: { $0 == 300 ? 200 : 1 }, path: { _ in "/bin/zsh" }))
     }
+
+    /// The helper ages a process by when the kernel started it, not by when it first saw it.
+    func testStartTimeIsTheKernels() throws {
+        let mine = try XCTUnwrap(ConnectionSampler.startTime(of: getpid()))
+        XCTAssertLessThan(mine, Date())
+        XCTAssertGreaterThan(mine, Date().addingTimeInterval(-3_600), "this test run started recently")
+        XCTAssertLessThan(try XCTUnwrap(ConnectionSampler.startTime(of: 1)), mine, "launchd started first")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sleep"); p.arguments = ["5"]
+        let before = Date()
+        try p.run()
+        defer { p.terminate(); p.waitUntilExit() }
+        let started = try XCTUnwrap(ConnectionSampler.startTime(of: p.processIdentifier))
+        XCTAssertEqual(started.timeIntervalSince(before), 0, accuracy: 1)
+        XCTAssertNil(ConnectionSampler.startTime(of: 99_999), "no such process")
+    }
 }

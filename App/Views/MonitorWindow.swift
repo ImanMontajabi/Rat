@@ -7,7 +7,7 @@ struct MonitorWindow: View {
     @State private var selection: MonitorSelection?
     @State private var showInspector = true
     @State private var showChart = true
-    @State private var filter = MonitorFilter()
+    @State private var filter = MonitorFilter(hideLocal: AppSettings.shared.hideLocal)
 
     var body: some View {
         HStack(spacing: 0) {
@@ -26,6 +26,7 @@ struct MonitorWindow: View {
         .animation(.easeInOut(duration: 0.2), value: showInspector)
         .modifier(OpenWindowBridge())
         .background(WindowLevelSetter(floating: settings.floatOnTop))
+        .onChange(of: filter.hideLocal) { _, on in settings.hideLocal = on }
     }
 }
 

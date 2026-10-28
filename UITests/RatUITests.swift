@@ -227,6 +227,48 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(el("remote-policy-demo2.example.com").buttons["policy-deny"].exists, "a stream this Mac opened can be denied")
     }
 
+    // MARK: flags and Hide Local
+
+    /// Places carry their country's flag: the Summary's Top Countries and a connection's location in the inspector.
+    func testPlacesShowTheirFlags() {
+        XCTAssertTrue(app.staticTexts["🇪🇸 Spain"].waitForExistence(timeout: 5), "Top Countries")
+        expand("Google Chrome")
+        let london = el("remote-row-demo0.example.com")
+        XCTAssertTrue(london.waitForExistence(timeout: 5))
+        london.click()
+        XCTAssertTrue(app.staticTexts["🇬🇧 London, United Kingdom"].waitForExistence(timeout: 5), "the inspector's location")
+    }
+
+    /// Hide Local leaves out Bonjour and LAN connections, and the processes that have only those; a connection
+    /// through a local proxy stays (it leaves the Mac). The chip remembers its state for the next launch.
+    func testHideLocalHidesLocalConnections() {
+        let chip = el("hide-local")
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        XCTAssertEqual(chip.value as? String, "off")
+        let counts = el("summary-counts")
+        XCTAssertTrue(counts.waitForExistence(timeout: 5))
+        let before = [counts.label, counts.value as? String ?? ""].joined()
+        expand("macOS")
+        XCTAssertTrue(el("process-row-rapportd").waitForExistence(timeout: 5), "a service that talks only to the LAN")
+        expand("mDNSResponder")
+        XCTAssertTrue(el("remote-row-224.0.0.251").waitForExistence(timeout: 5), "Bonjour")
+        expand("Firefox")
+        XCTAssertTrue(el("remote-row-127.0.0.1").waitForExistence(timeout: 5))
+
+        chip.click()
+        XCTAssertTrue(waitValue(chip, "on"))
+        XCTAssertTrue(waitGone(el("process-row-rapportd")), "a process with only local connections is hidden")
+        XCTAssertTrue(waitGone(el("remote-row-224.0.0.251")))
+        XCTAssertTrue(el("remote-row-dns.example").exists, "mDNSResponder's outside connection stays")
+        XCTAssertTrue(el("remote-row-127.0.0.1").exists, "through Tor: it leaves the Mac")
+        XCTAssertFalse(el("summary-filtered").exists, "a standing preference, not a filter")
+        XCTAssertNotEqual([counts.label, counts.value as? String ?? ""].joined(), before, "the Summary counts fewer domains")
+
+        chip.click()
+        XCTAssertTrue(waitValue(chip, "off"))
+        XCTAssertTrue(el("process-row-rapportd").waitForExistence(timeout: 5))
+    }
+
     // MARK: VPN and proxy tags
 
     func testVPNAndProxyTagsRender() {
@@ -271,6 +313,22 @@ final class RatUITests: XCTestCase {
         el("route-filter").click()
         app.menuItems["All Connections"].click()
         XCTAssertTrue(el("app-row-Steam").waitForExistence(timeout: 5))
+    }
+
+    /// The map's pulses move while the window is seen and its lines carry traffic: they stop while Rat is hidden
+    /// and when the search leaves only idle connections.
+    func testMapFlowsMoveOnlyWhileSeenAndBusy() {
+        let flows = el("map-flows")
+        XCTAssertTrue(flows.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitValue(flows, "3 moving"), "London down, Paris both ways, Madrid up: \(flows.value ?? "nil")")
+        app.typeKey("h", modifierFlags: .command)
+        XCTAssertTrue(waitValue(flows, "paused"), "hidden: no frames drawn: \(flows.value ?? "nil")")
+        app.activate()
+        XCTAssertTrue(waitValue(flows, "3 moving", timeout: 10), "\(flows.value ?? "nil")")
+        search("git")
+        XCTAssertTrue(waitValue(flows, "idle"), "git's server is quiet: \(flows.value ?? "nil")")
+        search("")
+        XCTAssertTrue(waitValue(flows, "3 moving"))
     }
 
     /// The map draws only what the list shows: the route chip and the search narrow its places too.

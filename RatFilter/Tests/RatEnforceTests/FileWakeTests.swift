@@ -1,0 +1,97 @@
+import XCTest
+import Darwin
+@testable import RatEnforce
+import RatMonitor
+
+/// The daemon wakes as soon as a file Rat hands it changes, however it is written, instead of after its idle sleep.
+final class FileWakeTests: XCTestCase {
+    private func tempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-wake-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
+    }
+
+    /// Writes after a short delay on another thread, and returns how long `wait` took to wake.
+    private func woke(_ wake: FileWake, after write: @escaping () -> Void) -> TimeInterval? {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05, execute: write)
+        let t0 = Date()
+        return wake.wait(2) ? Date().timeIntervalSince(t0) : nil
+    }
+
+    func testEveryWayOfWritingWakesAtOnce() throws {
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("denied-apps.txt")
+        try "".write(to: file, atomically: true, encoding: .utf8)
+        let wake = FileWake(files: [file.path, dir.appendingPathComponent("deny-rules.json").path])
+        XCTAssertEqual(wake.watchedCount, 2, "the folder and the file that exists")
+        XCTAssertFalse(wake.wait(0.1), "nothing changed: the full sleep")
+
+        let inPlace = try XCTUnwrap(woke(wake) { _ = try? FileHandle(forWritingTo: file).write(contentsOf: Data("/usr/bin/curl\n".utf8)) }, "echo … > file")
+        let replaced = try XCTUnwrap(woke(wake) { try? "/usr/bin/nc\n".write(to: file, atomically: true, encoding: .utf8) }, "Rat's atomic write")
+        let afterReplace = try XCTUnwrap(woke(wake) { _ = try? FileHandle(forWritingTo: file).write(contentsOf: Data("x".utf8)) }, "the new file is watched too")
+        let created = try XCTUnwrap(woke(wake) { try? Data("{}".utf8).write(to: dir.appendingPathComponent("deny-rules.json")) }, "a file that did not exist")
+        for t in [inPlace, replaced, afterReplace, created] { XCTAssertLessThan(t, 0.5, "woken by the change, not by the 2 s timeout") }
+        // A write can wake more than once (an atomic write creates its temporary file, then renames it); once the
+        // writes stop, so do the wakeups: watching the files again does not wake the watcher itself.
+        var extra = 0
+        while wake.wait(0.2), extra < 10 { extra += 1 }
+        XCTAssertLessThan(extra, 10)
+        XCTAssertFalse(wake.wait(0.3), "quiet once nothing is written")
+    }
+
+    private func openFDs() -> Int {
+        let n = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nil, 0)
+        return Int(n) / MemoryLayout<proc_fdinfo>.stride
+    }
+
+    /// Rat rewrites its files on every change; each replacement opens the new file's source and closes the old one.
+    func testReplacingTheFilesLeaksNoDescriptors() throws {
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("denied-ports.txt")
+        try "".write(to: file, atomically: true, encoding: .utf8)
+        let wake = FileWake(files: [file.path])
+        for i in 0..<20 { try "\(i)".write(to: file, atomically: true, encoding: .utf8); _ = wake.wait(0.5) }
+        let before = openFDs()
+        for i in 0..<200 { try "\(i)".write(to: file, atomically: true, encoding: .utf8); _ = wake.wait(0.5) }
+        XCTAssertLessThanOrEqual(openFDs(), before + 2, "a helper that runs for weeks keeps the same descriptors")
+    }
+
+    /// A deny written while nothing is denied (the daemon in its 0.25 s idle sleep) is enforced at once, on the
+    /// passes the write wakes: the wakeup also skips the 50 ms between file checks.
+    func testADenyWrittenWhileIdleIsEnforcedAtOnce() throws {
+        let dir = try tempDir()
+        let denied = dir.appendingPathComponent("denied.txt")
+        try "".write(to: denied, atomically: true, encoding: .utf8)
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        defer { close(fd) }
+        var addr = sockaddr_in(); addr.sin_family = sa_family_t(AF_INET); addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_addr.s_addr = UInt32(0x7f000001).bigEndian
+        _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        var s = EnforcerDaemon.Settings(deniedFile: denied.path)
+        s.anchor = "com.apple/rat-unittest"
+        let d = EnforcerDaemon(settings: s, run: { _, _, _ in 0 },
+                               capture: { _, args in args == ["-s", "info"] ? "Status: Enabled" : args == ["-s", "rules"] ? "anchor \"com.apple/*\" all" : "" })
+        let wake = FileWake(files: [denied.path])
+        let now = Date()
+        XCTAssertFalse(d.tick(now: now), "nothing denied: the daemon would sleep 0.25 s")
+
+        // The loop's steps: sleep (here at most the idle 0.25 s) until woken, pass, again. The daemon's own clock
+        // moves 1 ms a pass, inside the 50 ms between file checks, so only the wakeup makes it read the file.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+            try? (ConnectionSampler.path(of: getpid()) + "\n").write(to: denied, atomically: true, encoding: .utf8)
+        }
+        let t0 = Date()
+        var passes = 0, clock = now
+        while d.loadedPorts.isEmpty, passes < 20 {
+            if wake.wait(0.25) { d.filesChanged() }
+            clock += 0.001; passes += 1
+            d.tick(now: clock)
+        }
+        let took = Date().timeIntervalSince(t0) - 0.05
+        print("helper, deny written while idle: ports loaded \(String(format: "%.1f", took * 1000)) ms after the write, \(passes) passes")
+        XCTAssertTrue(d.deniedPIDs.contains(getpid()))
+        XCTAssertFalse(d.loadedPorts.isEmpty, "its socket's port is loaded")
+        XCTAssertLessThan(took, 0.1, "not after the 0.25 s idle sleep")
+    }
+}

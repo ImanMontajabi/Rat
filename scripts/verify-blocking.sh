@@ -216,11 +216,16 @@ kill $PXPID 2>/dev/null; /usr/bin/pkill -9 -f "[s]cripts/test-proxy.py $PPORT"; 
 
 echo "== phase 4, rules the daemon follows itself: one process, one connection"
 : > "$WORK/denied.txt"; sleep 1
-# deny-rules.json as Rat writes it (DaemonRules): the rules, and the names Rat gave the servers.
-rules() {  # rules <json array of rules> [<json object of names>]
+# deny-rules.json as Rat writes it (DaemonRules): the rules, and the names Rat gave the servers. Written next to
+# it first and then renamed over it, as Rat does: the rename is the moment of the deny. A mid-stream check stages
+# the file before it reads curl's buffer and passes only the rename as its deny, so python3's start (about 60 ms,
+# during which a buffer that is not full yet keeps filling) is not counted against the daemon.
+stage_rules() {  # stage_rules <json array of rules> [<json object of names>]
   /usr/bin/python3 -I -c 'import json, sys; json.dump({"version": 1, "rules": json.loads(sys.argv[1]), "names": json.loads(sys.argv[2]) or {}, "signatures": {}, "localRanges": ""}, open(sys.argv[3] + ".tmp", "w"))' \
-    "$1" "${2:-null}" "$WORK/deny-rules.json" && mv "$WORK/deny-rules.json.tmp" "$WORK/deny-rules.json"
+    "$1" "${2:-null}" "$WORK/deny-rules.json"
 }
+apply_rules() { mv "$WORK/deny-rules.json.tmp" "$WORK/deny-rules.json"; }
+rules() { stage_rules "$@" && apply_rules; }
 fresh() {  # fresh <count> <curl args…>: how many fresh curls got nothing at all
   n=$1; shift; got=0
   for i in $(seq "$n"); do
@@ -248,7 +253,8 @@ BPID=$!
 sleep 4
 A1=$(size "$WORK/ra.out"); B1=$(size "$WORK/rb.out")
 echo "  4a. curl as a process of macOS denied mid-stream (before: curl $A1 bytes, python3 $B1 bytes)"
-midstream "$IP.443" $APID "$WORK/ra.out" "$WORK/rb.out" rules "$CURL_PROCESS"
+stage_rules "$CURL_PROCESS"
+midstream "$IP.443" $APID "$WORK/ra.out" "$WORK/rb.out" apply_rules
 kill -9 $APID $BPID 2>/dev/null; wait $APID $BPID 2>/dev/null; APID=; BPID=
 RP=$(fresh 10 https://example.com)
 echo "  $RP/10 fresh curls blocked completely by the process rule (pf states: $(all_states))"

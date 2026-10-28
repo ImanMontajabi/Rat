@@ -56,7 +56,12 @@ struct SummaryInspector: View {
             if stats {
                 group("Top Processes", s.topApps.map { ($0.identity.name, "\(formatBytes($0.totalIn)) down, \(formatBytes($0.totalOut)) up") })
                 group("Top Domains", domains.prefix(3).map { ($0.name, Self.connections($0.count)) })
-                if ledger.geo.available { group("Top Countries", ledger.countries(s.remotes).prefix(3).map { ($0.name, Self.connections($0.count)) }) }
+                if ledger.geo.available {
+                    let flags = Dictionary(s.remotes.compactMap { $0.geo.map { ($0.country, $0.flag) } }, uniquingKeysWith: { a, _ in a })
+                    group("Top Countries", ledger.countries(s.remotes).prefix(3).map { c in
+                        ([flags[c.name] ?? "", c.name].filter { !$0.isEmpty }.joined(separator: " "), Self.connections(c.count))
+                    })
+                }
                 if ledger.geo.networksAvailable, !networks.isEmpty {
                     group("Top Networks", networks.prefix(3).map { ($0.name, Self.connections($0.count)) })
                 }
@@ -191,7 +196,9 @@ struct ProcessInspector: View {
             }
             SectionHeader(title: "Geographic Information", open: $geo)
             if geo {
-                let places = Set(remotes.flatMap { [$0.geo, $0.via?.serverGeo] }.compactMap { $0 }.map { "\($0.city), \($0.country)" }).sorted()
+                // Sorted by place, not by flag.
+                let places = Set(remotes.flatMap { [$0.geo, $0.via?.serverGeo] }.compactMap { $0 })
+                    .sorted { ($0.city, $0.country) < ($1.city, $1.country) }.map(\.place).removingDuplicates()
                 if places.isEmpty { Text("No locations for these connections").foregroundStyle(.secondary).padding(.leading, 6) }
                 ForEach(places, id: \.self) { Text($0).padding(.leading, 6) }
             }
@@ -271,11 +278,11 @@ struct RemoteInspector: View {
                 kv("Direction", r.incoming ? "Incoming: the peer connected to this Mac" : r.stream ? "Outgoing, mostly receiving for a while" : "Outgoing")
                 if let p = r.process { kv("Process", p + (r.pid.map { " (pid \($0))" } ?? "")) }
                 if let n = r.network { kv("Network", n) }
-                if let g = r.geo { kv("Location", "\(g.city), \(g.country)") }
+                if let g = r.geo { kv("Location", g.place) }
                 if let route = r.route { kv("Route", route.label) }
                 if let via = r.via {
                     kv("Proxy", via.label)
-                    if let g = via.serverGeo { kv("Proxy at", "\(g.city), \(g.country)") }
+                    if let g = via.serverGeo { kv("Proxy at", g.place) }
                 }
             }
             SectionHeader(title: "Rules", open: $rules)
@@ -370,7 +377,7 @@ struct ProxyBadge: View {
             Text(hop.kind).padding(.horizontal, 4).padding(.vertical, 1).overlay(RoundedRectangle(cornerRadius: 3).stroke(.secondary))
         }
         .font(.caption2).foregroundStyle(.orange)
-        .help("\(hop.label), \(hop.kind)\(hop.serverGeo.map { ". Proxy server in \($0.city), \($0.country)" } ?? "")")
+        .help("\(hop.label), \(hop.kind)\(hop.serverGeo.map { ". Proxy server in \($0.place)" } ?? "")")
     }
 }
 

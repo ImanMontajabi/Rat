@@ -168,6 +168,8 @@ public final class EnforcerDaemon {
     /// pid -> the denied entry it belongs to ("" = not denied).
     private var verdictCache: [pid_t: String] = [:]
     private var firstSeen: [pid_t: Date] = [:]
+    /// Start times read so far (tests check none is read before a pass loads its ports).
+    private(set) var agesRead = 0
     private var lastCleanup = Date.distantPast
     /// Processes first seen less than a second ago and not denied: their path is read again every pass (see `tick`).
     private var young: [pid_t] = []
@@ -250,12 +252,18 @@ public final class EnforcerDaemon {
     }
 
     public func loop() {
+        // A change to a file Rat hands over ends the sleep at once: a deny made while nothing was denied waited for
+        // the idle sleep (up to 0.25 s) before.
+        let wake = FileWake(files: [settings.deniedFile, settings.portsFile, settings.rulesFile, settings.repairFile].compactMap { $0 })
         while true {
             let busy = autoreleasepool { tick() }
             if trace, busy, watching { traceTicks += 1; traceTime += lastTickDuration; if traceTicks == 400 { FileHandle.standardError.write(Data("avg tick \(Int(traceTime / 400 * 1e6)) us, reloads \(reloads)\n".utf8)); traceTicks = 0; traceTime = 0 } }
-            Thread.sleep(forTimeInterval: !busy ? settings.idleInterval : watching ? settings.interval : settings.standbyInterval)
+            if wake.wait(!busy ? settings.idleInterval : watching ? settings.interval : settings.standbyInterval) { filesChanged() }
         }
     }
+
+    /// A file Rat hands over changed: the next pass reads it, whenever the last check was.
+    public func filesChanged() { lastFileCheck = .distantPast }
 
     /// One pass. Returns whether there is anything to enforce (a denied app or a deny rule for a process); `watching`
     /// says whether one of its processes runs. The loop then passes every `interval`, every `standbyInterval` while
@@ -281,9 +289,20 @@ public final class EnforcerDaemon {
         let full = now.timeIntervalSince(lastCleanup) >= 0.25 || startedProcess()
         let pids = full ? ConnectionSampler.allPIDs() : young
         if full { young = [] }
+        // A process's age is the kernel's (`startTime`): counted from when the daemon met it, every process was
+        // young for a second at the daemon's start and after each deny-list change, which kept a core busy for two
+        // seconds. Reading it costs about 15 µs a process, 15 ms for a whole Mac, so it is read at the end of the
+        // pass, once pf has this pass's ports: the pass right after a deny loads the denied process's ports as soon
+        // as before. Until then a process met for the first time counts as young.
+        var unaged: [pid_t] = []
+        defer {
+            for pid in unaged { firstSeen[pid] = ConnectionSampler.startTime(of: pid) ?? now }
+            agesRead += unaged.count
+            if !unaged.isEmpty { young = young.filter { verdictCache[$0] == "" && now.timeIntervalSince(firstSeen[$0] ?? now) < 1 } }
+        }
         for pid in pids {
             let known = verdictCache[pid]
-            if known == nil { firstSeen[pid] = now }
+            if known == nil { firstSeen[pid] = nil; unaged.append(pid) }
             // A new process is first a fork of its parent (a shell) and only then the program: until it is a second
             // old, its path is read again every pass so the exec is noticed.
             guard known == nil || (known == "" && now.timeIntervalSince(firstSeen[pid] ?? now) < 1) else { continue }
