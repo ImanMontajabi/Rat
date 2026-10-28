@@ -315,6 +315,22 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(el("app-row-Steam").waitForExistence(timeout: 5))
     }
 
+    /// The map's pulses move while the window is seen and its lines carry traffic: they stop while Rat is hidden
+    /// and when the search leaves only idle connections.
+    func testMapFlowsMoveOnlyWhileSeenAndBusy() {
+        let flows = el("map-flows")
+        XCTAssertTrue(flows.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitValue(flows, "3 moving"), "London down, Paris both ways, Madrid up: \(flows.value ?? "nil")")
+        app.typeKey("h", modifierFlags: .command)
+        XCTAssertTrue(waitValue(flows, "paused"), "hidden: no frames drawn: \(flows.value ?? "nil")")
+        app.activate()
+        XCTAssertTrue(waitValue(flows, "3 moving", timeout: 10), "\(flows.value ?? "nil")")
+        search("git")
+        XCTAssertTrue(waitValue(flows, "idle"), "git's server is quiet: \(flows.value ?? "nil")")
+        search("")
+        XCTAssertTrue(waitValue(flows, "3 moving"))
+    }
+
     /// The map draws only what the list shows: the route chip and the search narrow its places too.
     func testMapFollowsTheRouteChipAndSearch() {
         let map = el("map-places")
