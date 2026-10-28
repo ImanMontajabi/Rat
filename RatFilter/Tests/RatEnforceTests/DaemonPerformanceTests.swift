@@ -7,10 +7,15 @@ import RatMonitor
 /// Time and memory budgets for the helper's pass: it runs every 3 ms while a denied or watched process runs, so a
 /// pass must cost a small part of that, a full scan of every process (four times a second) well under its interval,
 /// and nothing may grow while sockets come and go. This test process is the denied program; pfctl is never run. The
-/// budgets are several times what a Debug build takes on an M-series Mac.
+/// budgets are several times what a Debug build takes on an M-series Mac. Passes are timed by this thread's CPU clock,
+/// the work a pass does (it all runs on the calling thread): a shared CI machine that takes the thread away for a
+/// while made the wall-clock average of the same code anything from 0.3 to 2.3 ms.
 final class DaemonPerformanceTests: XCTestCase {
     let exe = ConnectionSampler.path(of: getpid())
     var app: String { ProcessGrouping.owner(of: exe, responsiblePath: { nil }).ruleKey }
+
+    /// CPU time this thread has used, in seconds.
+    static func threadCPU() -> Double { Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1e9 }
 
     static func mallocMB() -> Double {
         var s = malloc_statistics_t()
@@ -52,7 +57,7 @@ final class DaemonPerformanceTests: XCTestCase {
     private var lastFull = Date()
 
     /// Passes 3 ms apart, as while a denied process runs; every 84th is a full scan (0.25 s). Returns the average
-    /// fast pass and the average full scan, in seconds.
+    /// fast pass and the average full scan, in seconds of CPU time.
     @discardableResult
     private func passes(_ d: EnforcerDaemon, count: Int) -> (fast: Double, full: Double) {
         var fast: [Double] = [], full: [Double] = []
@@ -60,8 +65,10 @@ final class DaemonPerformanceTests: XCTestCase {
             now += 0.003
             let isFull = now.timeIntervalSince(lastFull) >= 0.25
             if isFull { lastFull = now }
+            let c0 = Self.threadCPU()
             d.tick(now: now)
-            if isFull { full.append(d.lastTickDuration) } else { fast.append(d.lastTickDuration) }
+            let cpu = Self.threadCPU() - c0
+            if isFull { full.append(cpu) } else { fast.append(cpu) }
         }
         func avg(_ a: [Double]) -> Double { a.isEmpty ? 0 : a.reduce(0, +) / Double(a.count) }
         return (avg(fast), avg(full))
@@ -71,12 +78,12 @@ final class DaemonPerformanceTests: XCTestCase {
     /// start that is only the processes the kernel started in the last second, not every process on the Mac, so its
     /// first 1.2 s take a small part of that time too.
     private func steady(_ d: EnforcerDaemon, _ what: String) -> (fast: Double, full: Double) {
-        let t0 = Date()
+        let t0 = Date(), c0 = Self.threadCPU()
         passes(d, count: 400)   // 1.2 s of the daemon's time
-        let warmUp = Date().timeIntervalSince(t0)
+        let warmUp = Self.threadCPU() - c0, wall = Date().timeIntervalSince(t0)
         XCTAssertLessThan(warmUp, 0.6, "the first 1.2 s at most half busy")
         let t = passes(d, count: 1_000)
-        print("helper, \(what), 64 sockets: fast pass \(String(format: "%.3f", t.fast * 1000)) ms, full scan \(String(format: "%.2f", t.full * 1000)) ms, first 1.2 s \(String(format: "%.0f", warmUp * 1000)) ms")
+        print("helper, \(what), 64 sockets (CPU): fast pass \(String(format: "%.3f", t.fast * 1000)) ms, full scan \(String(format: "%.2f", t.full * 1000)) ms, first 1.2 s \(String(format: "%.0f", warmUp * 1000)) ms (\(String(format: "%.0f", wall * 1000)) ms wall)")
         return t
     }
 
@@ -112,10 +119,10 @@ final class DaemonPerformanceTests: XCTestCase {
         var s = EnforcerDaemon.Settings(deniedFile: denied.path)
         s.rulesFile = dir.appendingPathComponent("deny-rules.json").path
         s.anchor = "com.apple/rat-unittest"
-        var loadedAt: Date?, agesAtLoad: Int?
+        var loadedAt: Double?, agesAtLoad: Int?
         weak var daemon: EnforcerDaemon?
         let d = EnforcerDaemon(settings: s, run: { _, args, stdin in
-            if args.contains("-f"), loadedAt == nil, stdin?.contains("block") ?? false { loadedAt = Date(); agesAtLoad = daemon?.agesRead }
+            if args.contains("-f"), loadedAt == nil, stdin?.contains("block") ?? false { loadedAt = Self.threadCPU(); agesAtLoad = daemon?.agesRead }
             return 0
         }, capture: { _, args in args == ["-s", "info"] ? "Status: Enabled" : args == ["-s", "rules"] ? "anchor \"com.apple/*\" all" : "" })
         daemon = d
@@ -126,10 +133,10 @@ final class DaemonPerformanceTests: XCTestCase {
         try (exe + "\n").write(to: denied, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(1)], ofItemAtPath: denied.path)
         now += 0.06   // past the file check interval
-        let t0 = Date()
+        let c0 = Self.threadCPU()
         d.tick(now: now)
-        let latency = try XCTUnwrap(loadedAt, "the denied process's ports were loaded on that pass").timeIntervalSince(t0)
-        print("helper, deny list changed: ports loaded \(String(format: "%.2f", latency * 1000)) ms into the pass, pass \(String(format: "%.2f", d.lastTickDuration * 1000)) ms")
+        let latency = try XCTUnwrap(loadedAt, "the denied process's ports were loaded on that pass") - c0
+        print("helper, deny list changed: ports loaded (CPU) \(String(format: "%.2f", latency * 1000)) ms into the pass, pass \(String(format: "%.2f", d.lastTickDuration * 1000)) ms")
         XCTAssertTrue(d.deniedPIDs.contains(getpid()))
         XCTAssertGreaterThanOrEqual(d.loadedPorts.count, 8)
         XCTAssertEqual(agesAtLoad, agesBefore, "no start time read before the ports are loaded")
@@ -148,10 +155,10 @@ final class DaemonPerformanceTests: XCTestCase {
         var s = EnforcerDaemon.Settings(deniedFile: dir.appendingPathComponent("denied.txt").path)
         s.rulesFile = rulesFile.path
         s.anchor = "com.apple/rat-unittest"
-        var loadedAt: Date?, agesAtLoad: Int?
+        var loadedAt: Double?, agesAtLoad: Int?
         weak var daemon: EnforcerDaemon?
         let d = EnforcerDaemon(settings: s, run: { _, args, stdin in
-            if args.contains("-f"), loadedAt == nil, stdin?.contains("block") ?? false { loadedAt = Date(); agesAtLoad = daemon?.agesRead }
+            if args.contains("-f"), loadedAt == nil, stdin?.contains("block") ?? false { loadedAt = Self.threadCPU(); agesAtLoad = daemon?.agesRead }
             return 0
         }, capture: { _, args in args == ["-s", "info"] ? "Status: Enabled" : args == ["-s", "rules"] ? "anchor \"com.apple/*\" all" : "" })
         daemon = d
@@ -162,10 +169,10 @@ final class DaemonPerformanceTests: XCTestCase {
         try DaemonRules(rules: [Rule(verdict: .deny, processPath: app, executable: exe, listLevel: .process)]).encoded().write(to: rulesFile, options: .atomic)
         d.filesChanged()
         now += 0.001
-        let t0 = Date()
+        let c0 = Self.threadCPU()
         d.tick(now: now)
-        let latency = try XCTUnwrap(loadedAt, "the named process's ports were loaded on that pass").timeIntervalSince(t0)
-        print("helper, process rule added: ports loaded \(String(format: "%.2f", latency * 1000)) ms into the pass, pass \(String(format: "%.2f", d.lastTickDuration * 1000)) ms")
+        let latency = try XCTUnwrap(loadedAt, "the named process's ports were loaded on that pass") - c0
+        print("helper, process rule added: ports loaded (CPU) \(String(format: "%.2f", latency * 1000)) ms into the pass, pass \(String(format: "%.2f", d.lastTickDuration * 1000)) ms")
         XCTAssertGreaterThanOrEqual(d.loadedPorts.count, 8)
         XCTAssertEqual(agesAtLoad, agesBefore, "no start time read before the ports are loaded")
         XCTAssertLessThan(latency, 0.05)
