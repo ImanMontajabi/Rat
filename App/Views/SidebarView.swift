@@ -39,7 +39,7 @@ struct SidebarView: View {
             let keys: Set<String>
             switch settings.groupBy {
             case .domain: keys = Set(a.remotes.filter { !isLocalAddress($0.address) }.map { registrableDomain($0.host) })
-            case .country: keys = Set(a.remotes.compactMap { $0.geo?.country })
+            case .country: keys = Set(a.remotes.compactMap { $0.geo.map { [$0.flag, $0.country].filter { !$0.isEmpty }.joined(separator: " ") } })
             case .process: keys = []
             }
             for k in keys { d[k, default: []].append(a) }
@@ -56,7 +56,7 @@ struct SidebarView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if settings.groupBy == .process {
-                        ForEach(rows) { app in ProcessRow(app: app, selection: $selection, filter: query.route) }
+                        ForEach(rows) { app in ProcessRow(app: app, selection: $selection, filter: query.route, hideLocal: filter.hideLocal) }
                     } else {
                         ForEach(groups) { g in groupRow(g) }
                     }
@@ -80,7 +80,7 @@ struct SidebarView: View {
             .padding(.vertical, 8).padding(.horizontal, 6).contentShape(Rectangle())
             .onTapGesture { if !expandedGroups.insert(g.id).inserted { expandedGroups.remove(g.id) } }
             if expandedGroups.contains(g.id) {
-                ForEach(g.apps) { app in ProcessRow(app: app, selection: $selection, filter: query.route).padding(.leading, 18) }
+                ForEach(g.apps) { app in ProcessRow(app: app, selection: $selection, filter: query.route, hideLocal: filter.hideLocal).padding(.leading, 18) }
             }
         }
     }
@@ -121,6 +121,8 @@ struct SidebarView: View {
             TextField("Search", text: $filter.search).textFieldStyle(.plain).accessibilityIdentifier("search-field")
             chip("arrow.down.left.circle", on: $filter.onlyIncoming, help: "Only apps accepting incoming connections").accessibilityIdentifier("only-incoming")
             chip("xmark.rectangle", on: $filter.onlyDenied, help: "Only denied apps").accessibilityIdentifier("only-denied")
+            chip("house.slash", on: $filter.hideLocal, help: "Hide local connections: this Mac (loopback), the local network (LAN, link-local) and Bonjour (mDNS, multicast)")
+                .accessibilityLabel("Hide Local").accessibilityIdentifier("hide-local").accessibilityValue(filter.hideLocal ? "on" : "off")
             Menu {
                 Picker("Route", selection: $filter.route) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
             } label: {
@@ -184,6 +186,8 @@ struct MonitorFilter: Equatable {
     var search = ""
     var onlyIncoming = false
     var onlyDenied = false
+    /// Leave out connections that stay near this Mac, and apps and processes that have only those (`AppSettings.hideLocal`).
+    var hideLocal = false
     /// The route chip; "vpn" or "proxy" in the search overrides it.
     var route: RouteFilter = .all
     var range: TimeRange = .fiveMinutes
@@ -206,12 +210,14 @@ struct MonitorFilter: Equatable {
         if !settings.includeOtherUsers { list = list.filter { !$0.otherUsers } }
         if onlyIncoming { list = list.filter { $0.listening > 0 || $0.remotes.contains(where: \.incoming) } }
         if onlyDenied { list = list.filter { ledger.rules.policy(for: $0.identity.ruleKey) == .deny } }
-        if route != .all { list = list.filter { $0.remotes.contains(where: route.matches) } }
+        if hideLocal { list = list.filter { !$0.onlyLocal } }
+        let shown = { (r: RemoteHost) in !(hideLocal && r.isLocal) }
+        if route != .all { list = list.filter { $0.remotes.contains { shown($0) && route.matches($0) } } }
         if !text.isEmpty {
             list = list.filter { a in
                 a.identity.name.localizedCaseInsensitiveContains(text) ||
                 a.processes.keys.contains { $0.localizedCaseInsensitiveContains(text) } ||
-                a.remotes.contains { Self.remote($0, contains: text) }
+                a.remotes.contains { shown($0) && Self.remote($0, contains: text) }
             }
         }
         return list
@@ -222,7 +228,7 @@ struct MonitorFilter: Equatable {
     /// ("Paris" draws only the lines to Paris).
     func matches(_ r: RemoteHost, of app: AppEntry) -> Bool {
         let (text, route) = query
-        guard route.matches(r) else { return false }
+        guard route.matches(r), !(hideLocal && r.isLocal) else { return false }
         guard !text.isEmpty, !app.identity.name.localizedCaseInsensitiveContains(text) else { return true }
         return (r.process?.localizedCaseInsensitiveContains(text) ?? false) || Self.remote(r, contains: text)
     }
@@ -274,11 +280,13 @@ struct ProcessRow: View {
     @Binding var selection: MonitorSelection?
     /// Shows only the connections through a VPN or a proxy.
     var filter: RouteFilter = .all
+    /// Leaves out connections that stay near this Mac, and processes that have only those.
+    var hideLocal = false
     @State private var open = false
     @State private var openProcesses = Set<String>()
 
-    init(app: AppEntry, selection: Binding<MonitorSelection?>, filter: RouteFilter = .all, open: Bool = false, openProcesses: Set<String> = []) {
-        self.app = app; _selection = selection; self.filter = filter
+    init(app: AppEntry, selection: Binding<MonitorSelection?>, filter: RouteFilter = .all, hideLocal: Bool = false, open: Bool = false, openProcesses: Set<String> = []) {
+        self.app = app; _selection = selection; self.filter = filter; self.hideLocal = hideLocal
         // Snapshot tests start a row open.
         _open = State(initialValue: open); _openProcesses = State(initialValue: openProcesses)
     }
@@ -329,9 +337,15 @@ struct ProcessRow: View {
     private func select(_ s: MonitorSelection) { selection = selection == s ? nil : s }
 
     private func filtered(_ t: (direct: [RemoteHost], processes: [ProcessNode])) -> (direct: [RemoteHost], processes: [ProcessNode]) {
-        guard filter != .all else { return t }
-        let nodes = t.processes.map { n -> ProcessNode in var n = n; n.remotes = n.remotes.filter(filter.matches); return n }
-        return (t.direct.filter(filter.matches), nodes.filter { !$0.remotes.isEmpty })
+        guard filter != .all || hideLocal else { return t }
+        let keep = { (r: RemoteHost) in filter.matches(r) && !(hideLocal && r.isLocal) }
+        // The route filter shows only processes with such connections; Hide Local hides those that had only local
+        // ones (a process with traffic and no connection listed stays).
+        let nodes = t.processes.compactMap { n -> ProcessNode? in
+            var m = n; m.remotes = n.remotes.filter(keep)
+            return m.remotes.isEmpty && (filter != .all || !n.remotes.isEmpty) ? nil : m
+        }
+        return (t.direct.filter(keep), nodes)
     }
 
     @ViewBuilder private func processRow(_ node: ProcessNode) -> some View {
@@ -366,6 +380,7 @@ struct ProcessRow: View {
         let s = MonitorSelection(appID: app.id, process: process, remote: r.id)
         return HStack(spacing: 6) {
             HStack(spacing: 6) {
+                if let flag = r.geo?.flag, !flag.isEmpty { Text(flag).accessibilityHidden(true) }
                 Text(r.host).lineLimit(1).truncationMode(.middle)
                 RouteBadges(remote: r, compact: true)
                 Spacer(minLength: 4)
@@ -375,6 +390,7 @@ struct ProcessRow: View {
                         .help("\(formatBytes(r.bytesIn)) received, \(formatBytes(r.bytesOut)) sent on the open connections")
                 }
             }
+            .help(r.geo.map { "\($0.place)\(r.incoming ? "" : " · \(r.host)")" } ?? r.host)
             // The row reads as one element (its label carries the tags); its ✗/✓ stay buttons of their own.
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isButton)

@@ -10,6 +10,13 @@ struct GeoPoint: Hashable {
     var coordinate: CLLocationCoordinate2D
     var city: String
     var country: String
+    /// ISO 3166-1 alpha-2 (`DE`), empty when the database has none.
+    var countryCode: String = ""
+
+    /// The country's flag (`🇩🇪`), or empty.
+    var flag: String { Flag.emoji(countryCode) }
+    /// "🇩🇪 Berlin, Germany"; the city is left out when the database has none.
+    var place: String { [flag, [city, country].filter { !$0.isEmpty }.joined(separator: ", ")].filter { !$0.isEmpty }.joined(separator: " ") }
     static func == (a: GeoPoint, b: GeoPoint) -> Bool { a.city == b.city && a.country == b.country && a.coordinate.latitude == b.coordinate.latitude }
     func hash(into h: inout Hasher) { h.combine(city); h.combine(country); h.combine(coordinate.latitude) }
 }
@@ -95,7 +102,7 @@ final class GeoService: @unchecked Sendable {
     func lookup(_ ip: String) -> GeoPoint? {
         if let hit = lock.withLock({ cache[ip] }) { return hit }
         let result = lock.withLock { db }?.locate(ip).map {
-            GeoPoint(coordinate: .init(latitude: $0.latitude, longitude: $0.longitude), city: $0.city, country: $0.country)
+            GeoPoint(coordinate: .init(latitude: $0.latitude, longitude: $0.longitude), city: $0.city, country: $0.country, countryCode: $0.countryCode)
         }
         lock.withLock { cache[ip] = .some(result) }
         return result
@@ -113,7 +120,7 @@ final class GeoService: @unchecked Sendable {
     static func localPoint() -> GeoPoint? {
         guard let z = TimeZoneLocator.coordinates() else { return nil }
         let country = Locale.current.region.flatMap { Locale.current.localizedString(forRegionCode: $0.identifier) } ?? ""
-        return GeoPoint(coordinate: .init(latitude: z.lat, longitude: z.lon), city: z.city, country: country)
+        return GeoPoint(coordinate: .init(latitude: z.lat, longitude: z.lon), city: z.city, country: country, countryCode: Locale.current.region?.identifier ?? "")
     }
 }
 
@@ -200,3 +207,25 @@ func registrableDomain(_ host: String) -> String {
 }
 
 func isLocalAddress(_ a: String) -> Bool { LocalNetwork.contains(a) }
+
+/// A country's flag from its ISO 3166-1 alpha-2 code: each letter becomes its regional indicator symbol (`DE` →
+/// 🇩🇪). Empty for anything that is not a region code (the databases use `ZZ` for unknown); `EU` is a flag too.
+enum Flag {
+    private static let regions = Set(Locale.Region.isoRegions.map(\.identifier).filter { $0.count == 2 }).subtracting(["ZZ"]).union(["EU"])
+
+    static func emoji(_ code: String) -> String {
+        let c = code.uppercased()
+        guard regions.contains(c) else { return "" }
+        return String(String.UnicodeScalarView(c.unicodeScalars.compactMap { UnicodeScalar(0x1F1E6 + $0.value - 65) }))
+    }
+}
+
+/// Traffic that stays near this Mac, which Hide Local leaves out: loopback, link-local, private (LAN) and the
+/// user's own ranges (`LocalNetwork`), multicast and broadcast (Bonjour's 224.0.0.251 and ff02::fb, SSDP), and mDNS
+/// (UDP 5353) whatever its address.
+func isLocalTraffic(address: String, proto: String, port: Int) -> Bool {
+    if proto.uppercased() == "UDP" && port == 5353 { return true }
+    if address == "255.255.255.255" || address.lowercased().hasPrefix("ff") { return true }
+    if let first = address.split(separator: ".").first.flatMap({ Int($0) }), address.contains("."), !address.contains(":"), (224...239).contains(first) { return true }
+    return LocalNetwork.contains(address)
+}

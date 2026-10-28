@@ -141,6 +141,14 @@ extension RemoteHost {
     var isVPN: Bool { route?.isVPN ?? false }
     /// Through a local or system proxy: unmasked behind one (`via`), or tagged as talking to one.
     var isProxied: Bool { via != nil || (route?.isProxy ?? false) }
+    /// Stays near this Mac (`isLocalTraffic`), so Hide Local leaves it out. A connection through a proxy leaves the
+    /// Mac even when its socket goes to 127.0.0.1.
+    var isLocal: Bool { !isProxied && isLocalTraffic(address: address, proto: proto, port: port) }
+}
+
+extension AppEntry {
+    /// Every connection it has stays near this Mac: Hide Local hides it. An app without connections is not.
+    var onlyLocal: Bool { !remotes.isEmpty && remotes.allSatisfy(\.isLocal) }
 }
 
 extension AppEntry {
@@ -726,7 +734,10 @@ final class Ledger: ObservableObject {
     /// connections (the same set the map draws). Unfiltered, the totals are the session's.
     func summary(_ filter: MonitorFilter, settings: AppSettings? = nil) -> MonitorSummary {
         guard filter.isActive else {
-            return MonitorSummary(filtered: false, apps: apps, remotes: apps.flatMap(\.remotes), bytesIn: sessionIn, bytesOut: sessionOut,
+            // Hide Local is a standing preference, not a filter: the totals stay the session's.
+            let shown = filter.hideLocal ? apps.filter { !$0.onlyLocal } : apps
+            let remotes = shown.flatMap(\.remotes).filter { !(filter.hideLocal && $0.isLocal) }
+            return MonitorSummary(filtered: false, apps: shown, remotes: remotes, bytesIn: sessionIn, bytesOut: sessionOut,
                                   denied: deniedCount, unconfirmed: unconfirmedCount, incoming: incomingCount)
         }
         let listed = filter.apps(self, settings: settings ?? .shared)
@@ -772,7 +783,8 @@ final class Ledger: ObservableObject {
     /// Fixed data for visual checks and snapshot tests: no sampling, no alerts, no real addresses.
     func installDemoData() {
         demo = true
-        myLocation = GeoPoint(coordinate: .init(latitude: 52.52, longitude: 13.405), city: "Berlin", country: "Germany")
+        myLocation = GeoPoint(coordinate: .init(latitude: 52.52, longitude: 13.405), city: "Berlin", country: "Germany", countryCode: "DE")
+        let codes = ["United Kingdom": "GB", "Netherlands": "NL", "Germany": "DE", "France": "FR", "Sweden": "SE", "Spain": "ES"]
         // (app, process, pid, host, address, proto, port, city, country, lat, lon): each app's main process and helpers,
         // the macOS row's services, and a command-line tool. Documentation addresses only (RFC 5737).
         let conns: [(String, String, Int32, String, String, String, Int, String, String, Double, Double)] = [
@@ -809,7 +821,7 @@ final class Ledger: ObservableObject {
             stats.pids.insert(c.2); stats.totalIn += UInt64(400_000 * (i + 1)); stats.totalOut += UInt64(40_000 * (i + 1))
             e.processes[c.1] = stats
             e.remotes.append(RemoteHost(address: c.4, host: c.3, port: c.6, proto: c.5,
-                                        geo: GeoPoint(coordinate: .init(latitude: c.9, longitude: c.10), city: c.7, country: c.8),
+                                        geo: GeoPoint(coordinate: .init(latitude: c.9, longitude: c.10), city: c.7, country: c.8, countryCode: codes[c.8] ?? ""),
                                         pid: c.2, process: c.1, network: "AS64500 Example Networks",
                                         bytesIn: UInt64(250_000 * (i + 1)), bytesOut: UInt64(25_000 * (i + 1))))
             if c.0 == "git-remote-https" { e.launchedBy = "Warp (pid 700)" }
@@ -826,16 +838,25 @@ final class Ledger: ObservableObject {
         fx.lastActive = Date(); fx.totalIn = 3_000_000; fx.totalOut = 300_000; fx.pids = [880]
         fx.rates = (0..<14).map { k in (rx: Double(k % 6), tx: Double(k % 3)) }
         fx.processes["Firefox"] = ProcessStats(name: "Firefox", path: "/Applications/Demo/Firefox.app/Contents/MacOS/Firefox", pids: [880], totalIn: 3_000_000, totalOut: 300_000)
-        let stockholm = GeoPoint(coordinate: .init(latitude: 59.33, longitude: 18.07), city: "Stockholm", country: "Sweden")
+        let stockholm = GeoPoint(coordinate: .init(latitude: 59.33, longitude: 18.07), city: "Stockholm", country: "Sweden", countryCode: "SE")
         fx.remotes = [
             RemoteHost(address: "198.51.100.30", host: "news.example.org", port: 443, proto: "TCP",
-                       geo: GeoPoint(coordinate: .init(latitude: 40.42, longitude: -3.70), city: "Madrid", country: "Spain"),
+                       geo: GeoPoint(coordinate: .init(latitude: 40.42, longitude: -3.70), city: "Madrid", country: "Spain", countryCode: "ES"),
                        via: ProxyHop(kind: "SOCKS5", process: "ssh", listener: "127.0.0.1:1080", server: "192.0.2.10", serverGeo: stockholm),
                        pid: 880, process: "Firefox", network: "AS64500 Example Networks", bytesIn: 900_000, bytesOut: 60_000),
             RemoteHost(address: "127.0.0.1", host: "127.0.0.1", port: 9050, proto: "TCP", pid: 880, process: "Firefox",
                        route: .localProxy(program: "Tor", listener: "127.0.0.1:9050"), bytesIn: 120_000, bytesOut: 9_000),
         ]
         table[firefox.id] = fx
+        // Traffic that stays near this Mac, for Hide Local: Bonjour, and a service that talks only to the LAN.
+        if var mac = table["macOS"] {
+            mac.remotes.append(RemoteHost(address: "224.0.0.251", host: "224.0.0.251", port: 5353, proto: "UDP", pid: 90, process: "mDNSResponder"))
+            mac.remotes.append(RemoteHost(address: "192.168.1.20", host: "192.168.1.20", port: 49152, proto: "TCP", pid: 96, process: "rapportd",
+                                          bytesIn: 40_000, bytesOut: 30_000))
+            mac.processes["rapportd"] = ProcessStats(name: "rapportd", path: "/usr/libexec/rapportd", pids: [96], totalIn: 40_000, totalOut: 30_000)
+            mac.pids.insert(96)
+            table["macOS"] = mac
+        }
         let chrome = "/Applications/Demo/Google Chrome.app", telegram = "/Applications/Demo/Telegram.app", steam = "/Applications/Demo/Steam.app"
         var pending = Rule(verdict: .deny, processPath: telegram, remoteDomain: "tracker.example", createdAt: Date(timeIntervalSinceNow: -60), note: "From a connection alert")
         pending.approved = false

@@ -1,0 +1,1 @@
+Places show their country's flag (connection rows and their tooltips, the inspector, Top Countries, map labels), and a Hide Local chip, remembered between launches, leaves out loopback, LAN, link-local, Bonjour and mDNS connections and the apps and processes that have only those, in the list, the map and the Summary.

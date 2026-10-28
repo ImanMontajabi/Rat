@@ -73,7 +73,8 @@ struct MapPane: View {
                                 style: StrokeStyle(lineWidth: a.highlighted ? 3 : 2, dash: a.proxied ? [7, 5] : []))
                 }
                 ForEach(g.nodes) { n in
-                    Annotation(n.proxy ? "Proxy · \(n.point.city)" : n.point.city, coordinate: n.point.coordinate, anchor: .center) {
+                    let city = [n.point.flag, n.point.city].filter { !$0.isEmpty }.joined(separator: " ")
+                    Annotation(n.proxy ? "Proxy · \(city)" : city, coordinate: n.point.coordinate, anchor: .center) {
                         if n.proxy {
                             Image(systemName: "arrow.triangle.branch").font(.system(size: 9, weight: .bold)).foregroundStyle(.orange)
                                 .frame(width: 18, height: 18)
