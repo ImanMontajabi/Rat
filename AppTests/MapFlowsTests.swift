@@ -104,15 +104,16 @@ final class MapFlowsTests: XCTestCase {
         let conns = [ObservedConnection(pid: 5, processPath: path, proto: .tcp, remoteAddress: "203.0.113.1", remotePort: 443, localPort: 50000, tcpState: "ESTABLISHED"),
                      ObservedConnection(pid: 5, processPath: path, proto: .tcp, remoteAddress: "203.0.113.1", remotePort: 443, localPort: 50001, tcpState: "ESTABLISHED")]
         func flow(_ port: Int, _ i: UInt64, _ o: UInt64) -> FlowCounter { FlowCounter(pid: 5, proto: .tcp, localPort: port, remoteAddress: "203.0.113.1", remotePort: 443, bytesIn: i, bytesOut: o) }
-        await l.ingest(conns, [], flows: [flow(50000, 100_000, 1_000), flow(50001, 0, 0)])
+        // The passes' own times: a slow machine (CI) between two passes does not change the rate.
+        let t0 = Date()
+        await l.ingest(conns, [], flows: [flow(50000, 100_000, 1_000), flow(50001, 0, 0)], now: t0)
         XCTAssertEqual(l.apps.first?.remotes.first?.rateIn, 0, "no earlier pass to compare with")
-        try await Task.sleep(for: .milliseconds(250))
-        await l.ingest(conns, [], flows: [flow(50000, 400_000, 2_000), flow(50001, 0, 0)])
+        await l.ingest(conns, [], flows: [flow(50000, 400_000, 2_000), flow(50001, 0, 0)], now: t0 + 1.5)
         let r = try XCTUnwrap(l.apps.first?.remotes.first)
-        XCTAssertGreaterThan(r.rateIn, 300_000 / 0.5, "300 KB in about 0.25 s")
-        XCTAssertLessThan(r.rateIn, 300_000 / 0.2)
+        XCTAssertEqual(r.rateIn, 300_000 / 1.5, accuracy: 1, "300 KB in a 1.5 s pass")
+        XCTAssertEqual(r.rateOut, 1_000 / 1.5, accuracy: 1)
         XCTAssertEqual(FlowDirection(rateIn: r.rateIn, rateOut: r.rateOut), .down)
-        await l.ingest(Array(conns.suffix(1)), [], flows: [flow(50001, 0, 0)])
+        await l.ingest(Array(conns.suffix(1)), [], flows: [flow(50001, 0, 0)], now: t0 + 3)
         XCTAssertEqual(l.apps.first?.remotes.first?.rateIn, 0, "the busy socket closed: the sum dropped, nothing moves")
     }
 
