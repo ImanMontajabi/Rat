@@ -1,1 +1,0 @@
-Connections a peer started (to a port this Mac listens on) are rows of their own, tagged ↓ Incoming, without ✗/✓ and never asked about in Alert Mode; long-lived connections that mostly receive (a download, a server push, a media stream) are tagged ↓ stream.

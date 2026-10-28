@@ -1,1 +1,0 @@
-The map no longer redraws on every pass when only traffic numbers change, address caches stay bounded on a Mac that stays up, and the helper no longer keeps a core busy for two seconds when it starts or when an app is denied or allowed.
