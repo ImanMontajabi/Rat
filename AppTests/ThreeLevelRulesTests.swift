@@ -181,6 +181,36 @@ final class ThreeLevelRulesTests: XCTestCase {
         XCTAssertTrue(l.deniedAppPaths.isEmpty, "not denied as a whole app")
     }
 
+    /// A process with a TCP and a UDP (QUIC) connection to one server and port has a row for each. They used to be
+    /// one row, showing whichever socket the kernel listed first: a ✗ made a rule for that protocol, and when the
+    /// order changed on the next pass the row showed the other one, so the ✗ looked as if the click was lost.
+    func testTCPAndUDPToOneServerAreTwoRowsWithTheirOwnChoice() async throws {
+        let dir = try tempDir()
+        let l = Ledger(directory: dir, helperInstalled: true, names: settledNames(["203.0.113.10"]))
+        let tcp = ObservedConnection(pid: 900, processPath: main, proto: .tcp, remoteAddress: "203.0.113.10", remotePort: 443, localPort: 51000, tcpState: "ESTABLISHED")
+        let udp = ObservedConnection(pid: 900, processPath: main, proto: .udp, remoteAddress: "203.0.113.10", remotePort: 443, localPort: 51001, tcpState: nil)
+        await l.ingest([udp, tcp], [])
+        var entry = try XCTUnwrap(l.apps.first { $0.identity.ruleKey == app })
+        XCTAssertEqual(entry.remotes.map(\.proto).sorted(), ["TCP", "UDP"])
+        XCTAssertEqual(Set(entry.remotes.map(\.id)).count, 2, "each row has an identity of its own")
+        let tcpRow = try XCTUnwrap(entry.remotes.first { $0.proto == "TCP" })
+        let target = try XCTUnwrap(entry.ruleTarget(process: entry.mainProcess, remote: tcpRow))
+        XCTAssertEqual(target.endpoint?.proto, .tcp)
+        l.setPolicy(.deny, for: target)
+
+        // The kernel lists the sockets the other way round: the TCP row keeps its ✗, the UDP row has none.
+        await l.ingest([tcp, udp], [])
+        entry = try XCTUnwrap(l.apps.first { $0.identity.ruleKey == app })
+        for r in entry.remotes {
+            let t = try XCTUnwrap(entry.ruleTarget(process: entry.mainProcess, remote: r))
+            XCTAssertEqual(l.rules.rowPolicy(t).own, r.proto == "TCP" ? .deny : nil, r.proto)
+            XCTAssertEqual(r.verdict == .deny, r.proto == "TCP", r.proto)
+        }
+        l.refreshEnforcement()
+        let ports = try String(contentsOf: dir.appendingPathComponent("denied-ports.txt"), encoding: .utf8)
+        XCTAssertEqual(ports, "51000\n", "only the TCP socket is cut")
+    }
+
     func testTheRulesWindowListsTheAppsAndProcessesRulesName() {
         let rules = [Rule(verdict: .deny, processPath: app, executable: updater, listLevel: .process),
                      Rule(verdict: .allow, processPath: app),

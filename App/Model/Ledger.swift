@@ -46,7 +46,9 @@ struct MonitorSummary {
 }
 
 struct RemoteHost: Identifiable, Hashable {
-    var id: String { (via.map { "\(host):\(port) \($0.listener)" } ?? "\(address):\(port)") + "|\(process ?? "")" }
+    /// One row per server, port and protocol of a process: a TCP and a UDP (QUIC) connection to one server are two
+    /// rows, as a ✗/✓ on either is a rule for its own protocol.
+    var id: String { (via.map { "\(host):\(port) \($0.listener)" } ?? "\(address):\(port)/\(proto)") + "|\(process ?? "")" }
     /// The server's address; for a destination behind a local proxy, the name's address (empty until looked up).
     let address: String
     var host: String
@@ -476,9 +478,9 @@ final class Ledger: ObservableObject {
                 return verdict
             }
             for c in perApp[id]?.conns ?? [] where !unmasked.masked.contains(ProxyUnmasking.maskKey(pid: c.pid, localPort: c.localPort, remotePort: c.remotePort)) {
-                let key = "\(c.remoteAddress):\(c.remotePort)|\(c.processName)"
+                let key = "\(c.remoteAddress):\(c.remotePort)/\(c.proto.rawValue)|\(c.processName)"
                 let bytes = bytesByFlow[FlowCounter.key(pid: c.pid, proto: c.proto, localPort: c.localPort, remotePort: c.remotePort)]
-                // Several sockets to the same server and port are one row; their bytes add up.
+                // Several sockets to the same server, port and protocol are one row; their bytes add up.
                 if let i = indexByKey[key] {
                     remotes[i].bytesIn += bytes?.0 ?? 0; remotes[i].bytesOut += bytes?.1 ?? 0
                     // Each of them has its own local port, and all are cut.
