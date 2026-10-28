@@ -115,7 +115,8 @@ final class ProcessTreeTests: XCTestCase {
         let chrome = try XCTUnwrap(l.apps.first { $0.identity.name == "Google Chrome" })
         XCTAssertEqual(chrome.tree.processes.map(\.name), ["Google Chrome Helper"])
         XCTAssertEqual(chrome.tree.direct.count, 2)
-        XCTAssertEqual(l.apps.first { $0.identity.isSystem }?.tree.processes.count, 2)
+        // rapportd talks only to the LAN, for Hide Local.
+        XCTAssertEqual(l.apps.first { $0.identity.isSystem }?.tree.processes.map(\.name).sorted(), ["apsd", "mDNSResponder", "rapportd"])
         XCTAssertEqual(l.apps.first { $0.identity.name == "git-remote-https" }?.launchedBy, "Warp (pid 700)")
     }
 }

@@ -2,7 +2,8 @@ import SwiftUI
 
 /// The tags of a connection that does not go straight to its server: `VPN · Windscribe · utun3` (teal),
 /// `Proxy · ssh` (orange) for a local or system proxy, including destinations unmasked behind a local proxy, and
-/// `VPN server · Windscribe` (grey) for the VPN client's own connection that carries the tunnel.
+/// `VPN server · Windscribe` (grey) for the VPN client's own connection that carries the tunnel. After them, in
+/// blue, the direction: `↓ Incoming` for a connection a peer started, `↓ stream` for a long-lived download.
 struct RouteBadges: View {
     let remote: RemoteHost
     /// Narrow rows leave out the tunnel interface.
@@ -13,11 +14,13 @@ struct RouteBadges: View {
         var symbol: String
         var vpn: Bool
         var carrier = false
+        var direction = false
         var help: String
-        var color: Color { carrier ? .secondary : vpn ? .teal : .orange }
+        var color: Color { direction ? .blue : carrier ? .secondary : vpn ? .teal : .orange }
     }
 
-    static func items(_ r: RemoteHost, compact: Bool) -> [Item] {
+    /// `directions`: also the direction tags (a connection's own row and the inspector; not an app's summary).
+    static func items(_ r: RemoteHost, compact: Bool, directions: Bool = true) -> [Item] {
         var out: [Item] = []
         if let route = r.route {
             if case .vpnServer = route {
@@ -28,6 +31,14 @@ struct RouteBadges: View {
         }
         if let via = r.via, !(r.route?.isProxy ?? false) {
             out.append(Item(text: via.badge, symbol: "arrow.triangle.branch", vpn: false, help: "\(via.label), \(via.kind)"))
+        }
+        guard directions else { return out }
+        if r.incoming {
+            out.append(Item(text: "Incoming", symbol: "arrow.down", vpn: false, direction: true,
+                            help: "\(r.address) started this connection to port \(r.port) of this Mac, where \(r.process ?? "a program") listens. Rules decide what this Mac connects to, so this row has no ✗/✓."))
+        } else if r.stream {
+            out.append(Item(text: "stream", symbol: "arrow.down", vpn: false, direction: true,
+                            help: "Open for a while and mostly receiving: a download, a server push (such as Server-Sent Events) or a media stream. Rat sees how many bytes pass, not what they carry."))
         }
         return out
     }
@@ -41,10 +52,12 @@ struct RouteBadges: View {
 /// two and a count of the rest ("VPN · Windscribe", "Proxy · ssh", "+1").
 struct RouteSummaryBadges: View {
     let remotes: [RemoteHost]
+    /// Only the symbols, for a row that chooses its own fallbacks (a process row keeps its pid before its tags' text).
+    var symbolsOnly = false
 
     static func items(_ remotes: [RemoteHost]) -> [RouteBadges.Item] {
         var seen = Set<String>(), out: [RouteBadges.Item] = []
-        for r in remotes { for i in RouteBadges.items(r, compact: true) where seen.insert(i.text).inserted { out.append(i) } }
+        for r in remotes { for i in RouteBadges.items(r, compact: true, directions: false) where seen.insert(i.text).inserted { out.append(i) } }
         return out.sorted { ($0.vpn ? 0 : $0.carrier ? 2 : 1, $0.text) < ($1.vpn ? 0 : $1.carrier ? 2 : 1, $1.text) }
     }
 
@@ -53,12 +66,20 @@ struct RouteSummaryBadges: View {
         if !items.isEmpty {
             // The row's name keeps its room: with less space the tags step down to the first one and a count,
             // then to their symbols (each still names itself in its tooltip).
-            ViewThatFits(in: .horizontal) {
-                badges(items, shown: 2)
-                badges(items, shown: 1)
-                HStack(spacing: 3) { ForEach(items, id: \.self) { RouteBadge(item: $0, symbolOnly: true) } }
+            if symbolsOnly {
+                symbols(items)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    badges(items, shown: 2)
+                    badges(items, shown: 1)
+                    symbols(items)
+                }
             }
         }
+    }
+
+    private func symbols(_ items: [RouteBadges.Item]) -> some View {
+        HStack(spacing: 3) { ForEach(items, id: \.self) { RouteBadge(item: $0, symbolOnly: true) } }
     }
 
     private func badges(_ items: [RouteBadges.Item], shown: Int) -> some View {
@@ -109,29 +130,44 @@ struct Pill: View {
     }
 }
 
-/// Deny / allow button pair shown on each process row.
+/// Deny / allow button pair shown on each row of the process list. A process or connection row without a choice of
+/// its own shows the one it follows (`inherited`, from its process or app) muted; clicking sets its own.
 struct PolicyToggle: View {
     let policy: Policy?
+    var inherited: Policy? = nil
+    /// The smaller pair of the process and connection rows.
+    var compact = false
+    /// "this process", "this connection": for the help text.
+    var subject = "this app"
     let set: (Policy?) -> Void
 
     var body: some View {
-        HStack(spacing: 2) {
-            cell("xmark", active: policy == .deny, tint: .red) { set(policy == .deny ? nil : .deny) }
+        HStack(spacing: compact ? 0 : 2) {
+            cell("xmark", choice: .deny, tint: .red)
                 .accessibilityLabel("Deny").accessibilityIdentifier("policy-deny")
-            cell("checkmark", active: policy == .allow, tint: .green) { set(policy == .allow ? nil : .allow) }
+            cell("checkmark", choice: .allow, tint: .green)
                 .accessibilityLabel("Allow").accessibilityIdentifier("policy-allow")
         }
     }
 
-    private func cell(_ symbol: String, active: Bool, tint: Color, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 11, weight: .bold))
+    private func cell(_ symbol: String, choice: Policy, tint: Color) -> some View {
+        let active = policy == choice
+        let follows = policy == nil && inherited == choice
+        let undecided = policy == nil && inherited == nil
+        let fill: Color = active ? tint : follows ? tint.opacity(0.35) : undecided && !compact ? .blue : .gray.opacity(compact ? 0.2 : 0.35)
+        let verb = choice == .deny ? "Deny" : "Allow"
+        return Button { set(active ? nil : choice) } label: {
+            Image(systemName: symbol).font(.system(size: compact ? 9 : 11, weight: .bold))
+                .frame(width: compact ? 18 : 22, height: compact ? 16 : 20)
+                .foregroundStyle(active || follows || (undecided && !compact) ? .white : .secondary)
+                .background(fill, in: RoundedRectangle(cornerRadius: compact ? 4 : 5))
+                // The small pair is drawn small but hit like the app row's: a click just beside it still counts.
                 .frame(width: 22, height: 20)
-                .foregroundStyle(active ? .white : (policy == nil ? .white : .secondary))
-                .background(active ? tint : (policy == nil ? Color.blue : Color.gray.opacity(0.35)), in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityValue(active ? "on" : "off")
+        .help(active ? "\(verb) \(subject) (click to clear)" : follows ? "\(choice == .deny ? "Denied" : "Allowed") by the wider row; click to \(verb.lowercased()) \(subject) itself" : "\(verb) \(subject)")
+        .accessibilityValue(active ? "on" : follows ? "inherited" : "off")
     }
 }
 

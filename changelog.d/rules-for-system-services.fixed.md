@@ -1,0 +1,1 @@
+A rule for one system service in the macOS row (for example /usr/sbin/mDNSResponder or /usr/bin/curl), or for one helper's path, now matches that service; before, only the app's path was compared and such rules never applied.

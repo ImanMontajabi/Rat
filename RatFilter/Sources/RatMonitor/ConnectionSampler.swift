@@ -17,11 +17,14 @@ public struct ObservedConnection: Hashable, Sendable {
     public var tcpState: String?
     /// The socket's own address: on a VPN tunnel interface (utun, ipsec) when its traffic goes through the VPN.
     public var localAddress: String
+    /// A peer started it: a listener on this Mac accepted it (`SocketDirection.mark`). Not known from one socket.
+    public var incoming: Bool
 
     public init(pid: Int32, processPath: String, proto: Proto, remoteAddress: String, remotePort: Int, localPort: Int, tcpState: String?,
-                localAddress: String = "") {
+                localAddress: String = "", incoming: Bool = false) {
         self.pid = pid; self.processPath = processPath; self.proto = proto; self.remoteAddress = remoteAddress
         self.remotePort = remotePort; self.localPort = localPort; self.tcpState = tcpState; self.localAddress = localAddress
+        self.incoming = incoming
     }
 
     public var processName: String { (processPath as NSString).lastPathComponent }
@@ -46,9 +49,28 @@ public enum ConnectionSampler {
         return n > 0 ? Array(pids.prefix(Int(n))).filter { $0 > 0 } : []
     }
 
+    /// The `count` most recently started processes. The kernel lists processes newest first and stops when the buffer
+    /// is full, so this costs a fraction of `allPIDs` (18 µs against 160 µs on a Mac with 1,000 processes, read after
+    /// a sleep): enough to notice that a process started.
+    /// Fills `buffer` (its size is the count) and returns how many it holds; no allocation, as it runs every pass.
+    public static func newestPIDs(into buffer: inout [pid_t]) -> Int {
+        let n = buffer.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
+        return max(0, min(Int(n), buffer.count))
+    }
+
     public static func path(of pid: pid_t) -> String {
         var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         return proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : "pid \(pid)"
+    }
+
+    /// When the kernel started a process (`kinfo_proc`, readable for any user's process), or nil when it exited.
+    public static func startTime(of pid: pid_t) -> Date? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0, info.kp_proc.p_pid == pid else { return nil }
+        let t = info.kp_proc.p_un.__p_starttime
+        return Date(timeIntervalSince1970: Double(t.tv_sec) + Double(t.tv_usec) / 1_000_000)
     }
 
     /// Socket descriptors of a process (empty if it cannot be inspected).

@@ -1,0 +1,1 @@
+A deny made while nothing else was denied takes effect at once: the helper now wakes as soon as Rat hands it the change, instead of up to a quarter of a second later, so a download already under way is cut before more of it arrives.

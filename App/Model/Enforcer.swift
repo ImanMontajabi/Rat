@@ -1,6 +1,7 @@
 import Foundation
 import os
 import RatEnforce
+import RatFilterCore
 
 private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "enforcer")
 
@@ -13,6 +14,8 @@ private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "enfor
 /// * `denied-apps.txt`: apps that are denied outright. The daemon blocks the local ports of every socket of their
 ///   processes (helpers included), polling every few milliseconds.
 /// * `denied-ports.txt`: local ports of sockets that a rule denied (for example one domain for all apps).
+/// * `deny-rules.json`: the rules themselves (`DaemonRules`), so the daemon cuts the sockets of one denied process
+///   or connection on its own pass, every few milliseconds, instead of after Rat's next pass.
 ///
 /// Only local ports are ever blocked. Remote addresses are shared by every app on the Mac (DNS resolvers, CDNs),
 /// so Rat never puts them in the firewall. Without the helper nothing is enforced.
@@ -42,6 +45,7 @@ final class Enforcer: ObservableObject {
     let snapshotURL: URL
     let appsURL: URL
     let portsURL: URL
+    let rulesURL: URL
     /// Touched by Repair Firewall: the daemon puts pf right at once when this file changes (only its date is read).
     let repairURL: URL
     private let statusURL: URL
@@ -68,6 +72,7 @@ final class Enforcer: ObservableObject {
         snapshotURL = supportDirectory.appendingPathComponent("system-sockets.txt")
         appsURL = supportDirectory.appendingPathComponent("denied-apps.txt")
         portsURL = supportDirectory.appendingPathComponent("denied-ports.txt")
+        rulesURL = supportDirectory.appendingPathComponent("deny-rules.json")
         repairURL = supportDirectory.appendingPathComponent("pf-repair-request")
         self.helperInstalled = helperInstalled ?? FileManager.default.fileExists(atPath: Self.plistPath(Self.applyLabel))
         statusURL = URL(fileURLWithPath: statusPath ?? Self.statusPath)
@@ -153,6 +158,14 @@ final class Enforcer: ObservableObject {
         guard helperInstalled else { return }
         if write(paths.sorted().map { $0 + "\n" }.joined(), to: appsURL) {
             logger.notice("denied apps written: \(paths.count, privacy: .public)")
+        }
+    }
+
+    /// The rules the daemon follows itself (written when they, or the names they need, change).
+    func syncRules(_ rules: DaemonRules) {
+        guard helperInstalled, let data = try? rules.encoded() else { return }
+        if write(String(decoding: data, as: UTF8.self), to: rulesURL) {
+            logger.notice("deny rules written: \(rules.rules.count, privacy: .public) rules, \(rules.names.count, privacy: .public) names")
         }
     }
 

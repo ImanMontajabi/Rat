@@ -39,7 +39,7 @@ struct SidebarView: View {
             let keys: Set<String>
             switch settings.groupBy {
             case .domain: keys = Set(a.remotes.filter { !isLocalAddress($0.address) }.map { registrableDomain($0.host) })
-            case .country: keys = Set(a.remotes.compactMap { $0.geo?.country })
+            case .country: keys = Set(a.remotes.compactMap { $0.geo.map { [$0.flag, $0.country].filter { !$0.isEmpty }.joined(separator: " ") } })
             case .process: keys = []
             }
             for k in keys { d[k, default: []].append(a) }
@@ -56,7 +56,7 @@ struct SidebarView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if settings.groupBy == .process {
-                        ForEach(rows) { app in ProcessRow(app: app, selection: $selection, filter: query.route) }
+                        ForEach(rows) { app in ProcessRow(app: app, selection: $selection, filter: query.route, hideLocal: filter.hideLocal) }
                     } else {
                         ForEach(groups) { g in groupRow(g) }
                     }
@@ -80,7 +80,7 @@ struct SidebarView: View {
             .padding(.vertical, 8).padding(.horizontal, 6).contentShape(Rectangle())
             .onTapGesture { if !expandedGroups.insert(g.id).inserted { expandedGroups.remove(g.id) } }
             if expandedGroups.contains(g.id) {
-                ForEach(g.apps) { app in ProcessRow(app: app, selection: $selection, filter: query.route).padding(.leading, 18) }
+                ForEach(g.apps) { app in ProcessRow(app: app, selection: $selection, filter: query.route, hideLocal: filter.hideLocal).padding(.leading, 18) }
             }
         }
     }
@@ -121,6 +121,8 @@ struct SidebarView: View {
             TextField("Search", text: $filter.search).textFieldStyle(.plain).accessibilityIdentifier("search-field")
             chip("arrow.down.left.circle", on: $filter.onlyIncoming, help: "Only apps accepting incoming connections").accessibilityIdentifier("only-incoming")
             chip("xmark.rectangle", on: $filter.onlyDenied, help: "Only denied apps").accessibilityIdentifier("only-denied")
+            chip("house.slash", on: $filter.hideLocal, help: "Hide local connections: this Mac (loopback), the local network (LAN, link-local) and Bonjour (mDNS, multicast)")
+                .accessibilityLabel("Hide Local").accessibilityIdentifier("hide-local").accessibilityValue(filter.hideLocal ? "on" : "off")
             Menu {
                 Picker("Route", selection: $filter.route) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
             } label: {
@@ -184,6 +186,8 @@ struct MonitorFilter: Equatable {
     var search = ""
     var onlyIncoming = false
     var onlyDenied = false
+    /// Leave out connections that stay near this Mac, and apps and processes that have only those (`AppSettings.hideLocal`).
+    var hideLocal = false
     /// The route chip; "vpn" or "proxy" in the search overrides it.
     var route: RouteFilter = .all
     var range: TimeRange = .fiveMinutes
@@ -204,14 +208,16 @@ struct MonitorFilter: Equatable {
         }
         if !settings.includeNetworkExtensions { list = list.filter { !$0.identity.isExtension } }
         if !settings.includeOtherUsers { list = list.filter { !$0.otherUsers } }
-        if onlyIncoming { list = list.filter { $0.listening > 0 } }
+        if onlyIncoming { list = list.filter { $0.listening > 0 || $0.remotes.contains(where: \.incoming) } }
         if onlyDenied { list = list.filter { ledger.rules.policy(for: $0.identity.ruleKey) == .deny } }
-        if route != .all { list = list.filter { $0.remotes.contains(where: route.matches) } }
+        if hideLocal { list = list.filter { !$0.onlyLocal } }
+        let shown = { (r: RemoteHost) in !(hideLocal && r.isLocal) }
+        if route != .all { list = list.filter { $0.remotes.contains { shown($0) && route.matches($0) } } }
         if !text.isEmpty {
             list = list.filter { a in
                 a.identity.name.localizedCaseInsensitiveContains(text) ||
                 a.processes.keys.contains { $0.localizedCaseInsensitiveContains(text) } ||
-                a.remotes.contains { Self.remote($0, contains: text) }
+                a.remotes.contains { shown($0) && Self.remote($0, contains: text) }
             }
         }
         return list
@@ -222,7 +228,7 @@ struct MonitorFilter: Equatable {
     /// ("Paris" draws only the lines to Paris).
     func matches(_ r: RemoteHost, of app: AppEntry) -> Bool {
         let (text, route) = query
-        guard route.matches(r) else { return false }
+        guard route.matches(r), !(hideLocal && r.isLocal) else { return false }
         guard !text.isEmpty, !app.identity.name.localizedCaseInsensitiveContains(text) else { return true }
         return (r.process?.localizedCaseInsensitiveContains(text) ?? false) || Self.remote(r, contains: text)
     }
@@ -274,8 +280,16 @@ struct ProcessRow: View {
     @Binding var selection: MonitorSelection?
     /// Shows only the connections through a VPN or a proxy.
     var filter: RouteFilter = .all
+    /// Leaves out connections that stay near this Mac, and processes that have only those.
+    var hideLocal = false
     @State private var open = false
     @State private var openProcesses = Set<String>()
+
+    init(app: AppEntry, selection: Binding<MonitorSelection?>, filter: RouteFilter = .all, hideLocal: Bool = false, open: Bool = false, openProcesses: Set<String> = []) {
+        self.app = app; _selection = selection; self.filter = filter; self.hideLocal = hideLocal
+        // Snapshot tests start a row open.
+        _open = State(initialValue: open); _openProcesses = State(initialValue: openProcesses)
+    }
 
     private var selectedHere: Bool { selection?.appID == app.id }
 
@@ -311,7 +325,7 @@ struct ProcessRow: View {
             .accessibilityIdentifier("app-row-\(app.identity.name)")
             if open {
                 VStack(alignment: .leading, spacing: 1) {
-                    if tree.direct.isEmpty && tree.processes.isEmpty { Text("No outgoing connections").foregroundStyle(.secondary).padding(.leading, 44) }
+                    if tree.direct.isEmpty && tree.processes.isEmpty { Text("No connections").foregroundStyle(.secondary).padding(.leading, 44) }
                     ForEach(tree.direct.prefix(30)) { r in remoteRow(r, indent: 44, process: app.mainProcess) }
                     ForEach(tree.processes) { node in processRow(node) }
                 }
@@ -323,9 +337,15 @@ struct ProcessRow: View {
     private func select(_ s: MonitorSelection) { selection = selection == s ? nil : s }
 
     private func filtered(_ t: (direct: [RemoteHost], processes: [ProcessNode])) -> (direct: [RemoteHost], processes: [ProcessNode]) {
-        guard filter != .all else { return t }
-        let nodes = t.processes.map { n -> ProcessNode in var n = n; n.remotes = n.remotes.filter(filter.matches); return n }
-        return (t.direct.filter(filter.matches), nodes.filter { !$0.remotes.isEmpty })
+        guard filter != .all || hideLocal else { return t }
+        let keep = { (r: RemoteHost) in filter.matches(r) && !(hideLocal && r.isLocal) }
+        // The route filter shows only processes with such connections; Hide Local hides those that had only local
+        // ones (a process with traffic and no connection listed stays).
+        let nodes = t.processes.compactMap { n -> ProcessNode? in
+            var m = n; m.remotes = n.remotes.filter(keep)
+            return m.remotes.isEmpty && (filter != .all || !n.remotes.isEmpty) ? nil : m
+        }
+        return (t.direct.filter(keep), nodes)
     }
 
     @ViewBuilder private func processRow(_ node: ProcessNode) -> some View {
@@ -334,12 +354,14 @@ struct ProcessRow: View {
         HStack(spacing: 6) {
             Disclosure(open: isOpen, label: node.name) { if !openProcesses.insert(node.name).inserted { openProcesses.remove(node.name) } }
             Image(systemName: app.identity.isSystem ? "gearshape.2" : "gearshape").foregroundStyle(.secondary)
-            Text(node.name).lineLimit(1).truncationMode(.middle).font(.caption.weight(.medium)).layoutPriority(1)
-            RouteSummaryBadges(remotes: node.remotes)
-            Text(node.pids.count == 1 ? "pid \(node.pids[0])" : node.pids.isEmpty ? "" : "\(node.pids.count) processes").foregroundStyle(.secondary).lineLimit(1)
-            Spacer(minLength: 4)
-            Text("\(node.remotes.count)").foregroundStyle(.secondary).monospacedDigit().help("Connections")
-            if node.totalIn + node.totalOut > 0 { Text(formatBytes(node.totalIn + node.totalOut)).foregroundStyle(.secondary).monospacedDigit() }
+            // The fullest form that fits: tags spelled out, then as symbols, then without the pid; only then is a long
+            // name ("Google Chrome Helper (Aperitif)") cut in the middle. The count and size are never cut or wrapped.
+            ViewThatFits(in: .horizontal) {
+                processLabel(node, pids: true, tags: true)
+                processLabel(node, pids: true, tags: false)
+                processLabel(node, pids: false, tags: false)
+            }
+            rowPolicy(app.ruleTarget(process: node.name), service: node.name, subject: "this process")
         }
         .padding(.vertical, 3).padding(.leading, 30).padding(.trailing, 4)
         .background(selection == s ? Color.accentColor.opacity(0.85) : .clear, in: RoundedRectangle(cornerRadius: 6))
@@ -350,7 +372,7 @@ struct ProcessRow: View {
         .accessibilityAction { select(s) }
         .accessibilityIdentifier("process-row-\(node.name)")
         if isOpen {
-            if node.remotes.isEmpty { Text("No outgoing connections").foregroundStyle(.secondary).padding(.leading, 70) }
+            if node.remotes.isEmpty { Text("No connections").foregroundStyle(.secondary).padding(.leading, 70) }
             ForEach(node.remotes.prefix(30)) { r in remoteRow(r, indent: 70, process: node.name) }
         }
     }
@@ -358,23 +380,75 @@ struct ProcessRow: View {
     private func remoteRow(_ r: RemoteHost, indent: CGFloat, process: String?) -> some View {
         let s = MonitorSelection(appID: app.id, process: process, remote: r.id)
         return HStack(spacing: 6) {
-            Text(r.host).lineLimit(1).truncationMode(.middle)
-            RouteBadges(remote: r, compact: true)
-            Spacer(minLength: 4)
-            Text("\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
-            if r.bytesIn + r.bytesOut > 0 {
-                Text(formatBytes(r.bytesIn + r.bytesOut)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
-                    .help("\(formatBytes(r.bytesIn)) received, \(formatBytes(r.bytesOut)) sent on the open connections")
+            // The fullest form that fits: tags spelled out, then the port without its service name, then the tags as
+            // symbols. Only when even that is too wide is the host cut, in the middle; the port and size never are.
+            ViewThatFits(in: .horizontal) {
+                connectionLabel(r, tags: true, service: true)
+                connectionLabel(r, tags: true, service: false)
+                connectionLabel(r, tags: false, service: true)
+                connectionLabel(r, tags: false, service: false)
             }
+            .help(r.geo.map { "\($0.place)\(r.incoming ? "" : " · \(r.host)")" } ?? r.host)
+            // The row reads as one element (its label carries the tags); its ✗/✓ stay buttons of their own.
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { select(s) }
+            .accessibilityIdentifier("remote-row-\(r.host)")
+            HStack(spacing: 0) { rowPolicy(app.ruleTarget(process: process, remote: r), service: r.process ?? process, subject: "this connection") }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("remote-policy-\(r.host)")
         }
         .padding(.vertical, 2).padding(.leading, indent).padding(.trailing, 4)
         .background(selection == s ? Color.accentColor.opacity(0.7) : .clear, in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .onTapGesture { select(s) }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { select(s) }
-        .accessibilityIdentifier("remote-row-\(r.host)")
+    }
+
+    private func processLabel(_ node: ProcessNode, pids: Bool, tags: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(node.name).lineLimit(1).truncationMode(.middle).font(.caption.weight(.medium)).layoutPriority(1)
+            RouteSummaryBadges(remotes: node.remotes, symbolsOnly: !tags)
+            if pids, !node.pids.isEmpty {
+                Text(verbatim: node.pids.count == 1 ? "pid \(node.pids[0])" : "\(node.pids.count) processes").foregroundStyle(.secondary).lineLimit(1).fixedSize()
+            }
+            Spacer(minLength: 4)
+            Text(verbatim: "\(node.remotes.count)").foregroundStyle(.secondary).monospacedDigit().fixedSize().help("Connections")
+            if node.totalIn + node.totalOut > 0 { Text(formatBytes(node.totalIn + node.totalOut)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1).fixedSize() }
+        }
+    }
+
+    private func connectionLabel(_ r: RemoteHost, tags: Bool, service: Bool) -> some View {
+        HStack(spacing: 6) {
+            if let flag = r.geo?.flag, !flag.isEmpty { Text(flag).accessibilityHidden(true) }
+            Text(r.host).lineLimit(1).truncationMode(.middle)
+            HStack(spacing: tags ? 4 : 3) {
+                ForEach(RouteBadges.items(r, compact: true), id: \.self) { RouteBadge(item: $0, symbolOnly: !tags) }
+            }
+            Spacer(minLength: 4)
+            Text(verbatim: "\(r.proto) \(r.port)" + (service ? serviceSuffix(proto: r.proto, port: r.port) : ""))
+                .foregroundStyle(.secondary).monospacedDigit().lineLimit(1).fixedSize()
+            if r.bytesIn + r.bytesOut > 0 {
+                Text(formatBytes(r.bytesIn + r.bytesOut)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1).fixedSize()
+                    .help("\(formatBytes(r.bytesIn)) received, \(formatBytes(r.bytesOut)) sent on the open connections")
+            }
+        }
+    }
+
+    /// The ✗/✓ of a process or connection row: its own choice, or the one it follows from its process or app shown
+    /// muted. None for a row no rule can name (a local connection), and a lock for services that work for every app.
+    @ViewBuilder private func rowPolicy(_ target: RulesModel.Target?, service: String?, subject: String) -> some View {
+        if let target {
+            let p = ledger.rules.rowPolicy(target)
+            if p.own == nil, app.identity.isSystem, let service, SharedServices.note(for: service) != nil {
+                Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(.secondary).frame(width: 44)
+                    .help("\(service) works for every app: denying it would cut them all. Use a rule for one service in the Rules window.")
+                    .accessibilityIdentifier("policy-locked")
+            } else {
+                PolicyToggle(policy: p.own, inherited: p.inherited, compact: true, subject: subject) { ledger.setPolicy($0, for: target) }
+            }
+        } else {
+            Color.clear.frame(width: 44, height: 1)
+        }
     }
 }
 

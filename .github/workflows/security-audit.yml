@@ -1,0 +1,87 @@
+name: Security audit
+
+# Known vulnerabilities in what the build depends on (scripts/security-audit.py): advisories for the pinned GitHub
+# Actions (GitHub Advisory Database) and for package lockfiles (osv-scanner). Every Monday, on demand, and on pull
+# requests that change dependencies or workflows. A scheduled or manual run that finds something opens (or
+# updates) an issue labelled `security`; a pull request that brings one in fails.
+on:
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '**/Package.swift'
+      - '**/Package.resolved'
+      - project.yml
+      - .github/workflows/**
+      - .github/actions/**
+      - scripts/security-audit.py
+      - scripts/test_security_audit.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      OSV_SCANNER_VERSION: v2.7.0
+      OSV_SCANNER_SHA256: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit script tests
+        run: python3 -I -m unittest discover -s scripts -p 'test_*.py' -v
+
+      - name: osv-scanner (package lockfiles)
+        run: |
+          bin="$RUNNER_TEMP/osv-scanner"
+          curl -fsSL -o "$bin" "https://github.com/google/osv-scanner/releases/download/$OSV_SCANNER_VERSION/osv-scanner_linux_amd64"
+          echo "$OSV_SCANNER_SHA256  $bin" | sha256sum -c -
+          chmod +x "$bin"
+          # 0: nothing found, 1: vulnerabilities (reported by the next step), 128: no package sources.
+          code=0
+          "$bin" scan source -r --format json . > "$RUNNER_TEMP/osv.json" || code=$?
+          case $code in 0|1|128) ;; *) exit "$code" ;; esac
+
+      - name: Advisories
+        id: audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I scripts/security-audit.py --osv "$RUNNER_TEMP/osv.json" --report "$RUNNER_TEMP/report.md" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update the security issue
+        if: github.event_name != 'pull_request' && steps.audit.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: 'Security audit: known vulnerabilities'
+        run: |
+          gh label create security --color B60205 --description "Known vulnerabilities (Security audit workflow)" 2>/dev/null || true
+          body="$RUNNER_TEMP/report.md"
+          echo "Found by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >> "$body"
+          number=$(gh issue list --label security --state open --json number,title --jq "map(select(.title == \"$TITLE\")) | .[0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file "$body"
+            gh issue comment "$number" --body "Still found on $(date -u +%Y-%m-%d) (the report above is updated)."
+          else
+            gh issue create --title "$TITLE" --label security --body-file "$body"
+          fi
+
+      - name: Fail when something was found
+        if: steps.audit.outputs.found == 'true'
+        run: |
+          echo "::error::Known vulnerabilities found; see the job summary."
+          exit 1

@@ -1,11 +1,18 @@
 import Darwin
 import Foundation
+import RatFilterCore
 import RatMonitor
 
 /// Runs a command; returns its exit status. Injectable so tests never touch the firewall.
 public typealias CommandRunner = (_ executable: String, _ arguments: [String], _ stdin: String?) -> Int32
 
 public func runCommand(_ executable: String, _ arguments: [String], _ stdin: String?) -> Int32 {
+    // The daemon's threads have no pool that is drained: without this one each call's pipe stays open (see
+    // `captureCommand`).
+    autoreleasepool { runCommandOnce(executable, arguments, stdin) }
+}
+
+private func runCommandOnce(_ executable: String, _ arguments: [String], _ stdin: String?) -> Int32 {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: executable)
     p.arguments = arguments
@@ -26,6 +33,13 @@ public func runCommand(_ executable: String, _ arguments: [String], _ stdin: Str
 public typealias CommandCapture = (_ executable: String, _ arguments: [String]) -> String
 
 public func captureCommand(_ executable: String, _ arguments: [String]) -> String {
+    // Foundation autoreleases the pipe's file handle. The daemon's loop runs on a thread whose pool is never drained,
+    // so without a pool here every call kept one descriptor open: after a few hundred `pfctl` runs the daemon hit
+    // launchd's limit of 256, could not start pfctl any more and stopped enforcing.
+    autoreleasepool { captureCommandOnce(executable, arguments) }
+}
+
+private func captureCommandOnce(_ executable: String, _ arguments: [String]) -> String {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: executable)
     p.arguments = arguments
@@ -52,6 +66,11 @@ public struct EnforcerStatus: Codable, Equatable {
     public var anchorHooked: Bool
     public var deniedApps: [String: App]
     public var blockedPorts: Int
+    /// Apps with sockets the rules in `deny-rules.json` deny (one process, one connection), by the app's rule key:
+    /// the processes holding such sockets and their ports (nil from daemons before 1.5.0).
+    public var ruleDenied: [String: App]?
+    /// How many deny rules the daemon follows itself (nil from daemons before 1.5.0).
+    public var denyRules: Int?
     /// Loopback connections of denied apps to other apps' ports (local proxies, SSH forwards) blocked on lo0.
     public var blockedLoopbackPorts: Int?
     /// Whether the daemon reads proxy requests on lo0 (nil from daemons before 1.1.0).
@@ -69,11 +88,11 @@ public struct EnforcerStatus: Codable, Equatable {
     public var executableSHA256: String?
 
     public init(pid: Int32, updated: Date, pfEnabled: Bool, anchorHooked: Bool, deniedApps: [String: App], blockedPorts: Int,
-                blockedLoopbackPorts: Int? = nil, proxyCapture: Bool? = nil, tunnels: [String: String]? = nil,
+                ruleDenied: [String: App]? = nil, denyRules: Int? = nil, blockedLoopbackPorts: Int? = nil, proxyCapture: Bool? = nil, tunnels: [String: String]? = nil,
                 pfIssue: String? = nil, repairs: Int? = nil, lastRepair: String? = nil, lastRepairAt: Date? = nil,
                 executableSHA256: String? = nil) {
         self.pid = pid; self.updated = updated; self.pfEnabled = pfEnabled; self.anchorHooked = anchorHooked
-        self.deniedApps = deniedApps; self.blockedPorts = blockedPorts
+        self.deniedApps = deniedApps; self.blockedPorts = blockedPorts; self.ruleDenied = ruleDenied; self.denyRules = denyRules
         self.blockedLoopbackPorts = blockedLoopbackPorts; self.proxyCapture = proxyCapture; self.tunnels = tunnels
         self.pfIssue = pfIssue; self.repairs = repairs; self.lastRepair = lastRepair; self.lastRepairAt = lastRepairAt
         self.executableSHA256 = executableSHA256
@@ -85,11 +104,18 @@ public struct EnforcerStatus: Codable, Equatable {
 /// seen (CDN rotation, IPv6 fallback, QUIC migration) are cut as well. Only ports are ever blocked, never remote
 /// addresses. Loopback connections of denied processes to another app's port (a local proxy, an `ssh -L` forward)
 /// are blocked on lo0, so a denied app cannot leave the Mac through a tunnel either.
+///
+/// Rules for one process of an app or one connection (`deny-rules.json`, see `DaemonRules`) are followed the same
+/// way: every process a deny rule names is read on every pass, and the local ports of the sockets the rules deny
+/// (`SocketJudge`) are blocked, so they are cut during the handshake instead of after Rat's next 1.5 s pass.
 public final class EnforcerDaemon {
     public struct Settings {
         public var deniedFile: String
         /// Local ports of sockets that rules deny (written by Rat each pass); optional.
         public var portsFile: String?
+        /// The rules for one process or connection that the daemon follows itself (`DaemonRules`, written by Rat);
+        /// optional. `rat-enforcerd` reads `deny-rules.json` next to the deny list unless told otherwise.
+        public var rulesFile: String?
         /// Older versions kept a list of server addresses here. It is deleted: addresses are never blocked.
         public var legacyBlocklistFile: String?
         /// Where the daemon publishes `EnforcerStatus` as JSON; optional.
@@ -98,9 +124,12 @@ public final class EnforcerDaemon {
         public var proxiedFile: String?
         public var ownerUID: uid_t?
         public var anchor = "com.apple/rat"
-        /// Pass interval while a denied app has processes. Every pass reads the process list and every socket of
-        /// every denied process (reading Chrome's ~30 processes takes about 0.05 ms).
+        /// Pass interval while a denied or watched process runs. Every pass reads the newest processes and every
+        /// socket of every denied or watched process (reading Chrome's ~30 processes takes about 0.05 ms).
         public var interval: TimeInterval = 0.003
+        /// Pass interval while something is denied but none of it runs: how soon a denied program that starts is
+        /// seen (about 3 % CPU at 20 ms, against 8 % at 3 ms).
+        public var standbyInterval: TimeInterval = 0.02
         public var idleInterval: TimeInterval = 0.25
         /// Ports stay blocked this long after their socket disappears, to cover packets still in flight.
         public var portHold: TimeInterval = 5
@@ -125,10 +154,31 @@ public final class EnforcerDaemon {
     private var deniedStamp: Date?
     private var filePorts: [Int] = []
     private var portsStamp: Date?
+    private var rulesStamp: Date?
+    /// Judges sockets by the rules in `rulesFile`; nil when no rule denies a process path.
+    private var judge: SocketJudge?
+    private var denyRuleCount = 0
+    /// pid -> (app, executable) of a process a deny rule may concern; nil = classified, not watched.
+    private var watched: [pid_t: Watched?] = [:]
+    struct Watched { var app: String; var executable: String }
+    /// Socket -> whether the rules deny it, kept for the sockets seen on the last pass (cleared when the rules change).
+    private var socketVerdicts: [SocketKey: Bool] = [:]
+    struct SocketKey: Hashable { var pid: pid_t; var proto: UInt8; var localPort: Int; var remotePort: Int; var remote: String }
+    private var portsByRuleApp: [String: (processes: Int, ports: Set<Int>)] = [:]
     /// pid -> the denied entry it belongs to ("" = not denied).
     private var verdictCache: [pid_t: String] = [:]
     private var firstSeen: [pid_t: Date] = [:]
+    /// Start times read so far (tests check none is read before a pass loads its ports).
+    private(set) var agesRead = 0
     private var lastCleanup = Date.distantPast
+    /// Processes first seen less than a second ago and not denied: their path is read again every pass (see `tick`).
+    private var young: [pid_t] = []
+    /// The watched processes, as `watched` holds them (rebuilt when it changes, not on every pass).
+    private var ruledList: [(pid_t, Watched)] = []
+    private var watchedChanged = false
+    private var newest = [pid_t](repeating: 0, count: 32)
+    /// Whether the last pass found a denied or watched process (see `tick`).
+    public private(set) var watching = false
     public private(set) var deniedPIDs = Set<pid_t>()
     private var portsByApp: [String: (processes: Int, ports: Set<Int>)] = [:]
     public private(set) var lastTickDuration: TimeInterval = 0
@@ -202,14 +252,22 @@ public final class EnforcerDaemon {
     }
 
     public func loop() {
+        // A change to a file Rat hands over ends the sleep at once: a deny made while nothing was denied waited for
+        // the idle sleep (up to 0.25 s) before.
+        let wake = FileWake(files: [settings.deniedFile, settings.portsFile, settings.rulesFile, settings.repairFile].compactMap { $0 })
         while true {
-            let busy = tick()
-            if trace, busy { traceTicks += 1; traceTime += lastTickDuration; if traceTicks == 400 { FileHandle.standardError.write(Data("avg tick \(Int(traceTime / 400 * 1e6)) us, reloads \(reloads)\n".utf8)); traceTicks = 0; traceTime = 0 } }
-            Thread.sleep(forTimeInterval: busy ? settings.interval : settings.idleInterval)
+            let busy = autoreleasepool { tick() }
+            if trace, busy, watching { traceTicks += 1; traceTime += lastTickDuration; if traceTicks == 400 { FileHandle.standardError.write(Data("avg tick \(Int(traceTime / 400 * 1e6)) us, reloads \(reloads)\n".utf8)); traceTicks = 0; traceTime = 0 } }
+            if wake.wait(!busy ? settings.idleInterval : watching ? settings.interval : settings.standbyInterval) { filesChanged() }
         }
     }
 
-    /// One pass. Returns whether a denied app currently has processes (so the loop should run fast).
+    /// A file Rat hands over changed: the next pass reads it, whenever the last check was.
+    public func filesChanged() { lastFileCheck = .distantPast }
+
+    /// One pass. Returns whether there is anything to enforce (a denied app or a deny rule for a process); `watching`
+    /// says whether one of its processes runs. The loop then passes every `interval`, every `standbyInterval` while
+    /// none runs, and every `idleInterval` with nothing to enforce.
     @discardableResult
     public func tick(now: Date = Date()) -> Bool {
         let began = Date()
@@ -217,36 +275,88 @@ public final class EnforcerDaemon {
         refreshFiles(now: now)
         watchdog(now: now)
         defer { publishStatus(now: now) }
-        guard !denied.isEmpty else {
+        let judge = self.judge
+        guard !denied.isEmpty || judge != nil else {
             verdictCache.removeAll(); deniedPIDs.removeAll(); portsByApp.removeAll()
+            watched.removeAll(); socketVerdicts.removeAll(); portsByRuleApp.removeAll()
+            young.removeAll(); ruledList.removeAll(); lastCleanup = .distantPast; watching = false
             settle(now: now, live: [], loopback: [])
             return false
         }
-        let pids = ConnectionSampler.allPIDs()
+        // Listing every process costs more than the rest of a pass, and at 300 passes a second it was most of the
+        // helper's CPU. A new process is listed first, so the newest few show whether one started; every process is
+        // listed then, and four times a second anyway (which also forgets the processes that exited).
+        let full = now.timeIntervalSince(lastCleanup) >= 0.25 || startedProcess()
+        let pids = full ? ConnectionSampler.allPIDs() : young
+        if full { young = [] }
+        // A process's age is the kernel's (`startTime`): counted from when the daemon met it, every process was
+        // young for a second at the daemon's start and after each deny-list change, which kept a core busy for two
+        // seconds. Reading it costs about 15 µs a process, 15 ms for a whole Mac, so it is read at the end of the
+        // pass, once pf has this pass's ports: the pass right after a deny loads the denied process's ports as soon
+        // as before. Until then a process met for the first time counts as young.
+        var unaged: [pid_t] = []
+        defer {
+            for pid in unaged { firstSeen[pid] = ConnectionSampler.startTime(of: pid) ?? now }
+            agesRead += unaged.count
+            if !unaged.isEmpty { young = young.filter { verdictCache[$0] == "" && now.timeIntervalSince(firstSeen[$0] ?? now) < 1 } }
+        }
         for pid in pids {
             let known = verdictCache[pid]
-            if known == nil { firstSeen[pid] = now }
+            if known == nil { firstSeen[pid] = nil; unaged.append(pid) }
             // A new process is first a fork of its parent (a shell) and only then the program: until it is a second
             // old, its path is read again every pass so the exec is noticed.
             guard known == nil || (known == "" && now.timeIntervalSince(firstSeen[pid] ?? now) < 1) else { continue }
+            if full, known == nil || known == "" { young.append(pid) }
             let path = ConnectionSampler.path(of: pid)
-            let entry = path.hasPrefix("pid ") ? nil : denied.entry(for: path, responsiblePath: { ProcessGrouping.responsiblePath(of: pid) })
+            // A young process that exited is left as it was until the cleanup forgets it, as when every process was
+            // listed on every pass: marking it unwatched at once dropped the daemon to its idle rate between two
+            // short-lived processes, so the next one was seen up to 0.25 s late.
+            if !full, path.hasPrefix("pid ") { continue }
+            var responsible: String??
+            let responsiblePath = { () -> String? in
+                if let r = responsible { return r }
+                let r = ProcessGrouping.responsiblePath(of: pid); responsible = .some(r); return r
+            }
+            let entry = path.hasPrefix("pid ") ? nil : denied.entry(for: path, responsiblePath: responsiblePath)
             verdictCache[pid] = entry ?? ""
             if entry != nil {
                 deniedPIDs.insert(pid)
+                setWatched(pid, nil)
                 if trace { FileHandle.standardError.write(Data("denied pid \(pid) (\(entry!))\n".utf8)) }
+            } else if let judge, !path.hasPrefix("pid ") {
+                // The app as Rat's list groups it, so a rule for the app or for one of its processes matches here too.
+                let app = ProcessGrouping.owner(of: path, responsiblePath: responsiblePath).ruleKey
+                setWatched(pid, judge.watches(app: app, executable: path) ? Watched(app: app, executable: path) : nil)
+            } else {
+                setWatched(pid, nil)
             }
         }
         // Forgetting processes that exited is the costly part (hundreds of entries), so it runs a few times a second;
         // reading the sockets of a process that just exited returns nothing in the meantime.
-        if now.timeIntervalSince(lastCleanup) >= 0.25 {
+        young = young.filter { verdictCache[$0] == "" && now.timeIntervalSince(firstSeen[$0] ?? now) < 1 }
+        if full, now.timeIntervalSince(lastCleanup) >= 0.25 {
             lastCleanup = now
             let current = Set(pids)
             verdictCache = verdictCache.filter { current.contains($0.key) }
             firstSeen = firstSeen.filter { current.contains($0.key) }
             deniedPIDs = deniedPIDs.filter { current.contains($0) }
+            let before = watched.count
+            watched = watched.filter { current.contains($0.key) }
+            if watched.count != before { watchedChanged = true }
         }
-        guard !deniedPIDs.isEmpty else { portsByApp.removeAll(); settle(now: now, live: [], loopback: []); return false }
+        if watchedChanged {
+            watchedChanged = false
+            ruledList = watched.compactMap { pid, w in w.map { (pid, $0) } }
+        }
+        let ruled = judge == nil ? [] : ruledList
+        // Nothing it names runs: the next pass comes after `standbyInterval`, not the 0.25 s idle sleep, so a denied
+        // program that starts is cut within about 20 ms. A process is first seen before its `exec`, as its parent's
+        // program, so the passes that follow are what notice it became the denied one.
+        watching = !deniedPIDs.isEmpty || !ruled.isEmpty
+        guard watching else {
+            portsByApp.removeAll(); portsByRuleApp.removeAll(); socketVerdicts.removeAll()
+            settle(now: now, live: [], loopback: []); return true
+        }
 
         // Every socket of every denied process, every pass: descriptors are reused and a socket gets its port only
         // when it connects, so nothing read earlier can be trusted.
@@ -268,8 +378,49 @@ public final class EnforcerDaemon {
             byApp[entry] = app
         }
         portsByApp = byApp
+
+        // The sockets of processes a deny rule names, judged like Rat's pass judges their connections. A socket's
+        // verdict is kept while it exists, so each one is judged once (again only when the rules or names change).
+        var verdicts: [SocketKey: Bool] = [:]
+        var byRuleApp: [String: (processes: Int, ports: Set<Int>)] = [:]
+        if let judge {
+            for (pid, w) in ruled {
+                var cut = Set<Int>()
+                for fd in ConnectionSampler.socketFDs(of: pid) {
+                    guard let c = ConnectionSampler.connection(pid: pid, fd: fd, processPath: ""), c.localPort != 0, c.tcpState != "LISTEN",
+                          !ProxyWatch.isLoopback(c.remoteAddress) else { continue }
+                    let key = SocketKey(pid: pid, proto: c.proto == .udp ? 17 : 6, localPort: c.localPort, remotePort: c.remotePort, remote: c.remoteAddress)
+                    let deny = socketVerdicts[key] ?? judge.denies(app: w.app, executable: w.executable, address: c.remoteAddress,
+                                                                    port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp)
+                    verdicts[key] = deny
+                    if deny { cut.insert(c.localPort) }
+                }
+                guard !cut.isEmpty else { continue }
+                ports.formUnion(cut)
+                var app = byRuleApp[w.app] ?? (0, [])
+                app.processes += 1
+                app.ports.formUnion(cut)
+                byRuleApp[w.app] = app
+            }
+        }
+        socketVerdicts = verdicts
+        portsByRuleApp = byRuleApp
         settle(now: now, live: ports, loopback: Self.loopbackPortsToBlock(loopbackSockets, listening: listening))
         return true
+    }
+
+    /// Whether one of the newest processes is not known yet.
+    private func startedProcess() -> Bool {
+        let n = ConnectionSampler.newestPIDs(into: &newest)
+        for i in 0..<n where newest[i] > 0 && verdictCache[newest[i]] == nil { return true }
+        return false
+    }
+
+    private func setWatched(_ pid: pid_t, _ w: Watched?) {
+        let old = watched[pid]
+        watched[pid] = .some(w)
+        // Only a watched process entering or leaving changes the list the pass reads.
+        if w != nil || (old ?? nil) != nil { watchedChanged = true }
     }
 
     /// The loopback connections a denied app opened to another program (a local proxy, an `ssh -L` forward, any
@@ -431,7 +582,9 @@ public final class EnforcerDaemon {
         lastStatus = now
         let status = EnforcerStatus(pid: getpid(), updated: now, pfEnabled: pfEnabled, anchorHooked: anchorHooked,
                                     deniedApps: portsByApp.mapValues { EnforcerStatus.App(processes: $0.processes, ports: $0.ports.count) },
-                                    blockedPorts: loadedPorts.count, blockedLoopbackPorts: loadedLoopbackPorts.count,
+                                    blockedPorts: loadedPorts.count,
+                                    ruleDenied: portsByRuleApp.mapValues { EnforcerStatus.App(processes: $0.processes, ports: $0.ports.count) },
+                                    denyRules: denyRuleCount, blockedLoopbackPorts: loadedLoopbackPorts.count,
                                     proxyCapture: settings.proxiedFile == nil ? nil : proxyWatch?.capturing ?? false,
                                     tunnels: tunnelLock.withLock { tunnels },
                                     pfIssue: pfIssue, repairs: repairs, lastRepair: lastRepair, lastRepairAt: lastRepairAt,
@@ -446,6 +599,25 @@ public final class EnforcerDaemon {
     }
 
     private var lastFileCheck = Date.distantPast
+
+    /// The file is written by Rat as the user, so it is read as untrusted: at most `maxRulesFile` bytes, and one that
+    /// does not parse counts as no rules (the deny list and Rat's ports still apply).
+    static let maxRulesFile = 8 << 20
+
+    private func loadRules(_ path: String) {
+        var d: DaemonRules?
+        if let h = FileHandle(forReadingAtPath: path) {
+            defer { try? h.close() }
+            if let data = try? h.read(upToCount: Self.maxRulesFile + 1), data.count <= Self.maxRulesFile { d = DaemonRules.decode(data) }
+        }
+        let j = d.flatMap { $0.hasProcessDenies ? SocketJudge($0) : nil }
+        // Which processes are read depends only on what deny rules name; new names only judge sockets again.
+        if j?.watchList != judge?.watchList { watched.removeAll(); watchedChanged = true; verdictCache.removeAll(); deniedPIDs.removeAll() }
+        judge = j
+        socketVerdicts.removeAll()
+        denyRuleCount = d?.rules.filter { $0.enabled && $0.verdict == .deny && $0.processPath != nil }.count ?? 0
+        if trace { FileHandle.standardError.write(Data("deny rules: \(denyRuleCount), watching \(j?.watchList.count ?? 0) programs\n".utf8)) }
+    }
 
     /// Re-reads the deny list and port list when they changed. Checked every 50 ms with one `stat` each
     /// (FileManager's attribute lookup costs three system calls and showed up in profiles at a 3 ms pass rate).
@@ -468,6 +640,13 @@ public final class EnforcerDaemon {
                 let text = (try? String(contentsOfFile: pf, encoding: .utf8)) ?? ""
                 filePorts = PFRules.parsePorts(text)
                 fileLoopbackPorts = PFRules.parseLoopbackPorts(text)
+            }
+        }
+        if let rf = settings.rulesFile {
+            let r = stamp(rf)
+            if r != rulesStamp {
+                rulesStamp = r
+                loadRules(rf)
             }
         }
         if let file = settings.repairFile, let r = stamp(file), r != repairStamp {

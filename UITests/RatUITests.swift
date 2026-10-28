@@ -47,6 +47,11 @@ final class RatUITests: XCTestCase {
         XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: e)], timeout: timeout) == .completed
     }
 
+    /// Waits until a text shows `text` (as its label or its value, whichever the element reports).
+    private func waitText(_ e: XCUIElement, _ text: String, timeout: TimeInterval = 5) -> Bool {
+        XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "label == %@ OR value == %@", text, text), evaluatedWith: e)], timeout: timeout) == .completed
+    }
+
     private func isActive(_ profile: String) -> Bool { el("profile-\(profile)").descendants(matching: .any)["profile-active"].exists }
 
     /// Types into the search field. Right after a menu closes the click may not focus the field, so it retries
@@ -101,9 +106,167 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Summary"].exists)
     }
 
+    // MARK: three levels: app, process, connection
+
+    /// A process row and a connection row have their own ✗/✓; without a choice of their own they show the wider
+    /// row's (Chrome is allowed as a whole in the demo data) as "inherited".
+    func testProcessAndConnectionRowsHaveTheirOwnToggles() {
+        expand("Google Chrome")
+        expand("Google Chrome Helper")
+        let helper = el("process-row-Google Chrome Helper")
+        XCTAssertTrue(helper.waitForExistence(timeout: 5))
+        let helperDeny = helper.buttons["policy-deny"], helperAllow = helper.buttons["policy-allow"]
+        XCTAssertEqual(helperAllow.value as? String, "inherited", "follows the app's ✓")
+        XCTAssertEqual(helperDeny.value as? String, "off")
+        let video = el("remote-policy-video.example.net")
+        XCTAssertTrue(video.waitForExistence(timeout: 5))
+        XCTAssertEqual(video.buttons["policy-allow"].value as? String, "inherited")
+
+        helperDeny.click()
+        XCTAssertTrue(waitValue(helperDeny, "on"), "the helper is denied on its own")
+        XCTAssertTrue(waitValue(video.buttons["policy-deny"], "inherited"), "its connection follows the helper now")
+        XCTAssertEqual(el("app-row-Google Chrome").buttons["policy-allow"].value as? String, "on", "the app keeps its ✓")
+        XCTAssertEqual(el("remote-policy-demo0.example.com").buttons["policy-allow"].value as? String, "inherited", "the main process's connections still follow the app")
+
+        video.buttons["policy-allow"].click()
+        XCTAssertTrue(waitValue(video.buttons["policy-allow"], "on"), "an exception for one connection")
+        XCTAssertEqual(el("remote-policy-cdn.example.net").buttons["policy-deny"].value as? String, "inherited", "the helper's other connection stays denied")
+        XCTAssertEqual(helperDeny.value as? String, "on")
+
+        helperDeny.click()
+        XCTAssertTrue(waitValue(helperDeny, "off"), "clicking the active choice clears it")
+        XCTAssertTrue(waitValue(helperAllow, "inherited"))
+    }
+
+    /// Services that work for every app have no one-click Deny of their own either.
+    func testSharedServicesAreLocked() {
+        expand("macOS")
+        let dns = el("process-row-mDNSResponder")
+        XCTAssertTrue(dns.waitForExistence(timeout: 5))
+        XCTAssertTrue(dns.descendants(matching: .any)["policy-locked"].exists, "mDNSResponder")
+        XCTAssertFalse(dns.buttons["policy-deny"].exists)
+        XCTAssertTrue(el("process-row-apsd").descendants(matching: .any)["policy-locked"].exists, "apsd")
+    }
+
+    /// The inspector lists the rules about the selected row and sets that row's ✗/✓.
+    func testInspectorShowsTheSelectedRowsRules() {
+        expand("Steam")
+        el("process-row-Steam Helper").click()
+        XCTAssertTrue(inspectorTitle().contains("Steam Helper"), inspectorTitle())
+        let rules = el("inspector-rules")
+        XCTAssertTrue(rules.waitForExistence(timeout: 5))
+        XCTAssertEqual(rules.value as? String, "1", "Steam's UDP rule covers its helper")
+        expand("Steam Helper")
+        el("remote-row-demo5.example.com").click()
+        XCTAssertTrue(inspectorTitle().contains("demo5.example.com"), inspectorTitle())
+        XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "the UDP 27015 rule matches this connection")
+        let deny = el("inspector-policy").buttons["policy-deny"]
+        XCTAssertTrue(deny.waitForExistence(timeout: 5))
+        deny.click()
+        XCTAssertTrue(waitValue(deny, "on"))
+        XCTAssertTrue(waitValue(el("inspector-rules"), "2"), "the connection's own ✗ is listed")
+        XCTAssertEqual(el("remote-policy-demo5.example.com").buttons["policy-deny"].value as? String, "on", "the list shows the same choice")
+        el("app-row-Telegram").click()
+        XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "Telegram's rule from an alert")
+    }
+
+    /// Manage Rules… opens the Rules window on the selected process, and New Rule starts from it.
+    func testManageRulesOpensOnTheSelection() {
+        expand("Steam")
+        el("process-row-Steam Helper").click()
+        let manage = el("manage-rules")
+        XCTAssertTrue(manage.waitForExistence(timeout: 5))
+        manage.click()
+        let window = app.windows["Rules"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        let title = el("rules-title")
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitText(title, "Steam Helper"), "\(title.label) \(title.value ?? "nil")")
+        XCTAssertTrue(waitText(el("rules-count"), "1 rule"))
+        XCTAssertTrue(el("rules-app-Steam").exists, "the Apps / Processes section lists the app")
+        XCTAssertTrue(el("rules-process-Steam Helper").exists, "and the process the window opened on")
+
+        window.toolbars.buttons["New Rule"].click()
+        let exe = el("rule-executable")
+        XCTAssertTrue(exe.waitForExistence(timeout: 5))
+        XCTAssertEqual(exe.value as? String, "/Applications/Demo/Steam.app/Contents/MacOS/Steam Helper")
+        XCTAssertEqual(el("rule-process").value as? String, "/Applications/Demo/Steam.app")
+        window.sheets.buttons["Cancel"].click()
+        XCTAssertTrue(waitGone(exe))
+
+        el("rules-app-Steam").click()
+        XCTAssertTrue(waitText(el("rules-title"), "Steam"))
+    }
+
     func testCommandLineToolShowsWhoStartedIt() {
         el("app-row-git-remote-https").click()
         XCTAssertTrue(app.staticTexts["Warp (pid 700)"].waitForExistence(timeout: 5), "Started by: Warp")
+    }
+
+    // MARK: direction
+
+    /// A peer's connection to Steam's Remote Play port is tagged `↓ Incoming` and has no ✗/✓; Telegram's long
+    /// download is tagged `↓ stream` and keeps them. App rows show neither.
+    func testIncomingAndStreamRowsAreTagged() {
+        XCTAssertFalse(el("app-row-Steam").descendants(matching: .any)["badge-Incoming"].exists, "the app row keeps its room for routes")
+        expand("Steam")
+        let incoming = el("remote-row-demo4.example.com")
+        XCTAssertTrue(incoming.waitForExistence(timeout: 5))
+        XCTAssertTrue(incoming.label.contains("Incoming"), incoming.label)
+        XCTAssertTrue(incoming.label.contains("27036"), "the port of this Mac the peer connected to: \(incoming.label)")
+        XCTAssertFalse(el("remote-policy-demo4.example.com").buttons["policy-deny"].exists, "no ✗/✓ for a connection a peer started")
+        incoming.click()
+        XCTAssertTrue(inspectorTitle().contains("demo4.example.com"), inspectorTitle())
+        XCTAssertFalse(el("inspector-policy").exists, "the inspector offers none either")
+
+        expand("Telegram")
+        let stream = el("remote-row-demo2.example.com")
+        XCTAssertTrue(stream.waitForExistence(timeout: 5))
+        XCTAssertTrue(stream.label.contains("stream"), stream.label)
+        XCTAssertFalse(stream.label.contains("Incoming"))
+        XCTAssertTrue(el("remote-policy-demo2.example.com").buttons["policy-deny"].exists, "a stream this Mac opened can be denied")
+    }
+
+    // MARK: flags and Hide Local
+
+    /// Places carry their country's flag: the Summary's Top Countries and a connection's location in the inspector.
+    func testPlacesShowTheirFlags() {
+        XCTAssertTrue(app.staticTexts["🇪🇸 Spain"].waitForExistence(timeout: 5), "Top Countries")
+        expand("Google Chrome")
+        let london = el("remote-row-demo0.example.com")
+        XCTAssertTrue(london.waitForExistence(timeout: 5))
+        london.click()
+        XCTAssertTrue(app.staticTexts["🇬🇧 London, United Kingdom"].waitForExistence(timeout: 5), "the inspector's location")
+    }
+
+    /// Hide Local leaves out Bonjour and LAN connections, and the processes that have only those; a connection
+    /// through a local proxy stays (it leaves the Mac). The chip remembers its state for the next launch.
+    func testHideLocalHidesLocalConnections() {
+        let chip = el("hide-local")
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        XCTAssertEqual(chip.value as? String, "off")
+        let counts = el("summary-counts")
+        XCTAssertTrue(counts.waitForExistence(timeout: 5))
+        let before = [counts.label, counts.value as? String ?? ""].joined()
+        expand("macOS")
+        XCTAssertTrue(el("process-row-rapportd").waitForExistence(timeout: 5), "a service that talks only to the LAN")
+        expand("mDNSResponder")
+        XCTAssertTrue(el("remote-row-224.0.0.251").waitForExistence(timeout: 5), "Bonjour")
+        expand("Firefox")
+        XCTAssertTrue(el("remote-row-127.0.0.1").waitForExistence(timeout: 5))
+
+        chip.click()
+        XCTAssertTrue(waitValue(chip, "on"))
+        XCTAssertTrue(waitGone(el("process-row-rapportd")), "a process with only local connections is hidden")
+        XCTAssertTrue(waitGone(el("remote-row-224.0.0.251")))
+        XCTAssertTrue(el("remote-row-dns.example").exists, "mDNSResponder's outside connection stays")
+        XCTAssertTrue(el("remote-row-127.0.0.1").exists, "through Tor: it leaves the Mac")
+        XCTAssertFalse(el("summary-filtered").exists, "a standing preference, not a filter")
+        XCTAssertNotEqual([counts.label, counts.value as? String ?? ""].joined(), before, "the Summary counts fewer domains")
+
+        chip.click()
+        XCTAssertTrue(waitValue(chip, "off"))
+        XCTAssertTrue(el("process-row-rapportd").waitForExistence(timeout: 5))
     }
 
     // MARK: VPN and proxy tags
@@ -119,7 +282,8 @@ final class RatUITests: XCTestCase {
         expand("Telegram Helper")
         let vpn = el("remote-row-demo3.example.com")
         XCTAssertTrue(vpn.waitForExistence(timeout: 5))
-        XCTAssertTrue(vpn.label.contains("VPN · Windscribe"), vpn.label)
+        XCTAssertTrue(vpn.label.contains("VPN · Windscribe"), vpn.label + " (a tag folded to its symbol still names itself)")
+        XCTAssertTrue(vpn.label.contains("TCP 5222"), vpn.label + " (the port whole, and a number never written as 5.222)")
         XCTAssertFalse(el("remote-row-demo2.example.com").label.contains("VPN"), "only the tunnelled connection is tagged")
         expand("Firefox")
         XCTAssertTrue(el("remote-row-news.example.org").waitForExistence(timeout: 5))
@@ -150,6 +314,22 @@ final class RatUITests: XCTestCase {
         el("route-filter").click()
         app.menuItems["All Connections"].click()
         XCTAssertTrue(el("app-row-Steam").waitForExistence(timeout: 5))
+    }
+
+    /// The map's pulses move while the window is seen and its lines carry traffic: they stop while Rat is hidden
+    /// and when the search leaves only idle connections.
+    func testMapFlowsMoveOnlyWhileSeenAndBusy() {
+        let flows = el("map-flows")
+        XCTAssertTrue(flows.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitValue(flows, "3 moving"), "London down, Paris both ways, Madrid up: \(flows.value ?? "nil")")
+        app.typeKey("h", modifierFlags: .command)
+        XCTAssertTrue(waitValue(flows, "paused"), "hidden: no frames drawn: \(flows.value ?? "nil")")
+        app.activate()
+        XCTAssertTrue(waitValue(flows, "3 moving", timeout: 10), "\(flows.value ?? "nil")")
+        search("git")
+        XCTAssertTrue(waitValue(flows, "idle"), "git's server is quiet: \(flows.value ?? "nil")")
+        search("")
+        XCTAssertTrue(waitValue(flows, "3 moving"))
     }
 
     /// The map draws only what the list shows: the route chip and the search narrow its places too.

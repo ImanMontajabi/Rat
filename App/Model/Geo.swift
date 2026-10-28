@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import RatGeo
+import RatFilterCore
 import os
 
 private let logger = Logger(subsystem: "com.imanmontajabi.Rat", category: "geo")
@@ -9,6 +10,13 @@ struct GeoPoint: Hashable {
     var coordinate: CLLocationCoordinate2D
     var city: String
     var country: String
+    /// ISO 3166-1 alpha-2 (`DE`), empty when the database has none.
+    var countryCode: String = ""
+
+    /// The country's flag (`🇩🇪`), or empty.
+    var flag: String { Flag.emoji(countryCode) }
+    /// "🇩🇪 Berlin, Germany"; the city is left out when the database has none.
+    var place: String { [flag, [city, country].filter { !$0.isEmpty }.joined(separator: ", ")].filter { !$0.isEmpty }.joined(separator: " ") }
     static func == (a: GeoPoint, b: GeoPoint) -> Bool { a.city == b.city && a.country == b.country && a.coordinate.latitude == b.coordinate.latitude }
     func hash(into h: inout Hasher) { h.combine(city); h.combine(country); h.combine(coordinate.latitude) }
 }
@@ -23,6 +31,9 @@ final class GeoService: @unchecked Sendable {
     private var asn: ASNDatabase?
     private var cache: [String: GeoPoint?] = [:]
     private var asnCache: [String: NetworkOwner?] = [:]
+    /// The caches start over past this many addresses (a week of browsing sees a few thousand), so a Mac that
+    /// stays up does not keep every address it ever saw.
+    static let cacheLimit = 16_384
 
     var available: Bool { lock.withLock { db != nil } }
     var networksAvailable: Bool { lock.withLock { asn != nil } }
@@ -94,17 +105,20 @@ final class GeoService: @unchecked Sendable {
     func lookup(_ ip: String) -> GeoPoint? {
         if let hit = lock.withLock({ cache[ip] }) { return hit }
         let result = lock.withLock { db }?.locate(ip).map {
-            GeoPoint(coordinate: .init(latitude: $0.latitude, longitude: $0.longitude), city: $0.city, country: $0.country)
+            GeoPoint(coordinate: .init(latitude: $0.latitude, longitude: $0.longitude), city: $0.city, country: $0.country, countryCode: $0.countryCode)
         }
-        lock.withLock { cache[ip] = .some(result) }
+        lock.withLock { if cache.count >= Self.cacheLimit { cache.removeAll(keepingCapacity: true) }; cache[ip] = .some(result) }
         return result
     }
+
+    /// Addresses placed now (for tests of the cache limit).
+    var cachedCount: Int { lock.withLock { cache.count } }
 
     /// The network an address belongs to (`AS13335 Cloudflare, Inc.`): who runs the network, not the app's vendor.
     func network(_ ip: String) -> NetworkOwner? {
         if let hit = lock.withLock({ asnCache[ip] }) { return hit }
         let result = lock.withLock { asn }?.owner(ip)
-        lock.withLock { asnCache[ip] = .some(result) }
+        lock.withLock { if asnCache.count >= Self.cacheLimit { asnCache.removeAll(keepingCapacity: true) }; asnCache[ip] = .some(result) }
         return result
     }
 
@@ -112,7 +126,7 @@ final class GeoService: @unchecked Sendable {
     static func localPoint() -> GeoPoint? {
         guard let z = TimeZoneLocator.coordinates() else { return nil }
         let country = Locale.current.region.flatMap { Locale.current.localizedString(forRegionCode: $0.identifier) } ?? ""
-        return GeoPoint(coordinate: .init(latitude: z.lat, longitude: z.lon), city: z.city, country: country)
+        return GeoPoint(coordinate: .init(latitude: z.lat, longitude: z.lon), city: z.city, country: country, countryCode: Locale.current.region?.identifier ?? "")
     }
 }
 
@@ -148,13 +162,20 @@ final class HostNames: @unchecked Sendable {
             pending[ip] = now
             queue.addOperation { [resolve] in
                 let name = resolve(ip) ?? ip
-                self.lock.withLock { self.cache[ip] = name; self.pending[ip] = nil }
+                self.lock.withLock {
+                    // Past the limit the names start over: each is looked up again when its address comes back.
+                    if self.cache.count >= GeoService.cacheLimit { self.cache.removeAll(keepingCapacity: true) }
+                    self.cache[ip] = name; self.pending[ip] = nil
+                }
             }
             return (ip, false)
         }
     }
 
     func name(for ip: String) -> String { lookup(ip).name }
+
+    /// Names known now (for tests of the cache limit).
+    var cachedCount: Int { lock.withLock { cache.count } }
 
     /// Whether DNS can name the address: not loopback (127.0.0.0/8, ::1), unspecified (0.0.0.0, ::) or link-local
     /// (169.254.0.0/16, fe80::/10), nor anything that is not an address.
@@ -198,9 +219,26 @@ func registrableDomain(_ host: String) -> String {
     return parts.suffix(2).joined(separator: ".")
 }
 
-func isLocalAddress(_ a: String) -> Bool {
-    LocalRanges.shared.contains(a) || a.hasPrefix("127.") || a.hasPrefix("10.") || a.hasPrefix("192.168.") || a.hasPrefix("169.254.") || a == "::1" ||
-    a.hasPrefix("fe80:") || a.hasPrefix("fc") || a.hasPrefix("fd") || (a.hasPrefix("172.") && (Int(a.split(separator: ".")[1]) ?? 0).clamped(16...31))
+func isLocalAddress(_ a: String) -> Bool { LocalNetwork.contains(a) }
+
+/// A country's flag from its ISO 3166-1 alpha-2 code: each letter becomes its regional indicator symbol (`DE` →
+/// 🇩🇪). Empty for anything that is not a region code (the databases use `ZZ` for unknown); `EU` is a flag too.
+enum Flag {
+    private static let regions = Set(Locale.Region.isoRegions.map(\.identifier).filter { $0.count == 2 }).subtracting(["ZZ"]).union(["EU"])
+
+    static func emoji(_ code: String) -> String {
+        let c = code.uppercased()
+        guard regions.contains(c) else { return "" }
+        return String(String.UnicodeScalarView(c.unicodeScalars.compactMap { UnicodeScalar(0x1F1E6 + $0.value - 65) }))
+    }
 }
 
-private extension Int { func clamped(_ r: ClosedRange<Int>) -> Bool { r.contains(self) } }
+/// Traffic that stays near this Mac, which Hide Local leaves out: loopback, link-local, private (LAN) and the
+/// user's own ranges (`LocalNetwork`), multicast and broadcast (Bonjour's 224.0.0.251 and ff02::fb, SSDP), and mDNS
+/// (UDP 5353) whatever its address.
+func isLocalTraffic(address: String, proto: String, port: Int) -> Bool {
+    if proto.uppercased() == "UDP" && port == 5353 { return true }
+    if address == "255.255.255.255" || address.lowercased().hasPrefix("ff") { return true }
+    if let first = address.split(separator: ".").first.flatMap({ Int($0) }), address.contains("."), !address.contains(":"), (224...239).contains(first) { return true }
+    return LocalNetwork.contains(address)
+}

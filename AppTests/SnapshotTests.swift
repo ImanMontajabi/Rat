@@ -90,6 +90,30 @@ final class SnapshotTests: XCTestCase {
         try assertMatchesGolden(render(view, size: CGSize(width: 400, height: 700)), "sidebar")
     }
 
+    /// An open app with an open helper: the ✗/✓ of each process and connection row, the app's ✓ followed muted.
+    func testProcessTreeMatchesGolden() throws {
+        let ledger = demoLedger()
+        let chrome = try XCTUnwrap(ledger.apps.first { $0.identity.name == "Google Chrome" })
+        ledger.rules.setProcessPolicy(.deny, app: chrome.identity.ruleKey, executable: try XCTUnwrap(chrome.executablePath(of: "Google Chrome Helper")))
+        let view = ProcessRow(app: chrome, selection: .constant(nil), open: true, openProcesses: ["Google Chrome Helper"]).environmentObject(ledger)
+            .padding(8).frame(width: 400).background(Color(white: 0.12))
+        try assertMatchesGolden(render(view, size: CGSize(width: 400, height: 200)), "process-tree")
+    }
+
+    /// Connection rows with tags in the 400 pt list, nested under a process: the host keeps its room, the tags fold
+    /// to symbols, and the port and size are never cut (Telegram's helper through a VPN, Firefox through proxies).
+    func testTaggedRowsKeepTheirPortAndSizeGolden() throws {
+        let ledger = demoLedger()
+        let telegram = try XCTUnwrap(ledger.apps.first { $0.identity.name == "Telegram" })
+        let firefox = try XCTUnwrap(ledger.apps.first { $0.identity.name == "Firefox" })
+        let view = VStack(spacing: 0) {
+            ProcessRow(app: telegram, selection: .constant(nil), open: true, openProcesses: ["Telegram Helper"])
+            ProcessRow(app: firefox, selection: .constant(nil), open: true)
+        }
+        .environmentObject(ledger).padding(8).frame(width: 400).background(Color(white: 0.12))
+        try assertMatchesGolden(render(view, size: CGSize(width: 400, height: 260)), "tagged-rows")
+    }
+
     func testSummaryInspectorMatchesGolden() throws {
         let ledger = demoLedger()
         try assertMatchesGolden(render(InspectorView(selection: nil).environmentObject(ledger), size: CGSize(width: 330, height: 700)), "inspector-summary")
