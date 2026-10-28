@@ -58,7 +58,8 @@ final class FileWakeTests: XCTestCase {
     }
 
     /// A deny written while nothing is denied (the daemon in its 0.25 s idle sleep) is enforced at once, on the
-    /// passes the write wakes: the wakeup also skips the 50 ms between file checks.
+    /// passes the write wakes: the wakeup also skips the 50 ms between file checks. What is timed is the wakeup; the
+    /// passes after it cost what `DaemonPerformanceTests` holds (30-40 ms of wall time each on a busy CI machine).
     func testADenyWrittenWhileIdleIsEnforcedAtOnce() throws {
         let dir = try tempDir()
         let denied = dir.appendingPathComponent("denied.txt")
@@ -78,20 +79,25 @@ final class FileWakeTests: XCTestCase {
 
         // The loop's steps: sleep (here at most the idle 0.25 s) until woken, pass, again. The daemon's own clock
         // moves 1 ms a pass, inside the 50 ms between file checks, so only the wakeup makes it read the file.
+        let lock = NSLock()
+        var writeStarted: Date?
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+            lock.withLock { writeStarted = Date() }
             try? (ConnectionSampler.path(of: getpid()) + "\n").write(to: denied, atomically: true, encoding: .utf8)
         }
-        let t0 = Date()
-        var passes = 0, clock = now
+        var passes = 0, clock = now, wokeAt: Date?, woken = false
         while d.loadedPorts.isEmpty, passes < 20 {
-            if wake.wait(0.25) { d.filesChanged() }
+            woken = wake.wait(0.25)
+            if woken { wokeAt = Date(); d.filesChanged() }
             clock += 0.001; passes += 1
             d.tick(now: clock)
         }
-        let took = Date().timeIntervalSince(t0) - 0.05
-        print("helper, deny written while idle: ports loaded \(String(format: "%.1f", took * 1000)) ms after the write, \(passes) passes")
         XCTAssertTrue(d.deniedPIDs.contains(getpid()))
         XCTAssertFalse(d.loadedPorts.isEmpty, "its socket's port is loaded")
-        XCTAssertLessThan(took, 0.1, "not after the 0.25 s idle sleep")
+        XCTAssertTrue(woken, "on the pass a wakeup started, not after the 0.25 s idle sleep")
+        let wrote = try XCTUnwrap(lock.withLock { writeStarted })
+        let latency = try XCTUnwrap(wokeAt, "woken by the write").timeIntervalSince(wrote)
+        print("helper, deny written while idle: woken \(String(format: "%.1f", latency * 1000)) ms after the write, ports loaded \(String(format: "%.1f", Date().timeIntervalSince(wrote) * 1000)) ms after it, \(passes) passes")
+        XCTAssertLessThan(latency, 0.1, "woken by the write itself")
     }
 }
