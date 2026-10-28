@@ -31,6 +31,9 @@ final class GeoService: @unchecked Sendable {
     private var asn: ASNDatabase?
     private var cache: [String: GeoPoint?] = [:]
     private var asnCache: [String: NetworkOwner?] = [:]
+    /// The caches start over past this many addresses (a week of browsing sees a few thousand), so a Mac that
+    /// stays up does not keep every address it ever saw.
+    static let cacheLimit = 16_384
 
     var available: Bool { lock.withLock { db != nil } }
     var networksAvailable: Bool { lock.withLock { asn != nil } }
@@ -104,15 +107,18 @@ final class GeoService: @unchecked Sendable {
         let result = lock.withLock { db }?.locate(ip).map {
             GeoPoint(coordinate: .init(latitude: $0.latitude, longitude: $0.longitude), city: $0.city, country: $0.country, countryCode: $0.countryCode)
         }
-        lock.withLock { cache[ip] = .some(result) }
+        lock.withLock { if cache.count >= Self.cacheLimit { cache.removeAll(keepingCapacity: true) }; cache[ip] = .some(result) }
         return result
     }
+
+    /// Addresses placed now (for tests of the cache limit).
+    var cachedCount: Int { lock.withLock { cache.count } }
 
     /// The network an address belongs to (`AS13335 Cloudflare, Inc.`): who runs the network, not the app's vendor.
     func network(_ ip: String) -> NetworkOwner? {
         if let hit = lock.withLock({ asnCache[ip] }) { return hit }
         let result = lock.withLock { asn }?.owner(ip)
-        lock.withLock { asnCache[ip] = .some(result) }
+        lock.withLock { if asnCache.count >= Self.cacheLimit { asnCache.removeAll(keepingCapacity: true) }; asnCache[ip] = .some(result) }
         return result
     }
 
@@ -156,13 +162,20 @@ final class HostNames: @unchecked Sendable {
             pending[ip] = now
             queue.addOperation { [resolve] in
                 let name = resolve(ip) ?? ip
-                self.lock.withLock { self.cache[ip] = name; self.pending[ip] = nil }
+                self.lock.withLock {
+                    // Past the limit the names start over: each is looked up again when its address comes back.
+                    if self.cache.count >= GeoService.cacheLimit { self.cache.removeAll(keepingCapacity: true) }
+                    self.cache[ip] = name; self.pending[ip] = nil
+                }
             }
             return (ip, false)
         }
     }
 
     func name(for ip: String) -> String { lookup(ip).name }
+
+    /// Names known now (for tests of the cache limit).
+    var cachedCount: Int { lock.withLock { cache.count } }
 
     /// Whether DNS can name the address: not loopback (127.0.0.0/8, ::1), unspecified (0.0.0.0, ::) or link-local
     /// (169.254.0.0/16, fe80::/10), nor anything that is not an address.

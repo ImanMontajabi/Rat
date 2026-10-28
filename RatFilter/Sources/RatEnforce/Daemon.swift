@@ -283,7 +283,10 @@ public final class EnforcerDaemon {
         if full { young = [] }
         for pid in pids {
             let known = verdictCache[pid]
-            if known == nil { firstSeen[pid] = now }
+            // Its age is the kernel's: a process met for the first time at the daemon's start, or again after the
+            // deny list changed, is mostly an old one, and reading every process's path on every pass for a second
+            // kept a core busy for two seconds and more.
+            if known == nil { firstSeen[pid] = ConnectionSampler.startTime(of: pid) ?? now }
             // A new process is first a fork of its parent (a shell) and only then the program: until it is a second
             // old, its path is read again every pass so the exec is noticed.
             guard known == nil || (known == "" && now.timeIntervalSince(firstSeen[pid] ?? now) < 1) else { continue }

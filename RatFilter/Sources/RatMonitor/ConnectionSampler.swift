@@ -63,6 +63,16 @@ public enum ConnectionSampler {
         return proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : "pid \(pid)"
     }
 
+    /// When the kernel started a process (`kinfo_proc`, readable for any user's process), or nil when it exited.
+    public static func startTime(of pid: pid_t) -> Date? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0, info.kp_proc.p_pid == pid else { return nil }
+        let t = info.kp_proc.p_un.__p_starttime
+        return Date(timeIntervalSince1970: Double(t.tv_sec) + Double(t.tv_usec) / 1_000_000)
+    }
+
     /// Socket descriptors of a process (empty if it cannot be inspected).
     public static func socketFDs(of pid: pid_t) -> [Int32] {
         let listBytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)

@@ -73,6 +73,9 @@ struct RemoteHost: Identifiable, Hashable {
     var incoming = false
     /// A long-lived connection that mostly receives: a download, a server push, a media stream (`StreamDetector`).
     var stream = false
+    /// Bytes per second on the last pass (the growth of `bytesIn`/`bytesOut`; 0 on its first pass), for the map's flows.
+    var rateIn = 0.0
+    var rateOut = 0.0
 }
 
 /// One executable of an app (its main binary, a helper, an XPC service working for it), by name.
@@ -261,6 +264,8 @@ final class Ledger: ObservableObject {
     private let proxyResolver = ProxyResolver()
     /// Which sockets are long-lived download streams, by their counters on each pass.
     var streams = StreamDetector()
+    /// Each row's byte counters on the last pass (app id and row id), for its rate.
+    private var rowBytes: [String: (in: UInt64, out: UInt64)] = [:]
     let routes = RouteMarker()
     private var signingCache: [String: (identifier: String?, team: String?)] = [:]
     private var rulesChanged: AnyCancellable?
@@ -455,6 +460,7 @@ final class Ledger: ObservableObject {
         var denyCount = 0, askCount = 0, listenCount = 0
         let wholeAppDenied = deniedAppPaths
         var portsNow = Set<Int>(), loopbackNow = Set<Int>(), liveSockets = Set<String>()
+        var bytesNow: [String: (in: UInt64, out: UInt64)] = [:]
         for id in table.keys {
             var e = table[id]!
             let rx = rxByApp[id] ?? 0, tx = txByApp[id] ?? 0
@@ -555,10 +561,21 @@ final class Ledger: ObservableObject {
                 if fresh { remotes[remotes.count - 1].verdict = verdict }
                 if verdict == .deny, r.live { loopbackNow.insert(r.clientPort) }
             }
+            // A row's rate is how much its open sockets' counters grew since the last pass; a closed socket makes
+            // the sum drop, which counts as nothing rather than as negative traffic.
+            for i in remotes.indices {
+                let key = id + "|" + remotes[i].id
+                bytesNow[key] = (remotes[i].bytesIn, remotes[i].bytesOut)
+                guard let before = rowBytes[key] else { continue }
+                remotes[i].rateIn = remotes[i].bytesIn > before.in ? Double(remotes[i].bytesIn - before.in) / dt : 0
+                remotes[i].rateOut = remotes[i].bytesOut > before.out ? Double(remotes[i].bytesOut - before.out) / dt : 0
+            }
             e.remotes = remotes
             table[id] = e
         }
         streams.keep(only: liveSockets)
+        rowBytes = bytesNow
+        uidCache = uidCache.filter { alive.contains($0.key) }
         deniedCount = denyCount; unconfirmedCount = askCount; incomingCount = listenCount
         deniedPorts = portsNow
         deniedLoopbackPorts = loopbackNow
@@ -829,6 +846,11 @@ final class Ledger: ObservableObject {
             // A peer connected to Steam's Remote Play port; Telegram's main connection is a long download.
             if c.3 == "demo4.example.com" { e.remotes[e.remotes.count - 1].incoming = true }
             if c.3 == "demo2.example.com" { e.remotes[e.remotes.count - 1].stream = true }
+            // Traffic on the last pass, for the map's flows: a download from London, a call to Paris (both ways), an
+            // upload to Madrid.
+            let rates: [String: (Double, Double)] = ["demo0.example.com": (180_000, 4_000), "video.example.net": (40_000, 35_000),
+                                                     "demo3.example.com": (20_000, 18_000), "demo5.example.com": (2_000, 300_000)]
+            if let (rx, tx) = rates[c.3] { e.remotes[e.remotes.count - 1].rateIn = rx; e.remotes[e.remotes.count - 1].rateOut = tx }
             table[ident.id] = e
         }
         // Firefox through local proxies: one destination unmasked behind `ssh -D 1080`, one connection to Tor that
