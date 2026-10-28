@@ -168,6 +168,8 @@ public final class EnforcerDaemon {
     /// pid -> the denied entry it belongs to ("" = not denied).
     private var verdictCache: [pid_t: String] = [:]
     private var firstSeen: [pid_t: Date] = [:]
+    /// Start times read so far (tests check none is read before a pass loads its ports).
+    private(set) var agesRead = 0
     private var lastCleanup = Date.distantPast
     /// Processes first seen less than a second ago and not denied: their path is read again every pass (see `tick`).
     private var young: [pid_t] = []
@@ -281,12 +283,20 @@ public final class EnforcerDaemon {
         let full = now.timeIntervalSince(lastCleanup) >= 0.25 || startedProcess()
         let pids = full ? ConnectionSampler.allPIDs() : young
         if full { young = [] }
+        // A process's age is the kernel's (`startTime`): counted from when the daemon met it, every process was
+        // young for a second at the daemon's start and after each deny-list change, which kept a core busy for two
+        // seconds. Reading it costs about 15 µs a process, 15 ms for a whole Mac, so it is read at the end of the
+        // pass, once pf has this pass's ports: the pass right after a deny loads the denied process's ports as soon
+        // as before. Until then a process met for the first time counts as young.
+        var unaged: [pid_t] = []
+        defer {
+            for pid in unaged { firstSeen[pid] = ConnectionSampler.startTime(of: pid) ?? now }
+            agesRead += unaged.count
+            if !unaged.isEmpty { young = young.filter { verdictCache[$0] == "" && now.timeIntervalSince(firstSeen[$0] ?? now) < 1 } }
+        }
         for pid in pids {
             let known = verdictCache[pid]
-            // Its age is the kernel's: a process met for the first time at the daemon's start, or again after the
-            // deny list changed, is mostly an old one, and reading every process's path on every pass for a second
-            // kept a core busy for two seconds and more.
-            if known == nil { firstSeen[pid] = ConnectionSampler.startTime(of: pid) ?? now }
+            if known == nil { firstSeen[pid] = nil; unaged.append(pid) }
             // A new process is first a fork of its parent (a shell) and only then the program: until it is a second
             // old, its path is read again every pass so the exec is noticed.
             guard known == nil || (known == "" && now.timeIntervalSince(firstSeen[pid] ?? now) < 1) else { continue }
