@@ -7,7 +7,8 @@
 # running Rat helper is left alone. /usr/bin/curl is the denied app, python3 and dig are the allowed ones.
 #
 #  1. Mid-stream: a denied curl and an allowed python3 download from the SAME server address. curl is denied after
-#     both are running. curl's stream must stop at once; python3 must keep downloading, and DNS to 1.1.1.1 and
+#     both are running. curl's stream must stop for good after reading what was already in its socket
+#     buffer (measured at the deny, see `midstream`); python3 must keep downloading, and DNS to 1.1.1.1 and
 #     8.8.8.8 must keep working (dig). The anchor must hold no address table and no pass rule, and the legacy
 #     blocklist file must be gone.
 #  2. Fresh processes: brand-new curls to unknown servers. This is the hard case (the ports are loaded after the
@@ -34,6 +35,34 @@ echo '{}' > "$WORK/deny-rules.json"
 echo "1.1.1.1" > "$WORK/legacy-blocklist.txt"   # what 1.0.3 left behind; the daemon must delete it
 FAIL=0
 size() { /usr/bin/stat -f %z "$1" 2>/dev/null || echo 0; }
+# Local port of a process's established TCP connection, and the bytes waiting in its receive queue (netstat's
+# Recv-Q) for that connection to $IP:443.
+tcp_port() { /usr/sbin/lsof -a -p "$1" -iTCP -sTCP:ESTABLISHED -n -P -Fn 2>/dev/null | sed -n 's/^n.*:\([0-9]*\)->.*/\1/p' | head -1; }
+recvq() {
+  [ -n "$1" ] && /usr/sbin/netstat -anp tcp | awk -v lp=".$1" -v r="$IP.443" '$5 == r && substr($4, length($4) - length(lp) + 1) == lp { print $2; exit }'
+}
+# pf states of a local port: pf looks up its state table before any rule, so a state another ruleset kept would
+# carry the flow past Rat's anchor (the daemon kills those it finds after loading a port, `pfctl -k local -k remote`).
+port_states() { /sbin/pfctl -s states 2>/dev/null | grep -cE "[:.\[]$1[] ]" ; }
+all_states() { /sbin/pfctl -s info 2>/dev/null | awk '/current entries/ { print $3 }'; }
+midstream() {
+  mpid=$1; mout=$2; mpy=$3; shift 3
+  LP=$(tcp_port "$mpid"); Q=$(recvq "$LP"); Q=${Q:-0}; SB=$(port_states "${LP:-0}")
+  M1=$(size "$mout"); P1=$(size "$mpy")
+  "$@"
+  last=$M1; still=0; steps=0
+  while [ $steps -lt 40 ]; do
+    sleep 0.5; steps=$((steps + 1)); now=$(size "$mout")
+    if [ "$now" = "$last" ]; then still=$((still + 1)); [ $still -ge 3 ] && break; else still=0; last=$now; fi
+  done
+  P2=$(size "$mpy"); sleep 1.5; M3=$(size "$mout"); P3=$(size "$mpy")
+  echo "  curl read +$((last - M1)) bytes after the deny; $Q were already in its socket buffer; it stopped after $(( (steps - still) / 2 )) s"
+  echo "  pf states for curl's port ${LP:-?}: $SB before the deny, $(port_states "${LP:-0}") after (all states: $(all_states))"
+  if [ $still -ge 3 ] && [ "$M3" = "$last" ] && [ $((last - M1)) -le $((Q + 65536)) ]; then echo "  ok denied curl stream is dead (only its buffer was read)"
+  else echo "  FAIL denied curl kept downloading beyond what was buffered"; FAIL=1; fi
+  [ "$P3" -gt "$P2" ] && echo "  ok allowed python3 kept downloading from the same address (+$((P3 - P1)) bytes)" || { echo "  FAIL allowed python3 was interrupted (collateral)"; FAIL=1; }
+}
+deny_curl() { echo "/usr/bin/curl" > "$WORK/denied.txt"; }
 
 RAT_TRACE=${RAT_TRACE:-} "$DAEMON" --denied "$WORK/denied.txt" --blocklist "$WORK/legacy-blocklist.txt" --anchor "$ANCHOR" \
   --proxied "$WORK/proxied.json" --owner-uid "$(id -u)" --rules "$WORK/deny-rules.json" &
@@ -74,20 +103,7 @@ A1=$(size "$WORK/a.out"); B1=$(size "$WORK/b.out")
 echo "  before deny: curl $A1 bytes, python3 $B1 bytes"
 { [ "$A1" -gt 0 ] && [ "$B1" -gt 0 ]; } || { echo "  could not start both downloads"; exit 3; }
 
-echo "/usr/bin/curl" > "$WORK/denied.txt"          # deny curl, mid-stream
-sleep 0.3
-AQ=$(size "$WORK/a.out")
-sleep 1.2
-A2=$(size "$WORK/a.out"); B2=$(size "$WORK/b.out")
-sleep 1.5
-AR=$(size "$WORK/a.out")
-sleep 1.5
-A3=$(size "$WORK/a.out"); B3=$(size "$WORK/b.out")
-echo "  curl bytes: 0.3 s after deny +$((AQ - A1)), at 1.5 s +$((A2 - A1)), at 3 s +$((AR - A1))  (curl keeps reading what was already in its socket buffer; the network side is cut at once)"
-echo "  1.5 s after deny: curl +$((A2 - A1)) bytes (trickle before the cut), python3 +$((B2 - B1))"
-echo "  next 3 s:        curl +$((A3 - A2)) bytes, python3 +$((B3 - B2)) bytes"
-[ "$A3" -eq "$A2" ] && echo "  ok denied curl stream is dead" || { echo "  FAIL denied curl kept downloading"; FAIL=1; }
-[ "$B3" -gt "$B2" ] && echo "  ok allowed python3 kept downloading from the same address" || { echo "  FAIL allowed python3 was interrupted (collateral)"; FAIL=1; }
+midstream $APID "$WORK/a.out" "$WORK/b.out" deny_curl   # deny curl, mid-stream
 kill -0 $APID 2>/dev/null && echo "  note: curl is still running (waiting), not downloading" || echo "  curl exited (connection reset)"
 
 echo "== DNS for allowed apps while curl is denied (1.1.1.1, 8.8.8.8, 9.9.9.9)"
@@ -105,6 +121,7 @@ echo "== anchor contents: ports only, no address table, no pass rule"
 kill -9 $APID $BPID 2>/dev/null; wait $APID $BPID 2>/dev/null; APID=; BPID=
 
 echo "== phase 2, fresh curl processes to servers never seen (hard case)"
+echo "  pf states before: $(all_states)"
 TOTAL=0; LEAKS=0
 for u in https://www.google.com https://www.youtube.com https://www.wikipedia.org https://www.cloudflare.com https://example.com; do
   for fam in -4 -6 ""; do
@@ -113,7 +130,7 @@ for u in https://www.google.com https://www.youtube.com https://www.wikipedia.or
     [ "${r#* }" = 0 ] && [ "${r% *}" = 000 ] || LEAKS=$((LEAKS + 1))
   done
 done
-echo "  $((TOTAL - LEAKS))/$TOTAL fresh requests blocked completely"
+echo "  $((TOTAL - LEAKS))/$TOTAL fresh requests blocked completely (pf states after: $(all_states))"
 
 echo "== phase 3, local proxy: unmasking and blocking through 127.0.0.1"
 : > "$WORK/denied.txt"; sleep 1
@@ -230,17 +247,10 @@ BPID=$!
 sleep 4
 A1=$(size "$WORK/ra.out"); B1=$(size "$WORK/rb.out")
 echo "  4a. curl as a process of macOS denied mid-stream (before: curl $A1 bytes, python3 $B1 bytes)"
-rules "$CURL_PROCESS"
-sleep 1.5
-A2=$(size "$WORK/ra.out"); B2=$(size "$WORK/rb.out")
-sleep 3
-A3=$(size "$WORK/ra.out"); B3=$(size "$WORK/rb.out")
-echo "  after the rule: curl +$((A2 - A1)) then +$((A3 - A2)) bytes, python3 +$((B2 - B1)) then +$((B3 - B2)) bytes"
-[ "$A3" -eq "$A2" ] && echo "  ok denied curl stream is dead" || { echo "  FAIL denied curl kept downloading"; FAIL=1; }
-[ "$B3" -gt "$B2" ] && echo "  ok allowed python3 kept downloading from the same address" || { echo "  FAIL allowed python3 was interrupted (collateral)"; FAIL=1; }
+midstream $APID "$WORK/ra.out" "$WORK/rb.out" rules "$CURL_PROCESS"
 kill -9 $APID $BPID 2>/dev/null; wait $APID $BPID 2>/dev/null; APID=; BPID=
 RP=$(fresh 10 https://example.com)
-echo "  $RP/10 fresh curls blocked completely by the process rule"
+echo "  $RP/10 fresh curls blocked completely by the process rule (pf states: $(all_states))"
 [ "$RP" -gt 0 ] || { echo "  FAIL no fresh curl was blocked by the process rule"; FAIL=1; }
 /sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -qE '^pass|<' && { echo "  FAIL pass rule or table"; FAIL=1; } || echo "  ok anchor: ports only"
 
