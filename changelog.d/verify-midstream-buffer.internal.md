@@ -1,0 +1,1 @@
+scripts/verify-blocking.sh's mid-stream checks measure what was already in curl's socket buffer at the deny (macOS grows it to 4 MB, and a rate-limited curl reads it for seconds after the cut) and the pf states of its port, so buffered bytes no longer count as a leak; a buffer that cannot be read fails the check.
