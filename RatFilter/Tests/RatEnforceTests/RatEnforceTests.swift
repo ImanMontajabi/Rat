@@ -78,6 +78,13 @@ final class RatEnforceTests: XCTestCase {
         XCTAssertFalse(calls.contains { ($0.2 ?? "").contains("port {") })
     }
 
+    /// A whole-app deny names the app by the kernel's path or by the one it was started by (Safari's cryptex).
+    func testDeniedAppMatchesEitherCryptexName() {
+        let d = DeniedApps(text: "/System/Cryptexes/App/System/Applications/Safari.app\n")
+        XCTAssertNotNil(d.entry(for: "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/Contents/MacOS/Safari", responsiblePath: { nil }))
+        XCTAssertNil(d.entry(for: "/Applications/Safari Technology Preview.app/Contents/MacOS/Safari Technology Preview", responsiblePath: { nil }))
+    }
+
     func testPortsNamedByRatAreBlockedEvenWithoutDeniedApps() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-enf-\(UUID())")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

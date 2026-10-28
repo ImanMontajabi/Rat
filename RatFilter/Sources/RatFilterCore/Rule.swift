@@ -163,7 +163,8 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
     /// The process list's level of this rule: its `listLevel`, or `.app` for a rule for a whole app (whoever wrote it).
     public var effectiveListLevel: ListLevel? { listLevel ?? (isWholeApp ? .app : nil) }
 
-    private static func inside(_ path: String, _ prefix: String) -> Bool { path == prefix || path.hasPrefix(prefix + "/") }
+    /// Paths compare in one spelling (`ProgramPath`): the kernel names some system programs by their cryptex.
+    private static func inside(_ path: String, _ prefix: String) -> Bool { ProgramPath.inside(path, prefix) }
 
     /// What the root daemon may not know about a connection when it judges a socket (see `RuleEngine.decide(_:unknown:)`).
     public struct Unknown: OptionSet, Sendable {

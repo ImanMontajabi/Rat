@@ -159,7 +159,7 @@ final class RulesModel: ObservableObject {
 
     /// One process of an app (`executable`: the path of a helper, an updater, or the system service working for it).
     private func isProcessRule(_ r: Rule, _ appID: String, _ executable: String) -> Bool {
-        r.listLevel == .process && r.processPath == appID && r.executable == executable
+        r.listLevel == .process && r.processPath == appID && r.executable.map { ProgramPath.same($0, executable) } == true
     }
 
     func processPolicy(app appID: String, executable: String) -> Policy? { policy { isProcessRule($0, appID, executable) } }
@@ -179,7 +179,8 @@ final class RulesModel: ObservableObject {
     }
 
     private func isConnectionRule(_ r: Rule, _ appID: String, _ executable: String, _ e: Endpoint) -> Bool {
-        r.listLevel == .connection && r.processPath == appID && r.executable == executable && r.ports == e.port...e.port && r.proto == e.proto
+        r.listLevel == .connection && r.processPath == appID && r.executable.map { ProgramPath.same($0, executable) } == true
+            && r.ports == e.port...e.port && r.proto == e.proto
             && (e.name.map { r.remoteHost == $0 && r.remoteAddress == nil } ?? (r.remoteAddress == e.address && r.remoteHost == nil))
     }
 
@@ -202,6 +203,99 @@ final class RulesModel: ObservableObject {
     func rules(for appID: String) -> [Rule] {
         ruleSet.rules.filter { $0.processPath == appID }
     }
+
+    // MARK: rows of the process list (app, process, connection)
+
+    /// One row of the process list as rules see it: an app (its `ruleKey`), one of its processes (`executable`), or
+    /// one connection of that process (`endpoint`, which needs the executable).
+    struct Target: Hashable {
+        var app: String
+        var executable: String? = nil
+        var endpoint: Endpoint? = nil
+
+        var level: ListLevel { endpoint != nil ? .connection : executable != nil ? .process : .app }
+        /// The row one level wider: a connection's process, a process's app.
+        var parent: Target? {
+            switch level {
+            case .connection: Target(app: app, executable: executable)
+            case .process: Target(app: app)
+            case .app: nil
+            }
+        }
+    }
+
+    /// A row's ✗/✓: its own choice, and the one it follows without one (the nearest wider row's: a connection
+    /// follows its process, a process its app), the order `RuleEngine.decide` takes them in.
+    struct RowPolicy: Equatable {
+        var own: Policy?
+        var inherited: Policy?
+        var effective: Policy? { own ?? inherited }
+    }
+
+    func ownPolicy(_ t: Target) -> Policy? {
+        switch (t.executable, t.endpoint) {
+        case (let exe?, let e?): connectionPolicy(app: t.app, executable: exe, e)
+        case (let exe?, nil): processPolicy(app: t.app, executable: exe)
+        case (nil, _): policy(for: t.app)
+        }
+    }
+
+    func rowPolicy(_ t: Target) -> RowPolicy {
+        var inherited: Policy?
+        var up = t.parent
+        while inherited == nil, let p = up { inherited = ownPolicy(p); up = p.parent }
+        return RowPolicy(own: ownPolicy(t), inherited: inherited)
+    }
+
+    private static func inside(_ path: String, _ prefix: String) -> Bool { ProgramPath.inside(path, prefix) }
+
+    /// The connection a connection target stands for, as the engine judges it.
+    private func connection(_ t: Target, signing: (String?, String?)) -> Connection? {
+        guard let exe = t.executable, let e = t.endpoint else { return nil }
+        return Connection(process: ProcessIdentity(signingID: signing.0, teamID: signing.1, path: t.app), executable: exe,
+                          host: e.name, address: e.address, port: e.port, proto: e.proto)
+    }
+
+    /// The rules about a row, disabled ones included: for an app, those naming it or a program inside it; for a
+    /// process, those naming its app or itself and no other process; for a connection, every rule that matches it
+    /// (rules for any process too), as the engine would see it in the active profile.
+    func rules(for t: Target, signing: (String?, String?) = (nil, nil)) -> [Rule] {
+        let here = ruleSet.rules.filter(activeHere)
+        switch t.level {
+        case .app:
+            return here.filter { $0.processPath.map { Self.inside($0, t.app) } ?? false }
+        case .process:
+            let exe = t.executable!
+            return here.filter { r in
+                guard let p = r.processPath, Self.inside(t.app, p) || Self.inside(exe, p) else { return false }
+                return r.executable.map { Self.inside(exe, $0) } ?? true
+            }
+        case .connection:
+            guard let c = connection(t, signing: signing) else { return [] }
+            return here.filter { var r = $0; r.enabled = true; return r.matches(c) }
+        }
+    }
+
+    /// The rule that decides a connection now (nil when none does: silent mode or an alert).
+    func decidingRule(for t: Target, signing: (String?, String?) = (nil, nil)) -> Rule? {
+        connection(t, signing: signing).flatMap { engine.decide($0).rule }
+    }
+
+    /// The Rules window's New Rule for a row: its app, process and server, port and protocol filled in.
+    func newRule(for t: Target?) -> Rule {
+        var r = Rule(verdict: .allow, profileID: ruleSet.activeProfileID)
+        guard let t else { return r }
+        r.processPath = t.app
+        r.executable = t.executable
+        if let e = t.endpoint {
+            r.remoteHost = e.name; r.remoteAddress = e.name == nil ? e.address : nil
+            r.ports = e.port...e.port; r.proto = e.proto
+        }
+        return r
+    }
+
+    /// Set by the inspector's Manage Rules…: the Rules window opens on this row's rules.
+    @Published var focus: Target?
 
     // MARK: alert answers
 
