@@ -1,1 +1,0 @@
-Rules can be for one process of an app (a helper, an updater, the WebKit process working for Safari) and for one connection of a process (its server, port and protocol). The process list's Deny and Allow decide the narrowest first: a connection's, then a process's, then the app's, over the app's rules from alerts.
