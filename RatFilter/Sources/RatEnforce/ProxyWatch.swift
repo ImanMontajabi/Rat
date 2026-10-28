@@ -97,10 +97,12 @@ public final class ProxyWatch {
         capturing = true
         Thread.detachNewThread { [self] in
             while true {
-                let frames = cap.read()
-                let now = Date()
-                if !frames.isEmpty { handle(frames: frames, now: now) }
-                housekeeping(now: now)
+                autoreleasepool {
+                    let frames = cap.read()
+                    let now = Date()
+                    if !frames.isEmpty { handle(frames: frames, now: now) }
+                    housekeeping(now: now)
+                }
             }
         }
         return true
