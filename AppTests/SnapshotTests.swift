@@ -90,6 +90,16 @@ final class SnapshotTests: XCTestCase {
         try assertMatchesGolden(render(view, size: CGSize(width: 400, height: 700)), "sidebar")
     }
 
+    /// An open app with an open helper: the ✗/✓ of each process and connection row, the app's ✓ followed muted.
+    func testProcessTreeMatchesGolden() throws {
+        let ledger = demoLedger()
+        let chrome = try XCTUnwrap(ledger.apps.first { $0.identity.name == "Google Chrome" })
+        ledger.rules.setProcessPolicy(.deny, app: chrome.identity.ruleKey, executable: try XCTUnwrap(chrome.executablePath(of: "Google Chrome Helper")))
+        let view = ProcessRow(app: chrome, selection: .constant(nil), open: true, openProcesses: ["Google Chrome Helper"]).environmentObject(ledger)
+            .padding(8).frame(width: 400).background(Color(white: 0.12))
+        try assertMatchesGolden(render(view, size: CGSize(width: 400, height: 200)), "process-tree")
+    }
+
     func testSummaryInspectorMatchesGolden() throws {
         let ledger = demoLedger()
         try assertMatchesGolden(render(InspectorView(selection: nil).environmentObject(ledger), size: CGSize(width: 330, height: 700)), "inspector-summary")

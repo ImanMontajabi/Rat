@@ -72,7 +72,7 @@ public final class SocketJudge: @unchecked Sendable {
         watchedPaths = Array(Set(d.rules.compactMap { $0.enabled && $0.verdict == .deny ? $0.processPath : nil })).sorted()
     }
 
-    private static func inside(_ path: String, _ prefix: String) -> Bool { path == prefix || path.hasPrefix(prefix + "/") }
+    private static func inside(_ path: String, _ prefix: String) -> Bool { ProgramPath.inside(path, prefix) }
 
     /// Whether a process (its app's `ruleKey` and its own executable) may be denied by a rule, so its sockets are read.
     public func watches(app: String, executable: String) -> Bool {

@@ -146,6 +146,30 @@ extension AppEntry {
         let main = mainProcess
         return remotes.filter { ($0.process ?? main) == p }
     }
+
+    /// The executable of one of the app's processes (by name; nil = the main process), for rules about it.
+    @MainActor func executablePath(of process: String?) -> String? {
+        guard let name = process ?? mainProcess else { return nil }
+        if let p = processes[name]?.path { return p }
+        guard name == mainProcess else { return nil }
+        return identity.bundlePath.flatMap { Bundle(path: $0)?.executableURL?.path } ?? (identity.bundlePath == nil ? identity.id : nil)
+    }
+
+    /// The row of the process list a selection is, as rules see it. Nil when no rule can name it: an executable
+    /// that was never seen, or a connection inside the local network (Rat's pass does not judge those).
+    @MainActor func ruleTarget(process: String?, remote: RemoteHost? = nil) -> RulesModel.Target? {
+        guard process != nil || remote != nil else { return RulesModel.Target(app: identity.ruleKey) }
+        guard let exe = executablePath(of: remote?.process ?? process) else { return nil }
+        guard let r = remote else { return RulesModel.Target(app: identity.ruleKey, executable: exe) }
+        let e = RulesModel.Endpoint(host: r.host, address: r.address, port: r.port, proto: r.proto == "UDP" ? .udp : .tcp)
+        if r.via == nil && (r.address.isEmpty || isLocalAddress(r.address)) { return nil }
+        if e.name == nil && r.address.isEmpty { return nil }
+        return RulesModel.Target(app: identity.ruleKey, executable: exe, endpoint: e)
+    }
+
+    @MainActor func ruleTarget(for s: MonitorSelection) -> RulesModel.Target? {
+        ruleTarget(process: s.process, remote: s.remote.flatMap { id in remotes.first { $0.id == id } })
+    }
 }
 
 /// What the monitor shows: an app, one of its processes, or one connection. It scopes the map and the inspector.
@@ -299,7 +323,16 @@ final class Ledger: ObservableObject {
                 if let text = useSnapshot {
                     // Root helper snapshot: adds processes this app cannot inspect (other users, system daemons).
                     var seen = Set(c.map { "\($0.pid)|\($0.proto.rawValue)|\($0.localPort)|\($0.remoteAddress)|\($0.remotePort)" })
-                    for x in SystemSnapshot.parse(text) where seen.insert("\(x.pid)|\(x.proto.rawValue)|\(x.localPort)|\(x.remoteAddress)|\(x.remotePort)").inserted { c.append(x) }
+                    // A process is named by the kernel's path, as the root daemon reads it: `ps` gives the name a
+                    // program was started by (a symlink into a cryptex, a bare name), and a rule made from that name
+                    // would name a different file than the daemon sees.
+                    var kernelPaths: [Int32: String] = [:]
+                    for var x in SystemSnapshot.parse(text) where seen.insert("\(x.pid)|\(x.proto.rawValue)|\(x.localPort)|\(x.remoteAddress)|\(x.remotePort)").inserted {
+                        let k = kernelPaths[x.pid] ?? ConnectionSampler.path(of: x.pid)
+                        kernelPaths[x.pid] = k
+                        if !k.hasPrefix("pid ") { x.processPath = k }
+                        c.append(x)
+                    }
                 }
                 return (c, TrafficSampler.sampleWithFlows())
             }.value
@@ -310,9 +343,17 @@ final class Ledger: ObservableObject {
             alerts.revalidate()
             onTick?()
             if Date().timeIntervalSince(lastSave) > 30 { save() }
-            try? await Task.sleep(for: .seconds(1.5))
+            // A ✗/✓ cuts the nap short (`requestPass`), so open connections are judged by the new rule at once.
+            let nap = Task { _ = try? await Task.sleep(for: .seconds(1.5)) }
+            napTask = nap
+            await nap.value
         }
     }
+
+    private var napTask: Task<Void, Never>?
+
+    /// Runs the next pass now instead of after the rest of the 1.5 s nap.
+    func requestPass() { napTask?.cancel() }
 
     // MARK: sampling
 
@@ -536,6 +577,7 @@ final class Ledger: ObservableObject {
         rules.setPolicy(p, for: table[appID]?.identity.ruleKey ?? appID)
         alerts.revalidate()
         refreshEnforcement()
+        requestPass()
     }
 
     /// ✗/✓ for one process of an app (`executable`: its path). Enforced from the next pass, by the ports of its sockets.
@@ -543,6 +585,7 @@ final class Ledger: ObservableObject {
         rules.setProcessPolicy(p, app: table[appID]?.identity.ruleKey ?? appID, executable: executable)
         alerts.revalidate()
         refreshEnforcement()
+        requestPass()
     }
 
     /// ✗/✓ for one connection of one process. Enforced from the next pass, by the ports of the sockets it matches.
@@ -550,6 +593,16 @@ final class Ledger: ObservableObject {
         rules.setConnectionPolicy(p, app: table[appID]?.identity.ruleKey ?? appID, executable: executable, endpoint)
         alerts.revalidate()
         refreshEnforcement()
+        requestPass()
+    }
+
+    /// ✗/✓ for any row of the process list: an app, one of its processes, or one connection.
+    func setPolicy(_ p: Policy?, for t: RulesModel.Target) {
+        switch (t.executable, t.endpoint) {
+        case (let exe?, let e?): setConnectionPolicy(p, app: t.app, executable: exe, e)
+        case (let exe?, nil): setProcessPolicy(p, app: t.app, executable: exe)
+        case (nil, _): setPolicy(p, for: t.app)
+        }
     }
 
     /// Hands the helper what to block. Only ports of denied sockets are ever blocked, never server addresses.
@@ -579,7 +632,7 @@ final class Ledger: ObservableObject {
         let active = rules.engine.activeRules
         let denied = active.compactMap { $0.verdict == .deny ? $0.processPath : nil }
         guard !denied.isEmpty else { daemonNames.removeAll(); daemonNameOrder.removeAll(); return DaemonRules() }
-        func inside(_ p: String, _ prefix: String) -> Bool { p == prefix || p.hasPrefix(prefix + "/") }
+        func inside(_ p: String, _ prefix: String) -> Bool { ProgramPath.inside(p, prefix) }
         var signatures: [String: DaemonRules.Signature] = [:]
         for e in table.values {
             let key = e.identity.ruleKey
