@@ -252,12 +252,18 @@ public final class EnforcerDaemon {
     }
 
     public func loop() {
+        // A change to a file Rat hands over ends the sleep at once: a deny made while nothing was denied waited for
+        // the idle sleep (up to 0.25 s) before.
+        let wake = FileWake(files: [settings.deniedFile, settings.portsFile, settings.rulesFile, settings.repairFile].compactMap { $0 })
         while true {
             let busy = autoreleasepool { tick() }
             if trace, busy, watching { traceTicks += 1; traceTime += lastTickDuration; if traceTicks == 400 { FileHandle.standardError.write(Data("avg tick \(Int(traceTime / 400 * 1e6)) us, reloads \(reloads)\n".utf8)); traceTicks = 0; traceTime = 0 } }
-            Thread.sleep(forTimeInterval: !busy ? settings.idleInterval : watching ? settings.interval : settings.standbyInterval)
+            if wake.wait(!busy ? settings.idleInterval : watching ? settings.interval : settings.standbyInterval) { filesChanged() }
         }
     }
+
+    /// A file Rat hands over changed: the next pass reads it, whenever the last check was.
+    public func filesChanged() { lastFileCheck = .distantPast }
 
     /// One pass. Returns whether there is anything to enforce (a denied app or a deny rule for a process); `watching`
     /// says whether one of its processes runs. The loop then passes every `interval`, every `standbyInterval` while
