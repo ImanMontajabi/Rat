@@ -45,14 +45,16 @@ recvq() {
 # carry the flow past Rat's anchor (the daemon kills those it finds after loading a port, `pfctl -k local -k remote`).
 port_states() { /sbin/pfctl -s states 2>/dev/null | grep -cE "[:.\[]$1[] ]" ; }
 all_states() { /sbin/pfctl -s info 2>/dev/null | awk '/current entries/ { print $3 }'; }
-# midstream <curl pid> <curl file> <python3 file> <command that denies curl…>   (MREMOTE: curl's server, $IP.443 unless set)
+# midstream <curl's server, netstat's "address.port"> <curl pid> <curl file> <python3 file> <command that denies curl…>
 # A rate-limited curl keeps reading what already arrived in its socket buffer after the cut (macOS grows it to
 # several MB; at 400 KB/s 4 MB takes 10 s), so growth alone proves nothing. The cut is proven when curl stops for
 # good having read no more than the buffer held at the deny (+64 KB for packets in flight while pf loads), and
 # python3 downloading from the same server keeps going.
 midstream() {
-  mpid=$1; mout=$2; mpy=$3; shift 3
-  LP=$(tcp_port "$mpid"); Q=$(recvq "$LP" "${MREMOTE:-}"); Q=${Q:-0}; SB=$(port_states "${LP:-0}")
+  mremote=$1; mpid=$2; mout=$3; mpy=$4; shift 4
+  LP=$(tcp_port "$mpid"); Q=$(recvq "$LP" "$mremote")
+  # Without the buffer there is nothing to compare with: that is a failure of the test, not a pass or a leak.
+  [ -n "$Q" ] || { echo "  FAIL could not read curl's socket buffer (port ${LP:-?} to $mremote)"; FAIL=1; Q=0; }; SB=$(port_states "${LP:-0}")
   M1=$(size "$mout"); P1=$(size "$mpy")
   "$@"
   last=$M1; still=0; steps=0
@@ -108,7 +110,7 @@ A1=$(size "$WORK/a.out"); B1=$(size "$WORK/b.out")
 echo "  before deny: curl $A1 bytes, python3 $B1 bytes"
 { [ "$A1" -gt 0 ] && [ "$B1" -gt 0 ]; } || { echo "  could not start both downloads"; exit 3; }
 
-midstream $APID "$WORK/a.out" "$WORK/b.out" deny_curl   # deny curl, mid-stream
+midstream "$IP.443" $APID "$WORK/a.out" "$WORK/b.out" deny_curl   # deny curl, mid-stream
 kill -0 $APID 2>/dev/null && echo "  note: curl is still running (waiting), not downloading" || echo "  curl exited (connection reset)"
 
 echo "== DNS for allowed apps while curl is denied (1.1.1.1, 8.8.8.8, 9.9.9.9)"
@@ -185,7 +187,7 @@ A1=$(size "$WORK/pa.out"); B1=$(size "$WORK/pb.out")
 echo "  mid-stream through the proxy, before deny: curl $A1 bytes, python3 $B1 bytes"
 { [ "$A1" -gt 0 ] && [ "$B1" -gt 0 ]; } || { echo "  could not start both proxied downloads"; FAIL=1; }
 # curl's socket is to the proxy on lo0, with a loopback buffer of its own.
-MREMOTE="127.0.0.1.$PPORT" midstream $APID "$WORK/pa.out" "$WORK/pb.out" deny_curl
+midstream "127.0.0.1.$PPORT" $APID "$WORK/pa.out" "$WORK/pb.out" deny_curl
 echo "  anchor rules while curl is denied:"
 /sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep 'on lo0' | sed 's/^/    /'
 /sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -q 'on lo0' && echo "  ok loopback rules present" || { echo "  FAIL no loopback rule"; FAIL=1; }
@@ -246,7 +248,7 @@ BPID=$!
 sleep 4
 A1=$(size "$WORK/ra.out"); B1=$(size "$WORK/rb.out")
 echo "  4a. curl as a process of macOS denied mid-stream (before: curl $A1 bytes, python3 $B1 bytes)"
-midstream $APID "$WORK/ra.out" "$WORK/rb.out" rules "$CURL_PROCESS"
+midstream "$IP.443" $APID "$WORK/ra.out" "$WORK/rb.out" rules "$CURL_PROCESS"
 kill -9 $APID $BPID 2>/dev/null; wait $APID $BPID 2>/dev/null; APID=; BPID=
 RP=$(fresh 10 https://example.com)
 echo "  $RP/10 fresh curls blocked completely by the process rule (pf states: $(all_states))"
