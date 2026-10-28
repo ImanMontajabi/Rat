@@ -14,17 +14,17 @@
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/ImanMontajabi/Rat"></a>
 </p>
 
-Rat is a network monitor and application firewall for macOS, modelled on Little Snitch. It shows which app, and which of its processes, talks to which server, on an offline world map. It shows which connections go through a VPN or a proxy, and unmasks the real destination behind local proxies and SSH tunnels. Apps you deny are cut off with the macOS packet filter. Rat is free and open source (MIT), with no trial and no paywall.
+Rat is a network monitor and application firewall for macOS, modelled on Little Snitch. It shows which app, and which of its processes, talks to which server, on an offline world map. It shows which connections go through a VPN or a proxy, and unmasks the real destination behind local proxies and SSH tunnels. You can deny a whole app, one of its processes or a single connection, and Rat cuts it off with the macOS packet filter. Rat is free and open source (MIT), with no trial and no paywall.
 
 ![Network monitor: Telegram and Firefox filtered to connections through a VPN or proxy](docs/screenshots/monitor-hierarchy-tags.png)
-<sub>Demo data. The monitor is filtered to *Through a VPN or Proxy*: Telegram is opened down to its helper's connection through Windscribe, and Firefox's connections go through `ssh -D` and Tor. The map draws This Mac → proxy server (Stockholm) → real destination (Madrid), and the Summary counts only what the filter leaves. Server locations come from a bundled offline database; nothing leaves your Mac.</sub>
+<sub>Demo data. The monitor is filtered to *Through a VPN or Proxy*: Telegram is opened down to its helper's connection through Windscribe, and Firefox's connections go through `ssh -D` and Tor. Every row has its own ✗/✓, and connections show their country's flag. The map draws This Mac → proxy server (Stockholm) → real destination (Madrid), and the Summary counts only what the filter leaves. Server locations come from a bundled offline database; nothing leaves your Mac.</sub>
 
 > **Honest limits.** Little Snitch intercepts each connection *before* it is made, using Apple's Network Extension entitlement, which needs a paid developer account. Rat has none, so it is **reactive**: it notices a connection after it starts, and cuts a denied app's connections by their local ports. A brand-new process can get its first packets out before the cut. The app is ad-hoc signed and not notarized. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (sections 7, 8 and 10).
 
 ## What makes Rat different
 
 ### Process tree, three levels deep
-Expand an app to see its direct connections and its helper and child processes, then expand a process to see its connections. Examples are `com.apple.WebKit.Networking` under Safari, `Google Chrome Helper` under Chrome, `steam_osx` under Steam, and services such as `mDNSResponder` and `nsurlsessiond` under macOS (marked when they work for other apps). Every process and every connection has its own traffic counters. For a command-line tool, the inspector shows which app started it (*Started by Warp*), but its rules stay its own.
+Expand an app to see its direct connections and its helper and child processes, then expand a process to see its connections. Examples are `com.apple.WebKit.Networking` under Safari, `Google Chrome Helper` under Chrome, `steam_osx` under Steam, and services such as `mDNSResponder` and `nsurlsessiond` under macOS (marked when they work for other apps). Every process and every connection has its own traffic counters and its own ✗/✓: deny or allow the whole app, one of its processes, or one connection (that process, server, port and protocol). The narrowest choice decides, and a row that has none shows the one it follows, muted. For a command-line tool, the inspector shows which app started it (*Started by Warp*), but its rules stay its own.
 
 ### The real destination behind local proxies and SSH tunnels
 With `http_proxy`, `https_proxy`, `ALL_PROXY`, an `ssh -D` SOCKS tunnel, or a local v2ray/Xray/Clash/sing-box proxy, socket-based monitors usually see only `127.0.0.1:<port>` and the proxy's one connection to its server. Rat shows **both**:
@@ -38,17 +38,18 @@ Rat detects active tunnels (`utun*`: Windscribe, WireGuard, OpenVPN, Cloudflare 
 
 Apps, processes and connections get badges such as `VPN · Windscribe`, `Proxy · ssh` or `VPN server · Windscribe` (the VPN client's own connection to its server). A connection counts as tunnelled when its socket is bound to the tunnel's address, or, when it has no address of its own, when the routing table sends it into the tunnel. No packets are inspected. To filter, use the route chip or type `vpn` or `proxy` in the search.
 
-### Per-app blocking that leaves DNS alone
+### Blocking that leaves DNS alone
 Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
-- **How it blocks:** it blocks the **local ports** of every socket of a denied app and its helpers with stateless `pf` rules (`block return-rst` for TCP, `block return-icmp` for UDP, inbound dropped).
-- **How fast:** it re-reads the denied processes' sockets every 3 ms while one is running.
+- **How it blocks:** it blocks the **local ports** of the denied sockets with stateless `pf` rules (`block return-rst` for TCP, `block return-icmp` for UDP, inbound dropped): every socket of a denied app and its helpers, or only those of a denied process or connection, which the daemon judges itself.
+- **How fast:** a deny takes effect on the daemon's next pass, even when nothing was denied before, and it re-reads the denied processes' sockets every 3 ms while one is running.
 - **What it never touches:** server addresses. Shared resolvers such as `1.1.1.1` and `8.8.8.8`, and every app you allow, keep working.
 - **Proxies and forwards:** a denied app cannot slip out through a local proxy or an `ssh -L` forward, because its loopback connections to other programs are cut too.
 
 ### One monitor, three synchronized panes
 - **Left:** the app list with sparklines, session totals and a 5m / 1h / 1d / 1w traffic chart.
-- **Middle:** the world map, drawing only what the list shows.
+- **Middle:** the world map, drawing only what the list shows. Busy connections show their traffic moving, purple for sent and blue for received, only while the window is visible and Reduce Motion is off.
 - **Right:** the inspector for the selected app, process or connection, or a Summary of top processes, domains, countries and networks that follows the search and filters.
+- **Hide Local:** one chip hides local-network traffic (the LAN, multicast and Bonjour) in the list, the map and the Summary, and Rat remembers it.
 
 ### Everything else
 - **Connection alerts:** **Silent Allow** is the default, so a fresh install never nags. **Alert Mode** shows a floating panel for unknown connections, with a scope (app, domain, host, port) and a lifetime (once, until quit, forever).
@@ -56,7 +57,8 @@ Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
   - **Rules:** match on app, team ID, signing ID, domain, host, IP, port range and protocol. The most specific rule wins, and deny beats allow on a tie.
   - **Organizing:** rule groups, profiles (Home / Work / Public Wi-Fi) with automatic switching per network, and unapproved rules with a review queue.
   - **Sharing:** JSON import and export.
-- **Readable connections:** the usual service of each port (`TCP 443 · HTTPS`, `UDP 443 · QUIC`, `5223 · APN`), the network owner (`AS13335 Cloudflare, Inc.`), and reverse DNS that never holds up the monitor.
+- **Readable connections:** the usual service of each port (`TCP 443 · HTTPS`, `UDP 443 · QUIC`, `5223 · APN`), the network owner (`AS13335 Cloudflare, Inc.`), the country's flag and place (*🇩🇪 Berlin, Germany*), and reverse DNS that never holds up the monitor.
+- **Direction:** a peer's connections to a port on this Mac are a row of their own, tagged `↓ Incoming` (judged by the rules, never an alert). A long download that is still receiving is tagged `↓ stream`.
 - **Offline GeoIP:** bundled DB-IP Lite City and ASN databases. You can also use your own DB-IP or MaxMind file (Settings > GeoIP).
 - **Menu bar:** live throughput, a profile selector and a mode switch.
 - **Updates:** *Rat menu → Check for Updates…* reads GitHub Releases.
