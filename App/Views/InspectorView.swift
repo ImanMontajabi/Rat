@@ -176,7 +176,7 @@ struct ProcessInspector: View {
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 6) {
                                 Text(name).font(.callout.weight(.semibold))
-                                if let pid = list.first?.pid { Text("pid \(pid)").font(.caption).foregroundStyle(.secondary) }
+                                if let pid = list.first?.pid { Text(verbatim: "pid \(pid)").font(.caption).foregroundStyle(.secondary) }
                             }
                             if let note = SharedServices.note(for: name) {
                                 Text("Works for other apps: \(note)").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
