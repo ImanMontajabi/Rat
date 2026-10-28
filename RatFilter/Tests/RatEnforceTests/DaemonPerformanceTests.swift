@@ -137,6 +137,40 @@ final class DaemonPerformanceTests: XCTestCase {
         XCTAssertLessThan(latency, 0.05)
     }
 
+    /// The same for a rule for one process (`deny-rules.json`): the pass after the rules change judges every
+    /// process against them again, then loads the named process's ports, and no more.
+    func testAProcessRuleIsLoadedWithoutWorkForEveryProcess() throws {
+        sockets = (0..<8).map { _ in udpSocket() }
+        let dir = try tempDir()
+        let rulesFile = dir.appendingPathComponent("deny-rules.json")
+        try "".write(to: dir.appendingPathComponent("denied.txt"), atomically: true, encoding: .utf8)
+        try DaemonRules(rules: [Rule(verdict: .deny, processPath: "/usr/bin/rat-test-not-running", executable: "/usr/bin/rat-test-not-running", listLevel: .process)]).encoded().write(to: rulesFile)
+        var s = EnforcerDaemon.Settings(deniedFile: dir.appendingPathComponent("denied.txt").path)
+        s.rulesFile = rulesFile.path
+        s.anchor = "com.apple/rat-unittest"
+        var loadedAt: Date?, agesAtLoad: Int?
+        weak var daemon: EnforcerDaemon?
+        let d = EnforcerDaemon(settings: s, run: { _, args, stdin in
+            if args.contains("-f"), loadedAt == nil, stdin?.contains("block") ?? false { loadedAt = Date(); agesAtLoad = daemon?.agesRead }
+            return 0
+        }, capture: { _, args in args == ["-s", "info"] ? "Status: Enabled" : args == ["-s", "rules"] ? "anchor \"com.apple/*\" all" : "" })
+        daemon = d
+        passes(d, count: 400)
+        XCTAssertTrue(d.loadedPorts.isEmpty)
+        let agesBefore = d.agesRead
+
+        try DaemonRules(rules: [Rule(verdict: .deny, processPath: app, executable: exe, listLevel: .process)]).encoded().write(to: rulesFile, options: .atomic)
+        d.filesChanged()
+        now += 0.001
+        let t0 = Date()
+        d.tick(now: now)
+        let latency = try XCTUnwrap(loadedAt, "the named process's ports were loaded on that pass").timeIntervalSince(t0)
+        print("helper, process rule added: ports loaded \(String(format: "%.2f", latency * 1000)) ms into the pass, pass \(String(format: "%.2f", d.lastTickDuration * 1000)) ms")
+        XCTAssertGreaterThanOrEqual(d.loadedPorts.count, 8)
+        XCTAssertEqual(agesAtLoad, agesBefore, "no start time read before the ports are loaded")
+        XCTAssertLessThan(latency, 0.05)
+    }
+
     /// 6,000 passes (18 s of the helper's time) while a sixteenth of the sockets close and others open every 100
     /// passes: what the helper keeps per port or socket goes with it.
     func testSocketsThatComeAndGoLeaveNothingBehind() throws {
