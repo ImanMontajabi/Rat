@@ -80,6 +80,29 @@ final class DaemonRulesTests: XCTestCase {
                        "a deny for any process is left to Rat's pass: it would mean reading every process")
     }
 
+    /// A ✗ on one process (or one connection of it) reads only that process; a deny for the whole app reads all of
+    /// them. Reading every Safari process every 3 ms for a ✗ on its SearchHelper cost the daemon 12 % CPU.
+    func testWatchesOnlyTheProcessesADenyCanMatch() {
+        let safari = "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app"
+        let helper = "/System/Library/PrivateFrameworks/SafariShared.framework/Versions/A/XPCServices/com.apple.Safari.SearchHelper.xpc/Contents/MacOS/com.apple.Safari.SearchHelper"
+        let content = "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+        let processDeny = judge([Rule(verdict: .deny, processPath: safari, executable: helper, listLevel: .process)])
+        XCTAssertTrue(processDeny.watches(app: safari, executable: helper))
+        XCTAssertTrue(processDeny.watches(app: safari, executable: "/System/Volumes/Preboot/Cryptexes/Incoming/OS" + helper), "the kernel's name for it")
+        XCTAssertFalse(processDeny.watches(app: safari, executable: content))
+        XCTAssertFalse(processDeny.watches(app: safari, executable: safari + "/Contents/MacOS/Safari"))
+
+        let connectionDeny = judge([Rule(verdict: .deny, processPath: app, executable: updater, listLevel: .connection, remoteAddress: "203.0.113.5", ports: 443...443, proto: .tcp)])
+        XCTAssertTrue(connectionDeny.watches(app: app, executable: updater))
+        XCTAssertFalse(connectionDeny.watches(app: app, executable: main))
+
+        // A deny for the app with a narrower allow is not in denied-apps.txt: every process of the app is read.
+        let appDeny = judge([Rule(verdict: .deny, processPath: app), Rule(verdict: .allow, processPath: app, executable: updater, listLevel: .process)])
+        XCTAssertTrue(appDeny.watches(app: app, executable: main))
+        XCTAssertTrue(appDeny.watches(app: app, executable: updater))
+        XCTAssertEqual(processDeny.watchList, [SocketJudge.Watch(path: safari, executable: helper)])
+    }
+
     func testCodeSignatureRules() {
         let rules = [Rule(verdict: .deny, processPath: app, ports: 443...443), Rule(verdict: .allow, processPath: app, signingID: "com.foo", ports: 443...443, proto: .tcp)]
         XCTAssertFalse(judge(rules).denies(app: app, executable: main, address: "203.0.113.5", port: 443, proto: .tcp), "the signed app is allowed")
@@ -92,7 +115,8 @@ final class DaemonRulesTests: XCTestCase {
         let j = judge([Rule(verdict: .deny, processPath: "/usr/sbin/mDNSResponder"), Rule(verdict: .deny, processPath: app, executable: updater, listLevel: .process),
                        Rule(verdict: .allow, processPath: "/Applications/Bar.app")])
         XCTAssertTrue(j.watches(app: "macOS", executable: "/usr/sbin/mDNSResponder"), "a system service by its path")
-        XCTAssertTrue(j.watches(app: app, executable: main), "the app's other processes are read too (a rule for the app may decide)")
+        XCTAssertTrue(j.watches(app: app, executable: updater))
+        XCTAssertFalse(j.watches(app: app, executable: main), "no deny rule can match the app's other processes, so they are not read")
         XCTAssertFalse(j.watches(app: "/Applications/Bar.app", executable: "/Applications/Bar.app/Contents/MacOS/Bar"), "only an allow")
         XCTAssertFalse(j.watches(app: "macOS", executable: "/usr/libexec/trustd"))
         var off = Rule(verdict: .deny, processPath: "/Applications/Baz.app"); off.enabled = false

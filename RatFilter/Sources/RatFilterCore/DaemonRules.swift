@@ -60,8 +60,17 @@ public final class SocketJudge: @unchecked Sendable {
     private let names: [String: String]
     private let signatures: [String: DaemonRules.Signature]
     private let local = LocalRanges()
-    /// Paths named by deny rules: a process is read only when it, or its app, is inside one of them.
-    public let watchedPaths: [String]
+    /// What a deny rule can match: the app or program it names, and the one executable when it is for one process
+    /// (or one connection of it). A socket is denied only by a deny rule that matches it (the default is allow), so a
+    /// process none of these can match is never read.
+    public struct Watch: Hashable, Comparable, Sendable {
+        public var path: String
+        public var executable: String?
+        public static func < (a: Watch, b: Watch) -> Bool { (a.path, a.executable ?? "") < (b.path, b.executable ?? "") }
+    }
+
+    /// The processes deny rules can match: a process is read only when one of these covers it.
+    public let watchList: [Watch]
 
     public init(_ d: DaemonRules) {
         // The file holds the rules active in Rat's profile and groups already; the daemon has neither.
@@ -69,14 +78,17 @@ public final class SocketJudge: @unchecked Sendable {
         names = d.names
         signatures = d.signatures
         local.set(d.localRanges)
-        watchedPaths = Array(Set(d.rules.compactMap { $0.enabled && $0.verdict == .deny ? $0.processPath : nil })).sorted()
+        watchList = Array(Set(d.rules.compactMap { r in r.enabled && r.verdict == .deny ? r.processPath.map { Watch(path: $0, executable: r.executable) } : nil })).sorted()
     }
 
     private static func inside(_ path: String, _ prefix: String) -> Bool { ProgramPath.inside(path, prefix) }
 
     /// Whether a process (its app's `ruleKey` and its own executable) may be denied by a rule, so its sockets are read.
+    /// A ✗ on one of Safari's helpers reads that helper, not Safari's other two dozen processes every 3 ms.
     public func watches(app: String, executable: String) -> Bool {
-        watchedPaths.contains { Self.inside(app, $0) || Self.inside(executable, $0) }
+        watchList.contains { w in
+            (Self.inside(app, w.path) || Self.inside(executable, w.path)) && w.executable.map { Self.inside(executable, $0) } ?? true
+        }
     }
 
     /// Whether the rules deny a socket. `address` is "" (and `port` 0) for a socket not connected to a server.
