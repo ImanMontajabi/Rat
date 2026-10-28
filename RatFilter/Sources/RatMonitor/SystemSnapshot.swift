@@ -3,7 +3,9 @@ import Foundation
 /// Parses the root helper's `lsof -F pPnT` + `ps` snapshot into connections for every process,
 /// including ones an unprivileged app cannot inspect.
 public enum SystemSnapshot {
-    public static func parse(_ text: String) -> [ObservedConnection] {
+    /// Connections only, or with `listeners` also the TCP listening sockets (no remote end; `*` is any address), which
+    /// tell which connections a peer started (`SocketDirection`).
+    public static func parse(_ text: String, listeners: Bool = false) -> [ObservedConnection] {
         var paths: [Int32: String] = [:]
         var lsofLines: [Substring] = []
         var inPS = false
@@ -24,7 +26,14 @@ public enum SystemSnapshot {
 
         func flush() {
             defer { name = nil; state = nil }
-            guard let name, let arrow = name.range(of: "->") else { return }
+            guard let name else { return }
+            guard let arrow = name.range(of: "->") else {
+                if listeners, proto == .tcp, state == "LISTEN", let l = splitEndpoint(name) {
+                    out.append(ObservedConnection(pid: pid, processPath: paths[pid] ?? "pid \(pid)", proto: .tcp, remoteAddress: "", remotePort: 0,
+                                                  localPort: l.port, tcpState: "LISTEN", localAddress: l.host == "*" ? "" : l.host))
+                }
+                return
+            }
             guard let l = splitEndpoint(String(name[..<arrow.lowerBound])), let r = splitEndpoint(String(name[arrow.upperBound...])) else { return }
             out.append(ObservedConnection(pid: pid, processPath: paths[pid] ?? "pid \(pid)", proto: proto,
                                           remoteAddress: r.host, remotePort: r.port, localPort: l.port, tcpState: proto == .tcp ? state : nil,

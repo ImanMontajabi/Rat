@@ -47,8 +47,8 @@ struct MonitorSummary {
 
 struct RemoteHost: Identifiable, Hashable {
     /// One row per server, port and protocol of a process: a TCP and a UDP (QUIC) connection to one server are two
-    /// rows, as a ✗/✓ on either is a rule for its own protocol.
-    var id: String { (via.map { "\(host):\(port) \($0.listener)" } ?? "\(address):\(port)/\(proto)") + "|\(process ?? "")" }
+    /// rows, as a ✗/✓ on either is a rule for its own protocol. Connections a peer started are rows of their own.
+    var id: String { (incoming ? "in|" : "") + (via.map { "\(host):\(port) \($0.listener)" } ?? "\(address):\(port)/\(proto)") + "|\(process ?? "")" }
     /// The server's address; for a destination behind a local proxy, the name's address (empty until looked up).
     let address: String
     var host: String
@@ -69,6 +69,10 @@ struct RemoteHost: Identifiable, Hashable {
     var bytesOut: UInt64 = 0
     /// What the rules said on the last pass (nil for local addresses, and while the name is still looked up).
     var verdict: Verdict? = nil
+    /// A peer started it: `address` is the peer and `port` the port of this Mac it connected to (`SocketDirection`).
+    var incoming = false
+    /// A long-lived connection that mostly receives: a download, a server push, a media stream (`StreamDetector`).
+    var stream = false
 }
 
 /// One executable of an app (its main binary, a helper, an XPC service working for it), by name.
@@ -165,6 +169,8 @@ extension AppEntry {
         guard let r = remote else { return RulesModel.Target(app: identity.ruleKey, executable: exe) }
         let e = RulesModel.Endpoint(host: r.host, address: r.address, port: r.port, proto: r.proto == "UDP" ? .udp : .tcp)
         if r.via == nil && (r.address.isEmpty || isLocalAddress(r.address)) { return nil }
+        // Rules decide what this Mac connects to; a peer that connected to it is not one of those.
+        if r.incoming { return nil }
         if e.name == nil && r.address.isEmpty { return nil }
         return RulesModel.Target(app: identity.ruleKey, executable: exe, endpoint: e)
     }
@@ -245,6 +251,8 @@ final class Ledger: ObservableObject {
     private var deniedPorts = Set<Int>()
     private var deniedLoopbackPorts = Set<Int>()
     private let proxyResolver = ProxyResolver()
+    /// Which sockets are long-lived download streams, by their counters on each pass.
+    var streams = StreamDetector()
     let routes = RouteMarker()
     private var signingCache: [String: (identifier: String?, team: String?)] = [:]
     private var rulesChanged: AnyCancellable?
@@ -329,7 +337,7 @@ final class Ledger: ObservableObject {
                     // program was started by (a symlink into a cryptex, a bare name), and a rule made from that name
                     // would name a different file than the daemon sees.
                     var kernelPaths: [Int32: String] = [:]
-                    for var x in SystemSnapshot.parse(text) where seen.insert("\(x.pid)|\(x.proto.rawValue)|\(x.localPort)|\(x.remoteAddress)|\(x.remotePort)").inserted {
+                    for var x in SystemSnapshot.parse(text, listeners: true) where seen.insert("\(x.pid)|\(x.proto.rawValue)|\(x.localPort)|\(x.remoteAddress)|\(x.remotePort)").inserted {
                         let k = kernelPaths[x.pid] ?? ConnectionSampler.path(of: x.pid)
                         kernelPaths[x.pid] = k
                         if !k.hasPrefix("pid ") { x.processPath = k }
@@ -368,6 +376,8 @@ final class Ledger: ObservableObject {
 
     func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter], flows: [FlowCounter] = []) async {
         let now = Date()
+        // Which connections a peer started: their local port is a listener's.
+        let conns = SocketDirection.mark(conns)
         let dt = max(now.timeIntervalSince(lastTick), 0.2)
         lastTick = now
         let warmedUp = now.timeIntervalSince(startedAt) > 12   // don't alert for sockets that already existed at launch
@@ -436,7 +446,7 @@ final class Ledger: ObservableObject {
 
         var denyCount = 0, askCount = 0, listenCount = 0
         let wholeAppDenied = deniedAppPaths
-        var portsNow = Set<Int>(), loopbackNow = Set<Int>()
+        var portsNow = Set<Int>(), loopbackNow = Set<Int>(), liveSockets = Set<String>()
         for id in table.keys {
             var e = table[id]!
             let rx = rxByApp[id] ?? 0, tx = txByApp[id] ?? 0
@@ -456,14 +466,16 @@ final class Ledger: ObservableObject {
             /// The verdict for one remote, counted and (for `.ask`) reported as an alert.
             /// `host` is the name shown (the address itself when there is none); a name that is an IP literal is no name.
             /// `executable` is the process that holds the socket, for rules about one of the app's processes.
-            func judge(host: String, address: String, port: Int, proto: Connection.Proto, executable: String, route: RouteTag? = nil) -> Verdict {
+            /// A connection a peer started is judged too (an app's ✗ cuts it, as the helper does), but never asks.
+            func judge(host: String, address: String, port: Int, proto: Connection.Proto, executable: String, route: RouteTag? = nil, incoming: Bool = false) -> Verdict? {
                 let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), executable: executable,
                                       host: host == address || isIPLiteral(host) ? nil : host, address: address, port: port, proto: proto)
                 // The process list's ✗/✓ decide first, narrowest first (`RuleEngine.decide`). Matches what is
                 // enforced: an app the helper blocks as a whole (`deniedAppPaths`) is denied for every server.
                 let decision = rules.engine.decide(conn)
                 let verdict: Verdict = decision.rule?.effectiveListLevel == nil && wholeAppDenied.contains(e.identity.ruleKey) ? .deny : decision.verdict
-                if decision.rule == nil, verdict != .ask, warmedUp { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
+                if incoming && verdict == .ask { return nil }
+                if decision.rule == nil, verdict != .ask, warmedUp, !incoming { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
                 switch verdict {
                 case .deny: denyCount += 1
                 case .ask:
@@ -478,11 +490,17 @@ final class Ledger: ObservableObject {
                 return verdict
             }
             for c in perApp[id]?.conns ?? [] where !unmasked.masked.contains(ProxyUnmasking.maskKey(pid: c.pid, localPort: c.localPort, remotePort: c.remotePort)) {
-                let key = "\(c.remoteAddress):\(c.remotePort)/\(c.proto.rawValue)|\(c.processName)"
+                // A peer's connections to one port of this Mac are one row (each comes from a port of its own).
+                let key = c.incoming ? "in|\(c.remoteAddress):\(c.localPort)/\(c.proto.rawValue)|\(c.processName)"
+                                     : "\(c.remoteAddress):\(c.remotePort)/\(c.proto.rawValue)|\(c.processName)"
                 let bytes = bytesByFlow[FlowCounter.key(pid: c.pid, proto: c.proto, localPort: c.localPort, remotePort: c.remotePort)]
+                let socket = StreamDetector.key(pid: c.pid, proto: c.proto, localPort: c.localPort, remoteAddress: c.remoteAddress, remotePort: c.remotePort)
+                liveSockets.insert(socket)
+                let stream = !c.incoming && bytes != nil && streams.update(socket, bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0, now: now)
                 // Several sockets to the same server, port and protocol are one row; their bytes add up.
                 if let i = indexByKey[key] {
                     remotes[i].bytesIn += bytes?.0 ?? 0; remotes[i].bytesOut += bytes?.1 ?? 0
+                    if stream { remotes[i].stream = true }
                     // Each of them has its own local port, and all are cut.
                     if deniedKeys.contains(key), c.localPort != 0 { portsNow.insert(c.localPort) }
                     continue
@@ -490,20 +508,22 @@ final class Ledger: ObservableObject {
                 guard seen.insert(key).inserted else { continue }
                 let (host, named) = names.lookup(c.remoteAddress)
                 let geoPoint = isLocalAddress(c.remoteAddress) ? nil : geo.lookup(c.remoteAddress)
-                remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint,
+                // A peer that connected to a local proxy does not go through it: only an outgoing connection is tagged.
+                let route = routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort, processPath: c.processPath)
+                    ?? (c.incoming ? nil : RouteMarker.localProxy(remoteAddress: c.remoteAddress, remotePort: c.remotePort, pid: c.pid, listener: listeners[c.remotePort]))
+                remotes.append(RemoteHost(address: c.remoteAddress, host: host, port: c.incoming ? c.localPort : c.remotePort, proto: c.proto.rawValue.uppercased(), geo: geoPoint,
                                           pid: c.pid, process: c.processName,
                                           network: isLocalAddress(c.remoteAddress) ? nil : geo.network(c.remoteAddress)?.label,
-                                          route: routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort, processPath: c.processPath)
-                                            ?? RouteMarker.localProxy(remoteAddress: c.remoteAddress, remotePort: c.remotePort, pid: c.pid, listener: listeners[c.remotePort]),
-                                          bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0))
+                                          route: route, bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0, incoming: c.incoming, stream: stream))
                 indexByKey[key] = remotes.count - 1
 
                 guard !isLocalAddress(c.remoteAddress) else { continue }
                 // A connection whose name is still being looked up is judged on a later pass (at most
                 // `HostNames.grace` later), so a rule for its domain matches and an alert names it.
                 guard named else { continue }
+                // Judged by the socket's own ports, as the helper judges it.
                 let verdict = judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
-                                    executable: c.processPath, route: remotes.last?.route)
+                                    executable: c.processPath, route: remotes.last?.route, incoming: c.incoming)
                 remotes[remotes.count - 1].verdict = verdict
                 if verdict == .deny { deniedKeys.insert(key); if c.localPort != 0 { portsNow.insert(c.localPort) } }
             }
@@ -523,13 +543,14 @@ final class Ledger: ObservableObject {
                                               network: address.flatMap { isLocalAddress($0) ? nil : geo.network($0)?.label },
                                               bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0))
                 }
-                let verdict = judge(host: r.host, address: address ?? "", port: r.port, proto: .tcp, executable: r.path)
+                let verdict = judge(host: r.host, address: address ?? "", port: r.port, proto: .tcp, executable: r.path) ?? .ask
                 if fresh { remotes[remotes.count - 1].verdict = verdict }
                 if verdict == .deny, r.live { loopbackNow.insert(r.clientPort) }
             }
             e.remotes = remotes
             table[id] = e
         }
+        streams.keep(only: liveSockets)
         deniedCount = denyCount; unconfirmedCount = askCount; incomingCount = listenCount
         deniedPorts = portsNow
         deniedLoopbackPorts = loopbackNow
@@ -761,7 +782,7 @@ final class Ledger: ObservableObject {
             ("Google Chrome", "Google Chrome Helper", 413, "video.example.net", "198.51.100.6", "TCP", 443, "Paris", "France", 48.857, 2.352),
             ("Telegram", "Telegram", 520, "demo2.example.com", "203.0.113.3", "TCP", 443, "Frankfurt", "Germany", 50.11, 8.68),
             ("Telegram", "Telegram Helper", 521, "demo3.example.com", "203.0.113.4", "TCP", 5222, "Paris", "France", 48.857, 2.352),
-            ("Steam", "Steam", 630, "demo4.example.com", "203.0.113.5", "TCP", 443, "Stockholm", "Sweden", 59.33, 18.07),
+            ("Steam", "Steam", 630, "demo4.example.com", "203.0.113.5", "TCP", 27036, "Stockholm", "Sweden", 59.33, 18.07),
             ("Steam", "Steam Helper", 641, "demo5.example.com", "203.0.113.6", "UDP", 27015, "Madrid", "Spain", 40.42, -3.70),
             ("macOS", "mDNSResponder", 90, "dns.example", "192.0.2.53", "UDP", 53, "Amsterdam", "Netherlands", 52.37, 4.89),
             ("macOS", "apsd", 95, "push.example", "192.0.2.80", "TCP", 5223, "Stockholm", "Sweden", 59.33, 18.07),
@@ -793,6 +814,9 @@ final class Ledger: ObservableObject {
                                         bytesIn: UInt64(250_000 * (i + 1)), bytesOut: UInt64(25_000 * (i + 1))))
             if c.0 == "git-remote-https" { e.launchedBy = "Warp (pid 700)" }
             if c.3 == "demo3.example.com" { e.remotes[e.remotes.count - 1].route = .vpn(name: "Windscribe", interface: "utun3") }
+            // A peer connected to Steam's Remote Play port; Telegram's main connection is a long download.
+            if c.3 == "demo4.example.com" { e.remotes[e.remotes.count - 1].incoming = true }
+            if c.3 == "demo2.example.com" { e.remotes[e.remotes.count - 1].stream = true }
             table[ident.id] = e
         }
         // Firefox through local proxies: one destination unmasked behind `ssh -D 1080`, one connection to Tor that

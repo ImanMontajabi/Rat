@@ -203,6 +203,30 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Warp (pid 700)"].waitForExistence(timeout: 5), "Started by: Warp")
     }
 
+    // MARK: direction
+
+    /// A peer's connection to Steam's Remote Play port is tagged `↓ Incoming` and has no ✗/✓; Telegram's long
+    /// download is tagged `↓ stream` and keeps them. App rows show neither.
+    func testIncomingAndStreamRowsAreTagged() {
+        XCTAssertFalse(el("app-row-Steam").descendants(matching: .any)["badge-Incoming"].exists, "the app row keeps its room for routes")
+        expand("Steam")
+        let incoming = el("remote-row-demo4.example.com")
+        XCTAssertTrue(incoming.waitForExistence(timeout: 5))
+        XCTAssertTrue(incoming.label.contains("Incoming"), incoming.label)
+        XCTAssertTrue(incoming.label.contains("27036"), "the port of this Mac the peer connected to: \(incoming.label)")
+        XCTAssertFalse(el("remote-policy-demo4.example.com").buttons["policy-deny"].exists, "no ✗/✓ for a connection a peer started")
+        incoming.click()
+        XCTAssertTrue(inspectorTitle().contains("demo4.example.com"), inspectorTitle())
+        XCTAssertFalse(el("inspector-policy").exists, "the inspector offers none either")
+
+        expand("Telegram")
+        let stream = el("remote-row-demo2.example.com")
+        XCTAssertTrue(stream.waitForExistence(timeout: 5))
+        XCTAssertTrue(stream.label.contains("stream"), stream.label)
+        XCTAssertFalse(stream.label.contains("Incoming"))
+        XCTAssertTrue(el("remote-policy-demo2.example.com").buttons["policy-deny"].exists, "a stream this Mac opened can be denied")
+    }
+
     // MARK: VPN and proxy tags
 
     func testVPNAndProxyTagsRender() {

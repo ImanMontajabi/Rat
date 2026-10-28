@@ -204,7 +204,7 @@ struct MonitorFilter: Equatable {
         }
         if !settings.includeNetworkExtensions { list = list.filter { !$0.identity.isExtension } }
         if !settings.includeOtherUsers { list = list.filter { !$0.otherUsers } }
-        if onlyIncoming { list = list.filter { $0.listening > 0 } }
+        if onlyIncoming { list = list.filter { $0.listening > 0 || $0.remotes.contains(where: \.incoming) } }
         if onlyDenied { list = list.filter { ledger.rules.policy(for: $0.identity.ruleKey) == .deny } }
         if route != .all { list = list.filter { $0.remotes.contains(where: route.matches) } }
         if !text.isEmpty {
@@ -317,7 +317,7 @@ struct ProcessRow: View {
             .accessibilityIdentifier("app-row-\(app.identity.name)")
             if open {
                 VStack(alignment: .leading, spacing: 1) {
-                    if tree.direct.isEmpty && tree.processes.isEmpty { Text("No outgoing connections").foregroundStyle(.secondary).padding(.leading, 44) }
+                    if tree.direct.isEmpty && tree.processes.isEmpty { Text("No connections").foregroundStyle(.secondary).padding(.leading, 44) }
                     ForEach(tree.direct.prefix(30)) { r in remoteRow(r, indent: 44, process: app.mainProcess) }
                     ForEach(tree.processes) { node in processRow(node) }
                 }
@@ -357,7 +357,7 @@ struct ProcessRow: View {
         .accessibilityAction { select(s) }
         .accessibilityIdentifier("process-row-\(node.name)")
         if isOpen {
-            if node.remotes.isEmpty { Text("No outgoing connections").foregroundStyle(.secondary).padding(.leading, 70) }
+            if node.remotes.isEmpty { Text("No connections").foregroundStyle(.secondary).padding(.leading, 70) }
             ForEach(node.remotes.prefix(30)) { r in remoteRow(r, indent: 70, process: node.name) }
         }
     }
