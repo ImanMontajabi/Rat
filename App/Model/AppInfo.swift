@@ -14,36 +14,22 @@ struct AppIdentity: Hashable {
     /// What rules refer to: the app bundle (extensions share their host app's rules), or the executable path.
     var ruleKey: String { bundlePath ?? id }
 
+    /// The grouping itself is `ProcessGrouping.owner`, which the root daemon uses too, so both name the same app.
     static func resolve(processPath path: String, pid: Int32? = nil) -> AppIdentity {
-        // System services that work for an app (Safari's WebKit networking process) belong to that app.
-        if let pid, ProcessGrouping.actsForOthers(path), let owner = ProcessGrouping.responsiblePath(of: pid),
-           ProcessGrouping.bundleRoot(of: owner) != nil {
-            return resolve(processPath: owner)
-        }
-        // A program the app installed outside its bundle (Windscribe's tunnels) is listed under the app.
-        if let bundle = ProcessGrouping.bundleRoot(of: path) ?? ProcessGrouping.companionApp(of: path) {
+        switch ProcessGrouping.owner(of: path, responsiblePath: { pid.flatMap(ProcessGrouping.responsiblePath(of:)) }) {
+        case .app(let bundle, let isExtension):
             // "Steam.AppBundle" holds Steam's client and helpers; other bundles show the name Finder shows.
             let name = bundle.hasSuffix(".AppBundle")
                 ? ((bundle as NSString).lastPathComponent as NSString).deletingPathExtension
                 : FileManager.default.displayName(atPath: bundle).replacingOccurrences(of: ".app", with: "")
             // App extensions (.appex) are listed separately from their host app, like Little Snitch's "EXT" rows.
-            if path.contains(".appex/") { return AppIdentity(id: bundle + "#ext", name: name, bundlePath: bundle, isSystem: false, isExtension: true) }
+            if isExtension { return AppIdentity(id: bundle + "#ext", name: name, bundlePath: bundle, isSystem: false, isExtension: true) }
             return AppIdentity(id: bundle, name: name, bundlePath: bundle, isSystem: false)
-        }
-        let systemPrefixes = ["/System/", "/usr/", "/sbin/", "/bin/", "/Library/Apple/", "/private/var/db/"]
-        if systemPrefixes.contains(where: path.hasPrefix) {
+        case .system:
             return AppIdentity(id: "macOS", name: "macOS", bundlePath: nil, isSystem: true)
+        case .tool(let path):
+            return AppIdentity(id: path, name: (path as NSString).lastPathComponent, bundlePath: nil, isSystem: false)
         }
-        // Versioned CLI binaries ("…/claude/versions/2.1.308") belong to the tool, not to a version number.
-        let base = (path as NSString).lastPathComponent
-        if base.range(of: #"^\d[\d.]*$"#, options: .regularExpression) != nil {
-            let parent = (path as NSString).deletingLastPathComponent
-            var owner = parent
-            if (parent as NSString).lastPathComponent == "versions" { owner = (parent as NSString).deletingLastPathComponent }
-            let name = (owner as NSString).lastPathComponent
-            if !name.isEmpty { return AppIdentity(id: owner, name: name, bundlePath: nil, isSystem: false) }
-        }
-        return AppIdentity(id: path, name: base, bundlePath: nil, isSystem: false)
     }
 
     @MainActor static var mainProcessCache: [String: String?] = [:]

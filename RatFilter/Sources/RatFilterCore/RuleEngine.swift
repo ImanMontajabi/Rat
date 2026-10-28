@@ -28,6 +28,9 @@ public final class RuleEngine: @unchecked Sendable {
     public func add(_ rule: Rule) { lock.withLock { set.rules.append(rule) } }
     public func remove(id: UUID) { lock.withLock { set.rules.removeAll { $0.id == id } } }
 
+    /// The enabled rules that can apply right now (what the root daemon is handed, see `DaemonRules`).
+    public var activeRules: [Rule] { active(lock.withLock { set }).filter(\.enabled) }
+
     /// Rules that can apply right now: active profile, enabled group.
     private func active(_ s: RuleSet) -> [Rule] {
         let disabled = Set(s.groups.filter { !$0.enabled }.map(\.id))
@@ -55,9 +58,15 @@ public final class RuleEngine: @unchecked Sendable {
     /// the app's. They win over the app's other rules (alerts made many narrow ones, one domain or address at a
     /// time), but a ✓ does not lift a deny rule for any process. Without a ✗/✓ the most specific rule decides
     /// (`matchingRule`), or Silent Mode.
-    public func decide(_ c: Connection) -> Decision {
+    public func decide(_ c: Connection) -> Decision { decide(c, unknown: []) }
+
+    /// The decision when part of the connection is `unknown` (the root daemon judging a socket before Rat has named
+    /// its server), made so that it is a deny only when every value the unknown part could take is denied: rules
+    /// that do not deny count as matching whatever it is, deny rules only when they need none of it. Matching more
+    /// non-deny rules and fewer deny rules never turns a decision into a deny, so a deny here is a deny for sure.
+    public func decide(_ c: Connection, unknown: Rule.Unknown) -> Decision {
         let snapshot = lock.withLock { set }
-        let matching = active(snapshot).filter { $0.matches(c) }
+        let matching = active(snapshot).filter { $0.matches(c, assuming: $0.verdict == .deny ? [] : unknown) }
         let listed = matching.filter { $0.effectiveListLevel != nil }.max { a, b in
             if a.effectiveListLevel! != b.effectiveListLevel! { return a.effectiveListLevel! < b.effectiveListLevel! }
             return Self.weaker(a, b)

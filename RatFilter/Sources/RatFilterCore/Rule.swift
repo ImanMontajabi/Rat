@@ -165,17 +165,34 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
 
     private static func inside(_ path: String, _ prefix: String) -> Bool { path == prefix || path.hasPrefix(prefix + "/") }
 
-    public func matches(_ c: Connection) -> Bool {
+    /// What the root daemon may not know about a connection when it judges a socket (see `RuleEngine.decide(_:unknown:)`).
+    public struct Unknown: OptionSet, Sendable {
+        public let rawValue: Int
+        public init(rawValue: Int) { self.rawValue = rawValue }
+        /// The server's name: Rat has not named the address yet.
+        public static let host = Unknown(rawValue: 1)
+        /// The server itself (address, port, name): an unconnected UDP socket may send anywhere.
+        public static let remote = Unknown(rawValue: 2)
+        /// The app's code signature.
+        public static let signing = Unknown(rawValue: 4)
+    }
+
+    /// Whether the rule matches, counting every condition on something `unknown` as met.
+    public func matches(_ c: Connection, assuming unknown: Unknown = []) -> Bool {
         guard enabled else { return false }
         // A path matches the app, or the process that holds the socket: a rule for one system service
         // (/usr/sbin/mDNSResponder) or one helper inside an app.
         if let processPath, !(Self.inside(c.process.path, processPath) || c.executable.map { Self.inside($0, processPath) } == true) { return false }
         if let executable, !Self.inside(c.executable ?? c.process.path, executable) { return false }
-        if let signingID, signingID != c.process.signingID { return false }
-        if let teamID, teamID != c.process.teamID { return false }
+        if !unknown.contains(.signing) {
+            if let signingID, signingID != c.process.signingID { return false }
+            if let teamID, teamID != c.process.teamID { return false }
+        }
         if let proto, proto != c.proto { return false }
+        if unknown.contains(.remote) { return true }
         if let ports, !ports.contains(c.port) { return false }
         if let remoteAddress, remoteAddress != c.address { return false }
+        if unknown.contains(.host) { return true }
         if let remoteHost, remoteHost.lowercased() != c.host?.lowercased() { return false }
         if let d = remoteDomain, d != "*" {
             guard let host = c.host?.lowercased() else { return false }

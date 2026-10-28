@@ -38,6 +38,47 @@ public enum ProcessGrouping {
         path.contains(".xpc/") && ["/System/", "/usr/", "/Library/Apple/"].contains(where: path.hasPrefix)
     }
 
+    /// The app a process belongs to in Rat's list: what its rules name (`ruleKey`).
+    public enum Owner: Equatable, Sendable {
+        /// An application bundle (`isExtension`: the process runs from an app extension inside it).
+        case app(bundle: String, isExtension: Bool)
+        /// The `macOS` row: system services.
+        case system
+        /// A command-line tool or other program outside a bundle (its path, or a versioned tool's folder).
+        case tool(String)
+
+        public var ruleKey: String {
+            switch self {
+            case .app(let bundle, _): bundle
+            case .system: "macOS"
+            case .tool(let path): path
+            }
+        }
+    }
+
+    static let systemPrefixes = ["/System/", "/usr/", "/sbin/", "/bin/", "/Library/Apple/", "/private/var/db/"]
+
+    /// Which app a process belongs to, the same for the app's list and the root daemon. `responsiblePath` is asked
+    /// only for a system service that works for others.
+    public static func owner(of path: String, responsiblePath: () -> String?) -> Owner {
+        // System services that work for an app (Safari's WebKit networking process) belong to that app.
+        if actsForOthers(path), let owner = responsiblePath(), let bundle = bundleRoot(of: owner) {
+            return .app(bundle: bundle, isExtension: owner.contains(".appex/"))
+        }
+        // A program the app installed outside its bundle (Windscribe's tunnels) belongs to the app.
+        if let bundle = bundleRoot(of: path) ?? companionApp(of: path) { return .app(bundle: bundle, isExtension: path.contains(".appex/")) }
+        if systemPrefixes.contains(where: path.hasPrefix) { return .system }
+        // Versioned CLI binaries ("…/claude/versions/2.1.308") belong to the tool, not to a version number.
+        let base = (path as NSString).lastPathComponent
+        if base.range(of: #"^\d[\d.]*$"#, options: .regularExpression) != nil {
+            let parent = (path as NSString).deletingLastPathComponent
+            var owner = parent
+            if (parent as NSString).lastPathComponent == "versions" { owner = (parent as NSString).deletingLastPathComponent }
+            if !(owner as NSString).lastPathComponent.isEmpty { return .tool(owner) }
+        }
+        return .tool(path)
+    }
+
     private typealias ResponsibleFn = @convention(c) (pid_t) -> pid_t
     private static let responsibleFn: ResponsibleFn? = {
         // RTLD_DEFAULT is (void *)-2 on Darwin.

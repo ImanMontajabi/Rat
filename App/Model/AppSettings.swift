@@ -119,43 +119,6 @@ final class AppSettings: ObservableObject {
     }
 }
 
-/// Extra address ranges the user wants treated as the local network ("Additional IP Ranges in Local Network").
-final class LocalRanges: @unchecked Sendable {
-    static let shared = LocalRanges()
-    private let lock = NSLock()
-    private var ranges: [(base: UInt32, mask: UInt32)] = []
-
-    /// Parses "10.5.0.0/16, 100.64.0.0/10" (comma, space or newline separated). Returns the entries that did not parse.
-    @discardableResult
-    func set(_ text: String) -> [String] {
-        var bad: [String] = []
-        var parsed: [(UInt32, UInt32)] = []
-        for token in text.split(whereSeparator: { ", \n".contains($0) }) {
-            if let r = Self.parse(String(token)) { parsed.append(r) } else { bad.append(String(token)) }
-        }
-        lock.withLock { ranges = parsed }
-        return bad
-    }
-
-    func contains(_ address: String) -> Bool {
-        var a = in_addr()
-        guard inet_pton(AF_INET, address, &a) == 1 else { return false }
-        let ip = UInt32(bigEndian: a.s_addr)
-        return lock.withLock { ranges.contains { (ip & $0.mask) == $0.base } }
-    }
-
-    static func parse(_ s: String) -> (base: UInt32, mask: UInt32)? {
-        let parts = s.split(separator: "/", omittingEmptySubsequences: false)
-        guard parts.count <= 2 else { return nil }
-        var a = in_addr()
-        guard inet_pton(AF_INET, String(parts[0]), &a) == 1 else { return nil }
-        let bits = parts.count == 2 ? Int(parts[1]) : 32
-        guard let bits, (0...32).contains(bits) else { return nil }
-        let mask: UInt32 = bits == 0 ? 0 : ~UInt32(0) << UInt32(32 - bits)
-        return (UInt32(bigEndian: a.s_addr) & mask, mask)
-    }
-}
-
 /// System notifications for the events listed in Settings > Notifications.
 @MainActor
 enum Notifier {
