@@ -354,12 +354,13 @@ struct ProcessRow: View {
         HStack(spacing: 6) {
             Disclosure(open: isOpen, label: node.name) { if !openProcesses.insert(node.name).inserted { openProcesses.remove(node.name) } }
             Image(systemName: app.identity.isSystem ? "gearshape.2" : "gearshape").foregroundStyle(.secondary)
-            Text(node.name).lineLimit(1).truncationMode(.middle).font(.caption.weight(.medium)).layoutPriority(1)
-            RouteSummaryBadges(remotes: node.remotes)
-            Text(node.pids.count == 1 ? "pid \(node.pids[0])" : node.pids.isEmpty ? "" : "\(node.pids.count) processes").foregroundStyle(.secondary).lineLimit(1)
-            Spacer(minLength: 4)
-            Text("\(node.remotes.count)").foregroundStyle(.secondary).monospacedDigit().help("Connections")
-            if node.totalIn + node.totalOut > 0 { Text(formatBytes(node.totalIn + node.totalOut)).foregroundStyle(.secondary).monospacedDigit() }
+            // The fullest form that fits: tags spelled out, then as symbols, then without the pid; only then is a long
+            // name ("Google Chrome Helper (Aperitif)") cut in the middle. The count and size are never cut or wrapped.
+            ViewThatFits(in: .horizontal) {
+                processLabel(node, pids: true, tags: true)
+                processLabel(node, pids: true, tags: false)
+                processLabel(node, pids: false, tags: false)
+            }
             rowPolicy(app.ruleTarget(process: node.name), service: node.name, subject: "this process")
         }
         .padding(.vertical, 3).padding(.leading, 30).padding(.trailing, 4)
@@ -379,16 +380,13 @@ struct ProcessRow: View {
     private func remoteRow(_ r: RemoteHost, indent: CGFloat, process: String?) -> some View {
         let s = MonitorSelection(appID: app.id, process: process, remote: r.id)
         return HStack(spacing: 6) {
-            HStack(spacing: 6) {
-                if let flag = r.geo?.flag, !flag.isEmpty { Text(flag).accessibilityHidden(true) }
-                Text(r.host).lineLimit(1).truncationMode(.middle)
-                RouteBadges(remote: r, compact: true)
-                Spacer(minLength: 4)
-                Text("\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
-                if r.bytesIn + r.bytesOut > 0 {
-                    Text(formatBytes(r.bytesIn + r.bytesOut)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
-                        .help("\(formatBytes(r.bytesIn)) received, \(formatBytes(r.bytesOut)) sent on the open connections")
-                }
+            // The fullest form that fits: tags spelled out, then the port without its service name, then the tags as
+            // symbols. Only when even that is too wide is the host cut, in the middle; the port and size never are.
+            ViewThatFits(in: .horizontal) {
+                connectionLabel(r, tags: true, service: true)
+                connectionLabel(r, tags: true, service: false)
+                connectionLabel(r, tags: false, service: true)
+                connectionLabel(r, tags: false, service: false)
             }
             .help(r.geo.map { "\($0.place)\(r.incoming ? "" : " · \(r.host)")" } ?? r.host)
             // The row reads as one element (its label carries the tags); its ✗/✓ stay buttons of their own.
@@ -404,6 +402,36 @@ struct ProcessRow: View {
         .background(selection == s ? Color.accentColor.opacity(0.7) : .clear, in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .onTapGesture { select(s) }
+    }
+
+    private func processLabel(_ node: ProcessNode, pids: Bool, tags: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(node.name).lineLimit(1).truncationMode(.middle).font(.caption.weight(.medium)).layoutPriority(1)
+            RouteSummaryBadges(remotes: node.remotes, symbolsOnly: !tags)
+            if pids, !node.pids.isEmpty {
+                Text(verbatim: node.pids.count == 1 ? "pid \(node.pids[0])" : "\(node.pids.count) processes").foregroundStyle(.secondary).lineLimit(1).fixedSize()
+            }
+            Spacer(minLength: 4)
+            Text(verbatim: "\(node.remotes.count)").foregroundStyle(.secondary).monospacedDigit().fixedSize().help("Connections")
+            if node.totalIn + node.totalOut > 0 { Text(formatBytes(node.totalIn + node.totalOut)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1).fixedSize() }
+        }
+    }
+
+    private func connectionLabel(_ r: RemoteHost, tags: Bool, service: Bool) -> some View {
+        HStack(spacing: 6) {
+            if let flag = r.geo?.flag, !flag.isEmpty { Text(flag).accessibilityHidden(true) }
+            Text(r.host).lineLimit(1).truncationMode(.middle)
+            HStack(spacing: tags ? 4 : 3) {
+                ForEach(RouteBadges.items(r, compact: true), id: \.self) { RouteBadge(item: $0, symbolOnly: !tags) }
+            }
+            Spacer(minLength: 4)
+            Text(verbatim: "\(r.proto) \(r.port)" + (service ? serviceSuffix(proto: r.proto, port: r.port) : ""))
+                .foregroundStyle(.secondary).monospacedDigit().lineLimit(1).fixedSize()
+            if r.bytesIn + r.bytesOut > 0 {
+                Text(formatBytes(r.bytesIn + r.bytesOut)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1).fixedSize()
+                    .help("\(formatBytes(r.bytesIn)) received, \(formatBytes(r.bytesOut)) sent on the open connections")
+            }
+        }
     }
 
     /// The ✗/✓ of a process or connection row: its own choice, or the one it follows from its process or app shown

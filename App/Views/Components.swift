@@ -52,6 +52,8 @@ struct RouteBadges: View {
 /// two and a count of the rest ("VPN · Windscribe", "Proxy · ssh", "+1").
 struct RouteSummaryBadges: View {
     let remotes: [RemoteHost]
+    /// Only the symbols, for a row that chooses its own fallbacks (a process row keeps its pid before its tags' text).
+    var symbolsOnly = false
 
     static func items(_ remotes: [RemoteHost]) -> [RouteBadges.Item] {
         var seen = Set<String>(), out: [RouteBadges.Item] = []
@@ -64,12 +66,20 @@ struct RouteSummaryBadges: View {
         if !items.isEmpty {
             // The row's name keeps its room: with less space the tags step down to the first one and a count,
             // then to their symbols (each still names itself in its tooltip).
-            ViewThatFits(in: .horizontal) {
-                badges(items, shown: 2)
-                badges(items, shown: 1)
-                HStack(spacing: 3) { ForEach(items, id: \.self) { RouteBadge(item: $0, symbolOnly: true) } }
+            if symbolsOnly {
+                symbols(items)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    badges(items, shown: 2)
+                    badges(items, shown: 1)
+                    symbols(items)
+                }
             }
         }
+    }
+
+    private func symbols(_ items: [RouteBadges.Item]) -> some View {
+        HStack(spacing: 3) { ForEach(items, id: \.self) { RouteBadge(item: $0, symbolOnly: true) } }
     }
 
     private func badges(_ items: [RouteBadges.Item], shown: Int) -> some View {
