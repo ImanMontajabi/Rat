@@ -69,7 +69,8 @@ final class DaemonRulesEnforcementTests: XCTestCase {
         let rule = Rule(verdict: .deny, processPath: nc, executable: nc, listLevel: .process)
         let (d, _) = try daemon(dir, rules: DaemonRules(rules: [rule]))
         let t0 = Date()
-        d.tick(now: t0)   // the full scan, before nc runs
+        XCTAssertTrue(d.tick(now: t0), "a deny rule names a program: passes go on")
+        XCTAssertFalse(d.watching, "nc does not run yet: the next pass comes after the standby interval (20 ms)")
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: nc)
@@ -84,7 +85,8 @@ final class DaemonRulesEnforcementTests: XCTestCase {
             if port == 0 { usleep(10_000) }
         }
         try XCTSkipIf(port == 0, "nc opened no socket here")
-        XCTAssertTrue(d.tick(now: t0.addingTimeInterval(0.01)), "found without waiting for the next full scan")
+        XCTAssertTrue(d.tick(now: t0.addingTimeInterval(0.02)), "found without waiting for the next full scan")
+        XCTAssertTrue(d.watching, "a watched process runs: passes every 3 ms")
         XCTAssertTrue(d.loadedPorts.contains(port))
     }
 

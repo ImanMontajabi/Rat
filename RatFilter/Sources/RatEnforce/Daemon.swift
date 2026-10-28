@@ -124,9 +124,12 @@ public final class EnforcerDaemon {
         public var proxiedFile: String?
         public var ownerUID: uid_t?
         public var anchor = "com.apple/rat"
-        /// Pass interval while a denied app has processes. Every pass reads the process list and every socket of
-        /// every denied process (reading Chrome's ~30 processes takes about 0.05 ms).
+        /// Pass interval while a denied or watched process runs. Every pass reads the newest processes and every
+        /// socket of every denied or watched process (reading Chrome's ~30 processes takes about 0.05 ms).
         public var interval: TimeInterval = 0.003
+        /// Pass interval while something is denied but none of it runs: how soon a denied program that starts is
+        /// seen (about 3 % CPU at 20 ms, against 8 % at 3 ms).
+        public var standbyInterval: TimeInterval = 0.02
         public var idleInterval: TimeInterval = 0.25
         /// Ports stay blocked this long after their socket disappears, to cover packets still in flight.
         public var portHold: TimeInterval = 5
@@ -172,6 +175,8 @@ public final class EnforcerDaemon {
     private var ruledList: [(pid_t, Watched)] = []
     private var watchedChanged = false
     private var newest = [pid_t](repeating: 0, count: 32)
+    /// Whether the last pass found a denied or watched process (see `tick`).
+    public private(set) var watching = false
     public private(set) var deniedPIDs = Set<pid_t>()
     private var portsByApp: [String: (processes: Int, ports: Set<Int>)] = [:]
     public private(set) var lastTickDuration: TimeInterval = 0
@@ -247,12 +252,14 @@ public final class EnforcerDaemon {
     public func loop() {
         while true {
             let busy = autoreleasepool { tick() }
-            if trace, busy { traceTicks += 1; traceTime += lastTickDuration; if traceTicks == 400 { FileHandle.standardError.write(Data("avg tick \(Int(traceTime / 400 * 1e6)) us, reloads \(reloads)\n".utf8)); traceTicks = 0; traceTime = 0 } }
-            Thread.sleep(forTimeInterval: busy ? settings.interval : settings.idleInterval)
+            if trace, busy, watching { traceTicks += 1; traceTime += lastTickDuration; if traceTicks == 400 { FileHandle.standardError.write(Data("avg tick \(Int(traceTime / 400 * 1e6)) us, reloads \(reloads)\n".utf8)); traceTicks = 0; traceTime = 0 } }
+            Thread.sleep(forTimeInterval: !busy ? settings.idleInterval : watching ? settings.interval : settings.standbyInterval)
         }
     }
 
-    /// One pass. Returns whether a denied app currently has processes (so the loop should run fast).
+    /// One pass. Returns whether there is anything to enforce (a denied app or a deny rule for a process); `watching`
+    /// says whether one of its processes runs. The loop then passes every `interval`, every `standbyInterval` while
+    /// none runs, and every `idleInterval` with nothing to enforce.
     @discardableResult
     public func tick(now: Date = Date()) -> Bool {
         let began = Date()
@@ -264,7 +271,7 @@ public final class EnforcerDaemon {
         guard !denied.isEmpty || judge != nil else {
             verdictCache.removeAll(); deniedPIDs.removeAll(); portsByApp.removeAll()
             watched.removeAll(); socketVerdicts.removeAll(); portsByRuleApp.removeAll()
-            young.removeAll(); ruledList.removeAll(); lastCleanup = .distantPast
+            young.removeAll(); ruledList.removeAll(); lastCleanup = .distantPast; watching = false
             settle(now: now, live: [], loopback: [])
             return false
         }
@@ -282,6 +289,10 @@ public final class EnforcerDaemon {
             guard known == nil || (known == "" && now.timeIntervalSince(firstSeen[pid] ?? now) < 1) else { continue }
             if full, known == nil || known == "" { young.append(pid) }
             let path = ConnectionSampler.path(of: pid)
+            // A young process that exited is left as it was until the cleanup forgets it, as when every process was
+            // listed on every pass: marking it unwatched at once dropped the daemon to its idle rate between two
+            // short-lived processes, so the next one was seen up to 0.25 s late.
+            if !full, path.hasPrefix("pid ") { continue }
             var responsible: String??
             let responsiblePath = { () -> String? in
                 if let r = responsible { return r }
@@ -319,9 +330,13 @@ public final class EnforcerDaemon {
             ruledList = watched.compactMap { pid, w in w.map { (pid, $0) } }
         }
         let ruled = judge == nil ? [] : ruledList
-        guard !deniedPIDs.isEmpty || !ruled.isEmpty else {
+        // Nothing it names runs: the next pass comes after `standbyInterval`, not the 0.25 s idle sleep, so a denied
+        // program that starts is cut within about 20 ms. A process is first seen before its `exec`, as its parent's
+        // program, so the passes that follow are what notice it became the denied one.
+        watching = !deniedPIDs.isEmpty || !ruled.isEmpty
+        guard watching else {
             portsByApp.removeAll(); portsByRuleApp.removeAll(); socketVerdicts.removeAll()
-            settle(now: now, live: [], loopback: []); return false
+            settle(now: now, live: [], loopback: []); return true
         }
 
         // Every socket of every denied process, every pass: descriptors are reused and a socket gets its port only
