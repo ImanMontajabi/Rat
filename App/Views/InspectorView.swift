@@ -267,7 +267,8 @@ struct RemoteInspector: View {
             Text("Bytes of the connections open now.").font(.caption).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
                 kv("Address", r.address.isEmpty ? "not looked up" : r.address)
-                kv("Port", "\(r.proto) \(r.port)" + serviceSuffix(proto: r.proto, port: r.port))
+                kv("Port", "\(r.proto) \(r.port)" + (r.incoming ? " on this Mac" : "") + serviceSuffix(proto: r.proto, port: r.port))
+                kv("Direction", r.incoming ? "Incoming: the peer connected to this Mac" : r.stream ? "Outgoing, mostly receiving for a while" : "Outgoing")
                 if let p = r.process { kv("Process", p + (r.pid.map { " (pid \($0))" } ?? "")) }
                 if let n = r.network { kv("Network", n) }
                 if let g = r.geo { kv("Location", "\(g.city), \(g.country)") }
@@ -278,7 +279,7 @@ struct RemoteInspector: View {
                 }
             }
             SectionHeader(title: "Rules", open: $rules)
-            if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), service: r.process) }
+            if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), service: r.process, incoming: r.incoming) }
         }
     }
 
@@ -300,6 +301,8 @@ struct TargetRules: View {
     let target: RulesModel.Target?
     /// The process, for services that work for every app (no one-click Deny).
     var service: String? = nil
+    /// A connection a peer started (no rule names it).
+    var incoming = false
 
     private var subject: String {
         switch target?.level { case .connection?: "this connection"; case .process?: "this process"; default: "this app" }
@@ -346,7 +349,9 @@ struct TargetRules: View {
                 .accessibilityIdentifier("inspector-rules")
                 .accessibilityValue("\(list.count)")
             } else {
-                Text("No rule can name this connection: it stays inside the local network.").font(.caption).foregroundStyle(.secondary)
+                Text(incoming ? "A peer started this connection. Rules decide what this Mac connects to, so none names it; the app's ✗ still cuts it."
+                              : "No rule can name this connection: it stays inside the local network.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Button("Manage Rules…") { ledger.rules.focus = target ?? RulesModel.Target(app: app.identity.ruleKey); openWindow(id: "rules") }
                 .accessibilityIdentifier("manage-rules")

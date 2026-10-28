@@ -2,7 +2,8 @@ import SwiftUI
 
 /// The tags of a connection that does not go straight to its server: `VPN · Windscribe · utun3` (teal),
 /// `Proxy · ssh` (orange) for a local or system proxy, including destinations unmasked behind a local proxy, and
-/// `VPN server · Windscribe` (grey) for the VPN client's own connection that carries the tunnel.
+/// `VPN server · Windscribe` (grey) for the VPN client's own connection that carries the tunnel. After them, in
+/// blue, the direction: `↓ Incoming` for a connection a peer started, `↓ stream` for a long-lived download.
 struct RouteBadges: View {
     let remote: RemoteHost
     /// Narrow rows leave out the tunnel interface.
@@ -13,11 +14,13 @@ struct RouteBadges: View {
         var symbol: String
         var vpn: Bool
         var carrier = false
+        var direction = false
         var help: String
-        var color: Color { carrier ? .secondary : vpn ? .teal : .orange }
+        var color: Color { direction ? .blue : carrier ? .secondary : vpn ? .teal : .orange }
     }
 
-    static func items(_ r: RemoteHost, compact: Bool) -> [Item] {
+    /// `directions`: also the direction tags (a connection's own row and the inspector; not an app's summary).
+    static func items(_ r: RemoteHost, compact: Bool, directions: Bool = true) -> [Item] {
         var out: [Item] = []
         if let route = r.route {
             if case .vpnServer = route {
@@ -28,6 +31,14 @@ struct RouteBadges: View {
         }
         if let via = r.via, !(r.route?.isProxy ?? false) {
             out.append(Item(text: via.badge, symbol: "arrow.triangle.branch", vpn: false, help: "\(via.label), \(via.kind)"))
+        }
+        guard directions else { return out }
+        if r.incoming {
+            out.append(Item(text: "Incoming", symbol: "arrow.down", vpn: false, direction: true,
+                            help: "\(r.address) started this connection to port \(r.port) of this Mac, where \(r.process ?? "a program") listens. Rules decide what this Mac connects to, so this row has no ✗/✓."))
+        } else if r.stream {
+            out.append(Item(text: "stream", symbol: "arrow.down", vpn: false, direction: true,
+                            help: "Open for a while and mostly receiving: a download, a server push (such as Server-Sent Events) or a media stream. Rat sees how many bytes pass, not what they carry."))
         }
         return out
     }
@@ -44,7 +55,7 @@ struct RouteSummaryBadges: View {
 
     static func items(_ remotes: [RemoteHost]) -> [RouteBadges.Item] {
         var seen = Set<String>(), out: [RouteBadges.Item] = []
-        for r in remotes { for i in RouteBadges.items(r, compact: true) where seen.insert(i.text).inserted { out.append(i) } }
+        for r in remotes { for i in RouteBadges.items(r, compact: true, directions: false) where seen.insert(i.text).inserted { out.append(i) } }
         return out.sorted { ($0.vpn ? 0 : $0.carrier ? 2 : 1, $0.text) < ($1.vpn ? 0 : $1.carrier ? 2 : 1, $1.text) }
     }
 

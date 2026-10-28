@@ -17,11 +17,14 @@ public struct ObservedConnection: Hashable, Sendable {
     public var tcpState: String?
     /// The socket's own address: on a VPN tunnel interface (utun, ipsec) when its traffic goes through the VPN.
     public var localAddress: String
+    /// A peer started it: a listener on this Mac accepted it (`SocketDirection.mark`). Not known from one socket.
+    public var incoming: Bool
 
     public init(pid: Int32, processPath: String, proto: Proto, remoteAddress: String, remotePort: Int, localPort: Int, tcpState: String?,
-                localAddress: String = "") {
+                localAddress: String = "", incoming: Bool = false) {
         self.pid = pid; self.processPath = processPath; self.proto = proto; self.remoteAddress = remoteAddress
         self.remotePort = remotePort; self.localPort = localPort; self.tcpState = tcpState; self.localAddress = localAddress
+        self.incoming = incoming
     }
 
     public var processName: String { (processPath as NSString).lastPathComponent }
