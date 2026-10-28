@@ -387,8 +387,8 @@ final class Ledger: ObservableObject {
         return s
     }
 
-    func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter], flows: [FlowCounter] = []) async {
-        let now = Date()
+    /// `now` is the pass's time (tests give their own, so rates do not depend on how fast the machine runs).
+    func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter], flows: [FlowCounter] = [], now: Date = Date()) async {
         // Which connections a peer started: their local port is a listener's.
         let conns = SocketDirection.mark(conns)
         let dt = max(now.timeIntervalSince(lastTick), 0.2)
