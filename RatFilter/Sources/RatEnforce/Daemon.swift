@@ -228,6 +228,8 @@ public final class EnforcerDaemon {
     }
 
     public func start() {
+        // 1.0.3's address list goes first, before any pfctl run (the watchdog's can take a second on a cold start).
+        if let legacy = settings.legacyBlocklistFile { try? FileManager.default.removeItem(atPath: legacy) }
         // Read once: an update replaces the file on disk while this process keeps running the old code.
         executableSHA256 = FileDigest.sha256(atPath: ConnectionSampler.path(of: getpid()))
         // A repair asked for before this start is not replayed.
@@ -238,7 +240,6 @@ public final class EnforcerDaemon {
         if token == nil, pfEnabled { enablePF() }
         // Start clean: whatever an earlier version left in the anchor (address tables, old ports) is removed.
         _ = run("/sbin/pfctl", ["-a", settings.anchor, "-F", "all"], nil)
-        if let legacy = settings.legacyBlocklistFile { try? FileManager.default.removeItem(atPath: legacy) }
         loadedPorts = []
         loadedLoopbackPorts = []
         loaded = true

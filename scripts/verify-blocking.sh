@@ -22,8 +22,9 @@
 #     one connection (curl to one server address, then to one server by the name Rat gave it) cuts only that
 #     connection, and curl to other servers keeps working.
 #  5. Only through a VPN (1.6.0, #45; `conditionalRules`): curl may connect only through a VPN tunnel. A curl bound
-#     to the Wi-Fi or Ethernet address (`--interface`) is cut whether or not a VPN is up; with a VPN carrying the
-#     Internet a plain curl goes through it and works, without one it is cut. dig keeps resolving.
+#     to the Wi-Fi or Ethernet address (`--interface`), which works without the rule, is cut whether or not a VPN is
+#     up (skipped when it does not work without the rule: a VPN's own kill switch); with a VPN carrying the Internet a
+#     plain curl goes through it and works, without one it is cut. dig keeps resolving.
 set -u
 [ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 2; }
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -285,16 +286,23 @@ echo '{}' > "$WORK/deny-rules.json"
 
 echo "== phase 5, only through a VPN"
 VPN_ONLY='[{"verdict": "deny", "processPath": "macOS", "executable": "/usr/bin/curl", "requireVPN": true}]'
+PHYS=; for i in en0 en1 en2 en3 en4 en5; do /usr/sbin/ipconfig getifaddr "$i" >/dev/null 2>&1 && { PHYS=$i; break; }; done
+FULL=$(/sbin/route -n get 1.1.1.1 2>/dev/null | awk '/interface:/ { print $2 }')
+# Without the rule a curl outside the tunnel must work, or a block proves nothing: a VPN's own firewall (Windscribe's
+# with its kill switch on) already stops everything outside the tunnel.
+OUTSIDE=
+if [ -n "$PHYS" ]; then
+  r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' --interface "$PHYS" https://example.com)
+  [ "$r" = 200 ] && OUTSIDE=1 || echo "  note: without the rule a curl bound to $PHYS already fails ($r): something else blocks traffic outside the tunnel"
+fi
 /usr/bin/python3 -I -c 'import json, sys; json.dump({"version": 1, "rules": [], "conditionalRules": json.loads(sys.argv[1]), "names": {}, "signatures": {}, "localRanges": ""}, open(sys.argv[2] + ".tmp", "w"))' \
   "$VPN_ONLY" "$WORK/deny-rules.json" && apply_rules
 sleep 0.5
-PHYS=; for i in en0 en1 en2 en3 en4 en5; do /usr/sbin/ipconfig getifaddr "$i" >/dev/null 2>&1 && { PHYS=$i; break; }; done
-FULL=$(/sbin/route -n get 1.1.1.1 2>/dev/null | awk '/interface:/ { print $2 }')
-if [ -n "$PHYS" ]; then
+if [ -n "$OUTSIDE" ]; then
   RW=$(fresh 10 --interface "$PHYS" https://example.com)
   echo "  $RW/10 fresh curls bound to $PHYS ($(/usr/sbin/ipconfig getifaddr "$PHYS")) blocked completely"
   [ "$RW" -gt 0 ] || { echo "  FAIL no curl outside the tunnel was blocked"; FAIL=1; }
-else echo "  skip: no Wi-Fi or Ethernet address"; fi
+else RW=; echo "  skip: no curl outside the tunnel to cut (no Wi-Fi or Ethernet address, or it is blocked already)"; fi
 case "$FULL" in
   utun*|ipsec*|ppp*|tun*|wg*)
     r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' https://example.com)
@@ -313,5 +321,5 @@ echo "== deny list and rules emptied: curl must work again"
 r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' https://example.com)
 [ "$r" = 200 ] && echo "  ok example.com -> 200" || { echo "  FAIL example.com -> $r"; FAIL=1; }
 
-[ "$FAIL" = 0 ] && echo "PASS (fresh-process leak rate: $LEAKS/$TOTAL direct, ${PL:-?}/${PT:-?} through the proxy; rules: process $((10 - ${RP:-0}))/10, connection $((10 - ${RC:-0}))/10, by name $((10 - ${RN:-0}))/10, outside the VPN $((10 - ${RW:-10}))/10)" || echo "FAIL"
+[ "$FAIL" = 0 ] && echo "PASS (fresh-process leak rate: $LEAKS/$TOTAL direct, ${PL:-?}/${PT:-?} through the proxy; rules: process $((10 - ${RP:-0}))/10, connection $((10 - ${RC:-0}))/10, by name $((10 - ${RN:-0}))/10, outside the VPN ${RW:+$((10 - RW))/10}${RW:-skipped})" || echo "FAIL"
 exit "$FAIL"
