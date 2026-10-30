@@ -52,7 +52,11 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-            searchField
+            HStack(spacing: 10) {
+                searchField
+                localSwitch
+            }
+            .padding(.horizontal, 14).padding(.bottom, 10)
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if settings.groupBy == .process {
@@ -121,8 +125,6 @@ struct SidebarView: View {
             TextField("Search", text: $filter.search).textFieldStyle(.plain).accessibilityIdentifier("search-field")
             chip("arrow.down.left.circle", on: $filter.onlyIncoming, help: "Only apps accepting incoming connections").accessibilityIdentifier("only-incoming")
             chip("xmark.rectangle", on: $filter.onlyDenied, help: "Only denied apps").accessibilityIdentifier("only-denied")
-            chip("house.slash", on: $filter.hideLocal, help: "Hide local connections: this Mac (loopback), the local network (LAN, link-local) and Bonjour (mDNS, multicast)")
-                .accessibilityLabel("Hide Local").accessibilityIdentifier("hide-local").accessibilityValue(filter.hideLocal ? "on" : "off")
             Menu {
                 Picker("Route", selection: $filter.route) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
             } label: {
@@ -139,7 +141,17 @@ struct SidebarView: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(.white.opacity(0.08), in: Capsule())
-        .padding(.horizontal, 14).padding(.bottom, 10)
+    }
+
+    /// Local connections on or off (`MonitorFilter.hideLocal`, remembered as `AppSettings.hideLocal`): a labeled
+    /// switch beside the search field, on while they are shown.
+    private var localSwitch: some View {
+        Toggle(isOn: Binding(get: { !filter.hideLocal }, set: { filter.hideLocal = !$0 })) {
+            Text("Local").font(.callout).foregroundStyle(.secondary)
+        }
+        .toggleStyle(.switch).controlSize(.mini).fixedSize()
+        .help("Local connections: this Mac (loopback), the local network (LAN, link-local) and Bonjour (mDNS, multicast). Turn off to hide them in the list, the map and the Summary.")
+        .accessibilityLabel("Local connections").accessibilityIdentifier("show-local")
     }
 
     private func chip(_ symbol: String, on: Binding<Bool>, help: String) -> some View {

@@ -47,6 +47,12 @@ final class RatUITests: XCTestCase {
         XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: e)], timeout: timeout) == .completed
     }
 
+    /// Waits until a switch is on or off (a switch reports its own value, 1 or 0).
+    private func waitSwitch(_ e: XCUIElement, on: Bool, timeout: TimeInterval = 5) -> Bool {
+        let n = on ? 1 : 0
+        return XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value == %@ OR value == %@", NSNumber(value: n), "\(n)"), evaluatedWith: e)], timeout: timeout) == .completed
+    }
+
     /// Waits until a text shows `text` (as its label or its value, whichever the element reports).
     private func waitText(_ e: XCUIElement, _ text: String, timeout: TimeInterval = 5) -> Bool {
         XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "label == %@ OR value == %@", text, text), evaluatedWith: e)], timeout: timeout) == .completed
@@ -239,12 +245,14 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["🇬🇧 London, United Kingdom"].waitForExistence(timeout: 5), "the inspector's location")
     }
 
-    /// Hide Local leaves out Bonjour and LAN connections, and the processes that have only those; a connection
-    /// through a local proxy stays (it leaves the Mac). The chip remembers its state for the next launch.
-    func testHideLocalHidesLocalConnections() {
-        let chip = el("hide-local")
+    /// The Local switch beside the search field, turned off, leaves out Bonjour and LAN connections, and the
+    /// processes that have only those; a connection through a local proxy stays (it leaves the Mac). It remembers
+    /// its state for the next launch.
+    func testLocalSwitchHidesLocalConnections() {
+        let chip = el("show-local")
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
-        XCTAssertEqual(chip.value as? String, "off")
+        XCTAssertTrue(waitSwitch(chip, on: true), "local connections are shown at first: \(String(describing: chip.value))")
+        XCTAssertTrue(app.staticTexts["Local"].exists, "a labeled switch")
         let counts = el("summary-counts")
         XCTAssertTrue(counts.waitForExistence(timeout: 5))
         let before = [counts.label, counts.value as? String ?? ""].joined()
@@ -256,7 +264,7 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(el("remote-row-127.0.0.1").waitForExistence(timeout: 5))
 
         chip.click()
-        XCTAssertTrue(waitValue(chip, "on"))
+        XCTAssertTrue(waitSwitch(chip, on: false))
         XCTAssertTrue(waitGone(el("process-row-rapportd")), "a process with only local connections is hidden")
         XCTAssertTrue(waitGone(el("remote-row-224.0.0.251")))
         XCTAssertTrue(el("remote-row-dns.example").exists, "mDNSResponder's outside connection stays")
@@ -265,7 +273,7 @@ final class RatUITests: XCTestCase {
         XCTAssertNotEqual([counts.label, counts.value as? String ?? ""].joined(), before, "the Summary counts fewer domains")
 
         chip.click()
-        XCTAssertTrue(waitValue(chip, "off"))
+        XCTAssertTrue(waitSwitch(chip, on: true))
         XCTAssertTrue(el("process-row-rapportd").waitForExistence(timeout: 5))
     }
 
