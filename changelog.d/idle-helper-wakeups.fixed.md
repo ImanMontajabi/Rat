@@ -1,0 +1,1 @@
+With nothing blocked, the helper checks pf every 10 s instead of every 2 s (a fifth of the `pfctl` runs) and sleeps a second between passes. A new block is enforced as fast as before: the helper loads its ports first and checks pf on the next pass.
