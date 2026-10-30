@@ -321,5 +321,5 @@ echo "== deny list and rules emptied: curl must work again"
 r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' https://example.com)
 [ "$r" = 200 ] && echo "  ok example.com -> 200" || { echo "  FAIL example.com -> $r"; FAIL=1; }
 
-[ "$FAIL" = 0 ] && echo "PASS (fresh-process leak rate: $LEAKS/$TOTAL direct, ${PL:-?}/${PT:-?} through the proxy; rules: process $((10 - ${RP:-0}))/10, connection $((10 - ${RC:-0}))/10, by name $((10 - ${RN:-0}))/10, outside the VPN ${RW:+$((10 - RW))/10}${RW:-skipped})" || echo "FAIL"
+[ "$FAIL" = 0 ] && echo "PASS (fresh-process leak rate: $LEAKS/$TOTAL direct, ${PL:-?}/${PT:-?} through the proxy; rules: process $((10 - ${RP:-0}))/10, connection $((10 - ${RC:-0}))/10, by name $((10 - ${RN:-0}))/10, outside the VPN $([ -n "${RW:-}" ] && echo "$((10 - RW))/10" || echo skipped))" || echo "FAIL"
 exit "$FAIL"
