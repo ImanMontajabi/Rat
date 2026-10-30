@@ -90,6 +90,7 @@ struct MapPane: View {
                 }
                 .coordinateSpace(.named(FlowOverlay.space))
             }
+            .clipped()
 
             if !ledger.geo.available {
                 Text("Offline GeoIP database not found, so server locations are unavailable.")
