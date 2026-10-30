@@ -54,6 +54,26 @@ final class VPNOnlyAppTests: XCTestCase {
         XCTAssertEqual(listed.map(\.requireVPN), [true])
     }
 
+    /// The switch adds and removes its own rule and nothing else: other apps' rules stay as they were, disabled
+    /// ones included (a disabled ✗ on one of Safari's processes, as in a real rules file).
+    func testTheSwitchLeavesEveryOtherRuleAlone() throws {
+        let m = RulesModel(directory: try tempDir())
+        let safari = "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app"
+        let networking = "/System/Volumes/Preboot/Cryptexes/Incoming/OS/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+        var disabled = Rule(verdict: .deny, processPath: safari, executable: networking, listLevel: .process, enabled: false, note: "From the process list")
+        disabled.profileID = m.ruleSet.activeProfileID
+        let others = [disabled, Rule(verdict: .allow, processPath: app, listLevel: .app), Rule(verdict: .deny, remoteDomain: "ads.example")]
+        m.ruleSet.rules = others
+        let probe = RulesModel.Target(app: "/tmp/vpnprobe")
+        m.setVPNOnly(true, for: probe)
+        XCTAssertEqual(m.ruleSet.rules.count, 4)
+        m.setVPNOnly(false, for: probe)
+        XCTAssertEqual(m.ruleSet.rules, others)
+        m.setVPNOnly(true, for: RulesModel.Target(app: safari, executable: networking))
+        m.setVPNOnly(false, for: RulesModel.Target(app: safari, executable: networking))
+        XCTAssertEqual(m.ruleSet.rules, others, "even for the process that has the disabled ✗")
+    }
+
     func testRatsPassCutsOnlyTheSocketsOutsideTheTunnel() async throws {
         let dir = try tempDir()
         let l = Ledger(directory: dir, helperInstalled: true, names: settledNames(["203.0.113.8", "198.51.100.3"]))
