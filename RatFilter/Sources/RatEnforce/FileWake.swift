@@ -22,6 +22,7 @@ final class FileWake {
             folderSources.append(s)
             s.resume()
         }
+        watchesFolders = !files.isEmpty && folderSources.count == Set(files.map { ($0 as NSString).deletingLastPathComponent }).count
         queue.sync { rearmFiles() }
     }
 
@@ -31,6 +32,10 @@ final class FileWake {
 
     /// How many folders and files are watched (0 when none could be opened).
     var watchedCount: Int { queue.sync { folderSources.count + fileSources.count } }
+
+    /// Every folder of the files is watched, so any change to one of them (a file created, replaced or deleted) ends
+    /// the sleep. Set once, in `init`: the folder sources are never re-armed.
+    private(set) var watchesFolders = false
 
     /// Sleeps for at most `interval`. Returns true when a watched file or folder changed (at once, then).
     func wait(_ interval: TimeInterval) -> Bool {

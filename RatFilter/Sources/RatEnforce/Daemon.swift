@@ -130,12 +130,19 @@ public final class EnforcerDaemon {
         /// Pass interval while something is denied but none of it runs: how soon a denied program that starts is
         /// seen (about 3 % CPU at 20 ms, against 8 % at 3 ms).
         public var standbyInterval: TimeInterval = 0.02
+        /// Pass interval with nothing to enforce when `FileWake` cannot watch the folders of Rat's files.
         public var idleInterval: TimeInterval = 0.25
+        /// Pass interval with nothing to enforce while `FileWake` watches those folders: a change to a file ends the
+        /// sleep at once, so a deny is not later for it, and the sleep only paces the status file and pf's check.
+        public var watchedIdleInterval: TimeInterval = 1
         /// Ports stay blocked this long after their socket disappears, to cover packets still in flight.
         public var portHold: TimeInterval = 5
         /// How often pf is checked to still run and evaluate our anchor (a VPN client may stop it or replace the
         /// main ruleset) and put right (`PFHeal`).
         public var watchdogInterval: TimeInterval = 2
+        /// The same check while nothing is enforced (nothing denied, no deny rule, no port in the anchor): pf off then
+        /// blocks nothing, and the first deny brings the check forward to the pass after its ports are loaded.
+        public var idleWatchdogInterval: TimeInterval = 10
         /// Rat touches this file (in the user's data folder) for Settings > Security's Repair Firewall; only its
         /// modification time is read. Optional.
         public var repairFile: String?
@@ -202,6 +209,7 @@ public final class EnforcerDaemon {
     private var repairStamp: Date?
     private var executableSHA256: String?
     private var lastTunnelScan = Date.distantPast
+    private var watchdogIdle = true
     private let tunnelLock = NSLock()
     private var tunnels: [String: String] = [:]
     public private(set) var reloads = 0
@@ -258,8 +266,14 @@ public final class EnforcerDaemon {
         while true {
             let busy = autoreleasepool { tick() }
             if trace, busy, watching { traceTicks += 1; traceTime += lastTickDuration; if traceTicks == 400 { FileHandle.standardError.write(Data("avg tick \(Int(traceTime / 400 * 1e6)) us, reloads \(reloads)\n".utf8)); traceTicks = 0; traceTime = 0 } }
-            if wake.wait(!busy ? settings.idleInterval : watching ? settings.interval : settings.standbyInterval) { filesChanged() }
+            if wake.wait(busy ? watching ? settings.interval : settings.standbyInterval : idleSleep(wake)) { filesChanged() }
         }
+    }
+
+    /// The sleep with nothing to enforce: `watchedIdleInterval` while `wake` watches every folder of Rat's files
+    /// (a deny then ends it at once), `idleInterval` otherwise.
+    func idleSleep(_ wake: FileWake) -> TimeInterval {
+        wake.watchesFolders ? settings.watchedIdleInterval : settings.idleInterval
     }
 
     /// A file Rat hands over changed: the next pass reads it, whenever the last check was.
@@ -267,7 +281,7 @@ public final class EnforcerDaemon {
 
     /// One pass. Returns whether there is anything to enforce (a denied app or a deny rule for a process); `watching`
     /// says whether one of its processes runs. The loop then passes every `interval`, every `standbyInterval` while
-    /// none runs, and every `idleInterval` with nothing to enforce.
+    /// none runs, and every `watchedIdleInterval` (`idleInterval` without `FileWake`) with nothing to enforce.
     @discardableResult
     public func tick(now: Date = Date()) -> Bool {
         let began = Date()
@@ -349,7 +363,7 @@ public final class EnforcerDaemon {
             ruledList = watched.compactMap { pid, w in w.map { (pid, $0) } }
         }
         let ruled = judge == nil ? [] : ruledList
-        // Nothing it names runs: the next pass comes after `standbyInterval`, not the 0.25 s idle sleep, so a denied
+        // Nothing it names runs: the next pass comes after `standbyInterval`, not the idle sleep, so a denied
         // program that starts is cut within about 20 ms. A process is first seen before its `exec`, as its parent's
         // program, so the passes that follow are what notice it became the denied one.
         watching = !deniedPIDs.isEmpty || !ruled.isEmpty
@@ -480,11 +494,25 @@ public final class EnforcerDaemon {
 
     /// pf must keep running and evaluating our anchor, or the rules do nothing. Another program (a VPN client)
     /// may stop pf or replace its main ruleset at any time; `PFHeal` decides what may be put right.
+    ///
+    /// Two `pfctl` runs a check (5-65 ms): every `watchdogInterval` while something is enforced, every
+    /// `idleWatchdogInterval` while nothing is. The pass that starts enforcing loads its ports first (a check before
+    /// them made the first deny that much later) and the next pass checks pf.
     private func watchdog(now: Date, force: Bool = false) {
-        guard force || now.timeIntervalSince(lastWatchdog) >= settings.watchdogInterval else { return }
+        scanTunnels(now: now)
+        let idle = denied.isEmpty && judge == nil && filePorts.isEmpty && fileLoopbackPorts.isEmpty
+            && loadedPorts.isEmpty && loadedLoopbackPorts.isEmpty
+        defer { watchdogIdle = idle }
+        // (A daemon that never checked pf, not `start`ed, checks it first.)
+        if watchdogIdle, !idle, !force, lastWatchdog != .distantPast { lastWatchdog = .distantPast; return }
+        guard force || now.timeIntervalSince(lastWatchdog) >= (idle ? settings.idleWatchdogInterval : settings.watchdogInterval) else { return }
         lastWatchdog = now
         heal(now: now, force: force)
-        // Which process opened each VPN tunnel: a scan of every socket, so it runs off the watch loop.
+    }
+
+    /// Which process opened each VPN tunnel (published for Rat's VPN names, every 5 s whatever is enforced): a scan of
+    /// every socket, so it runs off the watch loop.
+    private func scanTunnels(now: Date) {
         if now.timeIntervalSince(lastTunnelScan) >= 5 {
             lastTunnelScan = now
             background.async { [self] in
@@ -510,7 +538,7 @@ public final class EnforcerDaemon {
             verifyAnchor(now: now)
             return
         }
-        // Another program that keeps undoing the repair is not fought every 2 s: after five repairs in a minute,
+        // Another program that keeps undoing the repair is not fought every check: after five repairs in a minute,
         // once every 30 s.
         recentRepairs = recentRepairs.filter { now.timeIntervalSince($0) < 60 }
         if !force, recentRepairs.count >= 5, let last = recentRepairs.last, now.timeIntervalSince(last) < 30 {
