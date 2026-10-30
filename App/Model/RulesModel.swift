@@ -204,6 +204,35 @@ final class RulesModel: ObservableObject {
         ruleSet.rules.filter { $0.processPath == appID }
     }
 
+    // MARK: only through a VPN (the inspector's switch)
+
+    /// The "Only through a VPN" rule of an app, or of one of its processes: a deny for every connection that leaves
+    /// outside a VPN tunnel (`Rule.requireVPN`), and for nothing else.
+    private func isVPNOnlyRule(_ r: Rule, _ t: Target) -> Bool {
+        r.requireVPN && r.verdict == .deny && r.processPath == t.app && r.signingID == nil && r.teamID == nil
+            && r.remoteDomain == nil && r.remoteHost == nil && r.remoteAddress == nil && r.ports == nil && r.proto == nil
+            && (t.executable.map { exe in r.executable.map { ProgramPath.same($0, exe) } == true } ?? (r.executable == nil))
+    }
+
+    /// Whether an app or process row (not a connection) has its own "Only through a VPN".
+    func vpnOnly(_ t: Target) -> Bool {
+        t.endpoint == nil && ruleSet.rules.contains { isVPNOnlyRule($0, t) && $0.enabled && activeHere($0) }
+    }
+
+    /// A process follows its app's "Only through a VPN".
+    func vpnOnlyInherited(_ t: Target) -> Bool { t.level == .process && vpnOnly(Target(app: t.app)) }
+
+    func setVPNOnly(_ on: Bool, for t: Target) {
+        guard t.endpoint == nil else { return }
+        ruleSet.rules.removeAll { isVPNOnlyRule($0, t) && activeHere($0) }
+        guard on else { return }
+        var r = Rule(verdict: .deny, processPath: t.app, executable: t.executable, requireVPN: true)
+        r.approved = !ruleSet.markNewRulesAsUnapproved
+        r.profileID = ruleSet.activeProfileID
+        r.note = "Only through a VPN"
+        ruleSet.rules.append(r)
+    }
+
     // MARK: rows of the process list (app, process, connection)
 
     /// One row of the process list as rules see it: an app (its `ruleKey`), one of its processes (`executable`), or
@@ -272,7 +301,8 @@ final class RulesModel: ObservableObject {
             }
         case .connection:
             guard let c = connection(t, signing: signing) else { return [] }
-            return here.filter { var r = $0; r.enabled = true; return r.matches(c) }
+            // "Only through a VPN" is listed for every connection it can cut, through the VPN or not.
+            return here.filter { var r = $0; r.enabled = true; r.requireVPN = false; return r.matches(c) }
         }
     }
 

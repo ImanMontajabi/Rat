@@ -205,6 +205,45 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(waitText(el("rules-title"), "Steam"))
     }
 
+    /// "Only through a VPN" (#45): the inspector's switch on an app makes one rule, listed under it; its processes
+    /// follow it (switched on, greyed out); the Rules window's editor has the same condition.
+    func testVPNOnlySwitchInTheInspector() {
+        el("app-row-Telegram").click()
+        let vpn = el("inspector-vpn-only")
+        XCTAssertTrue(vpn.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitSwitch(vpn, on: false))
+        XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "Telegram's rule from an alert")
+        vpn.click()
+        XCTAssertTrue(waitSwitch(vpn, on: true))
+        XCTAssertTrue(waitValue(el("inspector-rules"), "2"), "the VPN-only rule is listed")
+
+        expand("Telegram")
+        el("process-row-Telegram Helper").click()
+        XCTAssertTrue(inspectorTitle().contains("Telegram Helper"), inspectorTitle())
+        let inherited = el("inspector-vpn-only")
+        XCTAssertTrue(waitSwitch(inherited, on: true), "the process follows the app")
+        XCTAssertFalse(inherited.isEnabled, "set on the app, so it is switched there")
+
+        el("app-row-Telegram").click()
+        XCTAssertTrue(waitSwitch(el("inspector-vpn-only"), on: true))
+        el("inspector-vpn-only").click()
+        XCTAssertTrue(waitSwitch(el("inspector-vpn-only"), on: false))
+        XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "switched off, the rule is gone")
+
+        el("manage-rules").click()
+        let window = app.windows["Rules"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        window.toolbars.buttons["New Rule"].click()
+        let condition = el("rule-vpn-only")
+        XCTAssertTrue(condition.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitSwitch(condition, on: false))
+        condition.click()
+        XCTAssertTrue(waitSwitch(condition, on: true))
+        XCTAssertTrue(window.sheets.staticTexts["Telegram → any server, unless through a VPN"].waitForExistence(timeout: 5), "the rule's summary names the condition")
+        window.sheets.buttons["Cancel"].click()
+        XCTAssertTrue(waitGone(condition))
+    }
+
     func testCommandLineToolShowsWhoStartedIt() {
         el("app-row-git-remote-https").click()
         XCTAssertTrue(app.staticTexts["Warp (pid 700)"].waitForExistence(timeout: 5), "Started by: Warp")

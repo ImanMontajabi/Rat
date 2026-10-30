@@ -459,6 +459,7 @@ final class Ledger: ObservableObject {
 
         var denyCount = 0, askCount = 0, listenCount = 0
         let wholeAppDenied = deniedAppPaths
+        let vpnOnly = rules.engine.activeRules.contains(where: \.requireVPN)
         var portsNow = Set<Int>(), loopbackNow = Set<Int>(), liveSockets = Set<String>()
         var bytesNow: [String: (in: UInt64, out: UInt64)] = [:]
         for id in table.keys {
@@ -481,15 +482,20 @@ final class Ledger: ObservableObject {
             /// `host` is the name shown (the address itself when there is none); a name that is an IP literal is no name.
             /// `executable` is the process that holds the socket, for rules about one of the app's processes.
             /// A connection a peer started is judged too (an app's ✗ cuts it, as the helper does), but never asks.
-            func judge(host: String, address: String, port: Int, proto: Connection.Proto, executable: String, route: RouteTag? = nil, incoming: Bool = false) -> Verdict? {
+            /// `offVPN` is whether it leaves outside a VPN tunnel (nil for a connection through a local proxy).
+            func decide(host: String, address: String, port: Int, proto: Connection.Proto, executable: String, offVPN: Bool?) -> (Verdict, Rule?) {
                 let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), executable: executable,
-                                      host: host == address || isIPLiteral(host) ? nil : host, address: address, port: port, proto: proto)
+                                      host: host == address || isIPLiteral(host) ? nil : host, address: address, port: port, proto: proto, offVPN: offVPN)
                 // The process list's ✗/✓ decide first, narrowest first (`RuleEngine.decide`). Matches what is
                 // enforced: an app the helper blocks as a whole (`deniedAppPaths`) is denied for every server.
                 let decision = rules.engine.decide(conn)
-                let verdict: Verdict = decision.rule?.effectiveListLevel == nil && wholeAppDenied.contains(e.identity.ruleKey) ? .deny : decision.verdict
+                return (decision.rule?.effectiveListLevel == nil && wholeAppDenied.contains(e.identity.ruleKey) ? .deny : decision.verdict, decision.rule)
+            }
+            func judge(host: String, address: String, port: Int, proto: Connection.Proto, executable: String, route: RouteTag? = nil, incoming: Bool = false,
+                       offVPN: Bool? = nil) -> Verdict? {
+                let (verdict, rule) = decide(host: host, address: address, port: port, proto: proto, executable: executable, offVPN: offVPN)
                 if incoming && verdict == .ask { return nil }
-                if decision.rule == nil, verdict != .ask, warmedUp, !incoming { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
+                if rule == nil, verdict != .ask, warmedUp, !incoming { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
                 switch verdict {
                 case .deny: denyCount += 1
                 case .ask:
@@ -515,8 +521,13 @@ final class Ledger: ObservableObject {
                 if let i = indexByKey[key] {
                     remotes[i].bytesIn += bytes?.0 ?? 0; remotes[i].bytesOut += bytes?.1 ?? 0
                     if stream { remotes[i].stream = true }
-                    // Each of them has its own local port, and all are cut.
-                    if deniedKeys.contains(key), c.localPort != 0 { portsNow.insert(c.localPort) }
+                    // Each of them has its own local port, and all are cut. With "Only through a VPN" a socket on the
+                    // other side of the tunnel than the row's first is judged on its own (one opened before the VPN).
+                    let offVPN = !(routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort, processPath: c.processPath)?.isVPN ?? false)
+                    let denied = !vpnOnly || remotes[i].verdict == nil || offVPN == !remotes[i].isVPN ? deniedKeys.contains(key)
+                        : decide(host: remotes[i].host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
+                                 executable: c.processPath, offVPN: offVPN).0 == .deny
+                    if denied, c.localPort != 0 { portsNow.insert(c.localPort) }
                     continue
                 }
                 guard seen.insert(key).inserted else { continue }
@@ -537,7 +548,7 @@ final class Ledger: ObservableObject {
                 guard named else { continue }
                 // Judged by the socket's own ports, as the helper judges it.
                 let verdict = judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
-                                    executable: c.processPath, route: remotes.last?.route, incoming: c.incoming)
+                                    executable: c.processPath, route: remotes.last?.route, incoming: c.incoming, offVPN: !remotes[remotes.count - 1].isVPN)
                 remotes[remotes.count - 1].verdict = verdict
                 if verdict == .deny { deniedKeys.insert(key); if c.localPort != 0 { portsNow.insert(c.localPort) } }
             }
@@ -651,6 +662,15 @@ final class Ledger: ObservableObject {
         case (let exe?, nil): setProcessPolicy(p, app: t.app, executable: exe)
         case (nil, _): setPolicy(p, for: t.app)
         }
+    }
+
+    /// "Only through a VPN" for an app or one of its processes (`RulesModel.setVPNOnly`). The helper follows it at
+    /// once (`DaemonRules`), Rat's pass from the next one.
+    func setVPNOnly(_ on: Bool, for t: RulesModel.Target) {
+        rules.setVPNOnly(on, for: t)
+        alerts.revalidate()
+        refreshEnforcement()
+        requestPass()
     }
 
     /// Hands the helper what to block. Only ports of denied sockets are ever blocked, never server addresses.

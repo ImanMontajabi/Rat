@@ -329,6 +329,7 @@ struct RulesList: View {
         var what = r.remoteAddress ?? r.remoteHost ?? r.remoteDomain.flatMap { $0 == "*" ? nil : "*.\($0)" } ?? "any server"
         if let ports = r.ports { what += ports.lowerBound == ports.upperBound ? " : \(ports.lowerBound)" : " : \(ports.lowerBound)-\(ports.upperBound)" }
         if let proto = r.proto { what += " (\(proto.rawValue.uppercased()))" }
+        if r.requireVPN { return "Deny connections to \(what) outside a VPN" }
         return (r.verdict == .deny ? "Deny" : "Allow") + " connections to " + what
     }
 
@@ -406,6 +407,7 @@ struct RuleEditor: View {
     var body: some View {
         Form {
             Picker("Action", selection: $rule.verdict) { Text("Allow").tag(Verdict.allow); Text("Deny").tag(Verdict.deny) }.pickerStyle(.segmented)
+                .disabled(rule.requireVPN)
             Section("Process") {
                 Picker("Match", selection: $processScope) { ForEach(ProcessScope.allCases) { Text($0.rawValue).tag($0) } }
                 if processScope != .any {
@@ -418,6 +420,12 @@ struct RuleEditor: View {
                 if remoteScope != .any { TextField("Value", text: $remoteValue).accessibilityIdentifier("rule-server") }
                 TextField("Port or range (e.g. 443 or 8000-8100)", text: $portText).accessibilityIdentifier("rule-port")
                 Picker("Protocol", selection: $protocolChoice) { Text("Any").tag(0); Text("TCP").tag(1); Text("UDP").tag(2) }.pickerStyle(.segmented)
+            }
+            Section("Condition") {
+                Toggle("Only through a VPN", isOn: $rule.requireVPN).accessibilityIdentifier("rule-vpn-only")
+                Text(processScope == .any ? "Needs a process: for any process it would cut the VPN client's own connection too."
+                     : "Denies only the connections that leave outside a VPN tunnel, before the app's other rules. They are cut within milliseconds of opening, not before: the first packets can still leave.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Section("Where it applies") {
                 Picker("Profile", selection: $rule.profileID) {
@@ -433,7 +441,7 @@ struct RuleEditor: View {
             Text(preview.summary).font(.callout).foregroundStyle(.secondary)
             HStack { Spacer(); Button("Cancel", action: cancel).keyboardShortcut(.cancelAction); Button("Save") { save(preview) }.keyboardShortcut(.defaultAction).disabled(!valid) }
         }
-        .formStyle(.grouped).frame(width: 460, height: 560)
+        .formStyle(.grouped).frame(width: 460, height: 640)
         .onAppear(perform: load)
     }
 
@@ -448,10 +456,13 @@ struct RuleEditor: View {
 
     private var valid: Bool {
         parsedPorts != nil && (processScope == .any || !processValue.isEmpty) && (remoteScope == .any || !remoteValue.isEmpty)
+            && !(rule.requireVPN && processScope == .any)
     }
 
     private var preview: Rule {
         var r = rule
+        // "Only through a VPN" is a deny (`Rule.requireVPN`).
+        if r.requireVPN { r.verdict = .deny }
         r.processPath = nil; r.teamID = nil; r.signingID = nil; r.executable = nil
         switch processScope { case .any: break; case .app: r.processPath = processValue; case .team: r.teamID = processValue; case .signing: r.signingID = processValue }
         let exe = executableValue.trimmingCharacters(in: .whitespaces)

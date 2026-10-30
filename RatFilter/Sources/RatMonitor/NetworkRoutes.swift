@@ -113,6 +113,21 @@ public enum NetworkRoutes {
         return nil
     }
 
+    /// Whether a socket leaves the Mac outside a VPN tunnel (what "Only through a VPN" cuts). A server inside the
+    /// local network (`isLocal`) never does. A socket bound to a tunnel's address goes through that tunnel; one
+    /// bound to another address (Wi-Fi, Ethernet) does not, even while a VPN is up (it was opened before the VPN, or
+    /// the VPN splits). A socket with no address of its own goes where the routing table sends its server
+    /// (`route`; nil asks for the Internet's route, for a socket not connected to a server).
+    public static func leavesOutsideTunnel(localAddress: String, remoteAddress: String, tunnels: [String: String],
+                                           isLocal: (String) -> Bool, route: (String?) -> String?) -> Bool {
+        if !remoteAddress.isEmpty, isLocal(remoteAddress) { return false }
+        // Bound to loopback, it can reach nothing else.
+        if tunnels[localAddress] != nil || localAddress == "::1" || localAddress.hasPrefix("127.") { return false }
+        guard ["", "*", "0.0.0.0", "::"].contains(localAddress), !tunnels.isEmpty else { return true }
+        guard let iface = route(remoteAddress.isEmpty ? nil : remoteAddress) else { return true }
+        return !isTunnel(iface)
+    }
+
     /// Tunnel interface → path of the process holding its kernel control socket (the VPN client that opened
     /// `utunN`). Root sees every process; a user only their own.
     public static func tunnelOwners(pids: [pid_t] = ConnectionSampler.allPIDs()) -> [String: String] {

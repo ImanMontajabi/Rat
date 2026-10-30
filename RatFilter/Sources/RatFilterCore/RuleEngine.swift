@@ -54,9 +54,10 @@ public final class RuleEngine: @unchecked Sendable {
         public init(verdict: Verdict, rule: Rule?) { self.verdict = verdict; self.rule = rule }
     }
 
-    /// The process list's ✗/✓ decide first, the narrowest level first: one connection's, then one process's, then
-    /// the app's. They win over the app's other rules (alerts made many narrow ones, one domain or address at a
-    /// time), but a ✓ does not lift a deny rule for any process. Without a ✗/✓ the most specific rule decides
+    /// "Only through a VPN" (`Rule.requireVPN`) decides first: a connection that leaves outside a tunnel is denied
+    /// whatever ✓ the app or its rows have, or the kill switch would let it through. Then the process list's ✗/✓
+    /// decide, the narrowest level first: one connection's, then one process's, then the app's. They win over the
+    /// app's other rules (alerts made many narrow ones, one domain or address at a time), but a ✓ does not lift a deny rule for any process. Without a ✗/✓ the most specific rule decides
     /// (`matchingRule`), or Silent Mode.
     public func decide(_ c: Connection) -> Decision { decide(c, unknown: []) }
 
@@ -67,6 +68,9 @@ public final class RuleEngine: @unchecked Sendable {
     public func decide(_ c: Connection, unknown: Rule.Unknown) -> Decision {
         let snapshot = lock.withLock { set }
         let matching = active(snapshot).filter { $0.matches(c, assuming: $0.verdict == .deny ? [] : unknown) }
+        if let vpnOnly = matching.filter({ $0.requireVPN && $0.verdict == .deny }).max(by: Self.weaker) {
+            return Decision(verdict: .deny, rule: vpnOnly)
+        }
         let listed = matching.filter { $0.effectiveListLevel != nil }.max { a, b in
             if a.effectiveListLevel! != b.effectiveListLevel! { return a.effectiveListLevel! < b.effectiveListLevel! }
             return Self.weaker(a, b)
