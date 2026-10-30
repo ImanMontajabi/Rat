@@ -154,7 +154,8 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(el("process-row-apsd").descendants(matching: .any)["policy-locked"].exists, "apsd")
     }
 
-    /// The inspector lists the rules about the selected row and sets that row's ✗/✓.
+    /// The inspector lists the rules about the selected row, and follows the ✗/✓ set on that row in the list (it
+    /// has no ✗/✓ of its own).
     func testInspectorShowsTheSelectedRowsRules() {
         expand("Steam")
         el("process-row-Steam Helper").click()
@@ -166,12 +167,12 @@ final class RatUITests: XCTestCase {
         el("remote-row-demo5.example.com").click()
         XCTAssertTrue(inspectorTitle().contains("demo5.example.com"), inspectorTitle())
         XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "the UDP 27015 rule matches this connection")
-        let deny = el("inspector-policy").buttons["policy-deny"]
+        XCTAssertFalse(el("inspector-policy").exists, "no ✗/✓ in the inspector")
+        let deny = el("remote-policy-demo5.example.com").buttons["policy-deny"]
         XCTAssertTrue(deny.waitForExistence(timeout: 5))
         deny.click()
         XCTAssertTrue(waitValue(deny, "on"))
-        XCTAssertTrue(waitValue(el("inspector-rules"), "2"), "the connection's own ✗ is listed")
-        XCTAssertEqual(el("remote-policy-demo5.example.com").buttons["policy-deny"].value as? String, "on", "the list shows the same choice")
+        XCTAssertTrue(waitValue(el("inspector-rules"), "2"), "the connection's own ✗ from the list is listed")
         el("app-row-Telegram").click()
         XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "Telegram's rule from an alert")
     }
@@ -223,7 +224,7 @@ final class RatUITests: XCTestCase {
         XCTAssertFalse(el("remote-policy-demo4.example.com").buttons["policy-deny"].exists, "no ✗/✓ for a connection a peer started")
         incoming.click()
         XCTAssertTrue(inspectorTitle().contains("demo4.example.com"), inspectorTitle())
-        XCTAssertFalse(el("inspector-policy").exists, "the inspector offers none either")
+        XCTAssertFalse(el("inspector-policy").exists, "the inspector has no ✗/✓ for any row")
 
         expand("Telegram")
         let stream = el("remote-row-demo2.example.com")

@@ -137,7 +137,7 @@ struct ProcessInspector: View {
             }
             SectionHeader(title: "Rules", open: $rules)
             if rules {
-                TargetRules(app: app, target: app.ruleTarget(process: process), service: process)
+                TargetRules(app: app, target: app.ruleTarget(process: process))
                 // Rules from alerts and the Rules window yield to the process list's ✗/✓ (`RuleEngine.decide`).
                 let fromAlerts = ledger.rules.rules(for: app.identity.ruleKey).filter { $0.effectiveListLevel == nil }
                 if process == nil, ledger.rules.policy(for: app.identity.ruleKey) == .deny, fromAlerts.contains(where: { $0.verdict == .allow }) {
@@ -286,7 +286,7 @@ struct RemoteInspector: View {
                 }
             }
             SectionHeader(title: "Rules", open: $rules)
-            if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), service: r.process, incoming: r.incoming) }
+            if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), incoming: r.incoming) }
         }
     }
 
@@ -298,16 +298,14 @@ struct RemoteInspector: View {
     }
 }
 
-/// The Rules section for the selected row (an app, one of its processes, one connection): its own ✗/✓, the rules
-/// about it, and Manage Rules…, which opens the Rules window on those rules.
+/// The Rules section for the selected row (an app, one of its processes, one connection): the rules about it, and
+/// Manage Rules…, which opens the Rules window on those rules. The row's ✗/✓ are in the list only.
 struct TargetRules: View {
     @EnvironmentObject var ledger: Ledger
     @Environment(\.openWindow) private var openWindow
     let app: AppEntry
     /// Nil for a connection no rule can name (inside the local network).
     let target: RulesModel.Target?
-    /// The process, for services that work for every app (no one-click Deny).
-    var service: String? = nil
     /// A connection a peer started (no rule names it).
     var incoming = false
 
@@ -319,21 +317,8 @@ struct TargetRules: View {
         VStack(alignment: .leading, spacing: 6) {
             if let target {
                 let p = ledger.rules.rowPolicy(target)
-                let shared = app.identity.isSystem && (target.level == .app || service.flatMap(SharedServices.note(for:)) != nil)
-                HStack {
-                    Text(subject.prefix(1).uppercased() + subject.dropFirst()).font(.callout)
-                    Spacer()
-                    if shared && p.own == nil {
-                        Image(systemName: "lock.fill").foregroundStyle(.secondary)
-                            .help("Works for every app: denying it would cut them all. Use a rule for one service in the Rules window.")
-                    } else {
-                        PolicyToggle(policy: p.own, inherited: p.inherited, subject: subject) { ledger.setPolicy($0, for: target) }
-                    }
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("inspector-policy")
                 if p.own == nil, let inherited = p.inherited {
-                    Text("Follows the \(target.level == .connection ? "process" : "app")’s \(inherited == .deny ? "Deny" : "Allow"); ✗ or ✓ here makes an exception.")
+                    Text("Follows the \(target.level == .connection ? "process" : "app")’s \(inherited == .deny ? "Deny" : "Allow"); ✗ or ✓ on its row in the list makes an exception.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 let signing = app.identity.signing()
