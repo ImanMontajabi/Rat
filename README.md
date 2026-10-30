@@ -49,7 +49,7 @@ Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
 - **Left:** the app list with sparklines, session totals and a 5m / 1h / 1d / 1w traffic chart.
 - **Middle:** the world map, drawing only what the list shows. Busy connections show their traffic moving, purple for sent and blue for received, only while the window is visible and Reduce Motion is off.
 - **Right:** the inspector for the selected app, process or connection, or a Summary of top processes, domains, countries and networks that follows the search and filters.
-- **Hide Local:** one chip hides local-network traffic (the LAN, multicast and Bonjour) in the list, the map and the Summary, and Rat remembers it.
+- **Local switch:** the Local switch beside the search field hides local-network traffic (the LAN, multicast and Bonjour) in the list, the map and the Summary when turned off, and Rat remembers it.
 
 ### Everything else
 - **Connection alerts:** **Silent Allow** is the default, so a fresh install never nags. **Alert Mode** shows a floating panel for unknown connections, with a scope (app, domain, host, port) and a lifetime (once, until quit, forever).
