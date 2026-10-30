@@ -172,6 +172,11 @@ public final class EnforcerDaemon {
     private var socketVerdicts: [SocketKey: Bool] = [:]
     struct SocketKey: Hashable { var pid: pid_t; var proto: UInt8; var localPort: Int; var remotePort: Int; var remote: String }
     private var portsByRuleApp: [String: (processes: Int, ports: Set<Int>)] = [:]
+    /// The tunnels' addresses and the routes read for them, while a rule asks whether a socket leaves outside a VPN
+    /// (`SocketJudge.needsRoute`): read again every `vpnRefresh`, so a VPN that drops is seen within a fifth of a second.
+    private var vpn = VPNState()
+    struct VPNState { var at = Date.distantPast; var tunnels: [String: String] = [:]; var routes: [String: String?] = [:] }
+    static let vpnRefresh: TimeInterval = 0.2
     /// pid -> the denied entry it belongs to ("" = not denied).
     private var verdictCache: [pid_t: String] = [:]
     private var firstSeen: [pid_t: Date] = [:]
@@ -223,6 +228,8 @@ public final class EnforcerDaemon {
     }
 
     public func start() {
+        // 1.0.3's address list goes first, before any pfctl run (the watchdog's can take a second on a cold start).
+        if let legacy = settings.legacyBlocklistFile { try? FileManager.default.removeItem(atPath: legacy) }
         // Read once: an update replaces the file on disk while this process keeps running the old code.
         executableSHA256 = FileDigest.sha256(atPath: ConnectionSampler.path(of: getpid()))
         // A repair asked for before this start is not replayed.
@@ -233,7 +240,6 @@ public final class EnforcerDaemon {
         if token == nil, pfEnabled { enablePF() }
         // Start clean: whatever an earlier version left in the anchor (address tables, old ports) is removed.
         _ = run("/sbin/pfctl", ["-a", settings.anchor, "-F", "all"], nil)
-        if let legacy = settings.legacyBlocklistFile { try? FileManager.default.removeItem(atPath: legacy) }
         loadedPorts = []
         loadedLoopbackPorts = []
         loaded = true
@@ -398,6 +404,7 @@ public final class EnforcerDaemon {
         var verdicts: [SocketKey: Bool] = [:]
         var byRuleApp: [String: (processes: Int, ports: Set<Int>)] = [:]
         if let judge {
+            if judge.needsRoute { refreshVPN(now: now) }
             for (pid, w) in ruled {
                 var cut = Set<Int>()
                 for fd in ConnectionSampler.socketFDs(of: pid) {
@@ -405,7 +412,8 @@ public final class EnforcerDaemon {
                           !ProxyWatch.isLoopback(c.remoteAddress) else { continue }
                     let key = SocketKey(pid: pid, proto: c.proto == .udp ? 17 : 6, localPort: c.localPort, remotePort: c.remotePort, remote: c.remoteAddress)
                     let deny = socketVerdicts[key] ?? judge.denies(app: w.app, executable: w.executable, address: c.remoteAddress,
-                                                                    port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp)
+                                                                    port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
+                                                                    offVPN: judge.needsRoute ? leavesOutsideTunnel(c, judge) : nil)
                     verdicts[key] = deny
                     if deny { cut.insert(c.localPort) }
                 }
@@ -628,6 +636,26 @@ public final class EnforcerDaemon {
 
     private var lastFileCheck = Date.distantPast
 
+    /// Reads the tunnels' addresses again every `vpnRefresh`. A change (a VPN came up, dropped or moved) judges
+    /// every socket again: whether one leaves outside a tunnel is kept with its verdict.
+    private func refreshVPN(now: Date) {
+        guard now.timeIntervalSince(vpn.at) >= Self.vpnRefresh || now < vpn.at else { return }
+        let tunnels = NetworkRoutes.tunnelAddresses()
+        if tunnels != vpn.tunnels { socketVerdicts.removeAll() }
+        vpn = VPNState(at: now, tunnels: tunnels)
+    }
+
+    private func leavesOutsideTunnel(_ c: ObservedConnection, _ judge: SocketJudge) -> Bool {
+        NetworkRoutes.leavesOutsideTunnel(localAddress: c.localAddress, remoteAddress: c.remoteAddress, tunnels: vpn.tunnels,
+                                          isLocal: judge.isLocal) { remote in
+            let key = remote ?? ""
+            if let known = vpn.routes[key] { return known }
+            let iface = remote.map(NetworkRoutes.routeInterface(to:)) ?? NetworkRoutes.internetTunnel()
+            vpn.routes[key] = .some(iface)
+            return iface
+        }
+    }
+
     /// The file is written by Rat as the user, so it is read as untrusted: at most `maxRulesFile` bytes, and one that
     /// does not parse counts as no rules (the deny list and Rat's ports still apply).
     static let maxRulesFile = 8 << 20
@@ -643,7 +671,7 @@ public final class EnforcerDaemon {
         if j?.watchList != judge?.watchList { watched.removeAll(); watchedChanged = true; verdictCache.removeAll(); deniedPIDs.removeAll() }
         judge = j
         socketVerdicts.removeAll()
-        denyRuleCount = d?.rules.filter { $0.enabled && $0.verdict == .deny && $0.processPath != nil }.count ?? 0
+        denyRuleCount = d?.allRules.filter { $0.enabled && $0.verdict == .deny && $0.processPath != nil }.count ?? 0
         if trace { FileHandle.standardError.write(Data("deny rules: \(denyRuleCount), watching \(j?.watchList.count ?? 0) programs\n".utf8)) }
     }
 

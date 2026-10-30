@@ -209,3 +209,25 @@ final class RatEnforceTests: XCTestCase {
         XCTAssertFalse(PFStates.hooksAnchor("pass all\n", anchor: "com.apple/rat"))
     }
 }
+
+/// 1.0.3 left an address list behind; the daemon deletes it when it starts, before its first pfctl run, so a slow
+/// first watchdog (a cold start takes a second or more) never leaves it there.
+final class LegacyBlocklistTests: XCTestCase {
+    func testTheLegacyListIsGoneBeforeTheFirstPfctlRun() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-legacy-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let legacy = dir.appendingPathComponent("legacy-blocklist.txt").path
+        try "1.1.1.1\n".write(toFile: legacy, atomically: true, encoding: .utf8)
+        try "".write(to: dir.appendingPathComponent("denied.txt"), atomically: true, encoding: .utf8)
+        var s = EnforcerDaemon.Settings(deniedFile: dir.appendingPathComponent("denied.txt").path, legacyBlocklistFile: legacy)
+        s.anchor = "com.apple/rat-unittest"
+        var seenAtFirstCall: Bool?
+        let note = { if seenAtFirstCall == nil { seenAtFirstCall = FileManager.default.fileExists(atPath: legacy) } }
+        let d = EnforcerDaemon(settings: s, run: { _, _, _ in note(); return 0 },
+                               capture: { _, args in note(); return args == ["-s", "info"] ? "Status: Enabled" : args == ["-s", "rules"] ? "anchor \"com.apple/*\" all" : "" })
+        d.start()
+        XCTAssertEqual(seenAtFirstCall, false, "deleted before pfctl ran")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy))
+    }
+}

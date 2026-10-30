@@ -36,16 +36,22 @@ public struct Connection: Sendable {
     public var address: String    // remote IP
     public var port: Int
     public var proto: Proto
+    /// The connection leaves the Mac outside a VPN tunnel: true for a server outside the local network reached
+    /// through Wi-Fi or Ethernet, false through a tunnel or inside the local network (loopback, LAN), nil when not
+    /// known. What a rule's `requireVPN` matches.
+    public var offVPN: Bool?
 
     public enum Proto: String, Codable, Sendable { case tcp, udp }
 
-    public init(process: ProcessIdentity, executable: String? = nil, host: String? = nil, address: String, port: Int, proto: Proto = .tcp) {
+    public init(process: ProcessIdentity, executable: String? = nil, host: String? = nil, address: String, port: Int, proto: Proto = .tcp,
+                offVPN: Bool? = nil) {
         self.process = process
         self.executable = executable
         self.host = host
         self.address = address
         self.port = port
         self.proto = proto
+        self.offVPN = offVPN
     }
 }
 
@@ -76,6 +82,10 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
     public var remoteAddress: String?
     public var ports: ClosedRange<Int>?
     public var proto: Connection.Proto?
+    /// "Only through a VPN": a deny rule that matches only the connections that leave the Mac outside a VPN tunnel
+    /// (`Connection.offVPN`), so the app keeps working through the VPN and is cut when it drops. It decides before
+    /// every other rule of the app, ✓ included (`RuleEngine.decide`).
+    public var requireVPN: Bool
     public var enabled: Bool
     /// Review marker. Rules created from alerts while "mark new rules as unapproved" is on stay active but
     /// carry a blue dot until approved; imported rules also arrive disabled, so they do nothing until approved.
@@ -89,20 +99,35 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
 
     public init(id: UUID = UUID(), verdict: Verdict, processPath: String? = nil, signingID: String? = nil, teamID: String? = nil,
                 executable: String? = nil, listLevel: ListLevel? = nil, remoteDomain: String? = nil, remoteHost: String? = nil, remoteAddress: String? = nil,
-                ports: ClosedRange<Int>? = nil, proto: Connection.Proto? = nil, enabled: Bool = true, approved: Bool = true,
+                ports: ClosedRange<Int>? = nil, proto: Connection.Proto? = nil, requireVPN: Bool = false, enabled: Bool = true, approved: Bool = true,
                 lifetime: Lifetime = .forever, profileID: UUID? = nil, groupID: UUID? = nil,
                 createdAt: Date = Date(), note: String? = nil) {
         self.id = id; self.verdict = verdict; self.processPath = processPath; self.signingID = signingID; self.teamID = teamID
         self.executable = executable; self.listLevel = listLevel
         self.remoteDomain = remoteDomain; self.remoteHost = remoteHost; self.remoteAddress = remoteAddress
-        self.ports = ports; self.proto = proto; self.enabled = enabled; self.approved = approved
+        self.ports = ports; self.proto = proto; self.requireVPN = requireVPN; self.enabled = enabled; self.approved = approved
         self.lifetime = lifetime; self.profileID = profileID; self.groupID = groupID; self.createdAt = createdAt; self.note = note
+    }
+
+    /// `requireVPN` is written only when set, so a rule file stays readable by earlier versions as before.
+    public func encode(to e: Encoder) throws {
+        var c = e.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id); try c.encode(verdict, forKey: .verdict)
+        try c.encodeIfPresent(processPath, forKey: .processPath); try c.encodeIfPresent(signingID, forKey: .signingID)
+        try c.encodeIfPresent(teamID, forKey: .teamID); try c.encodeIfPresent(executable, forKey: .executable)
+        try c.encodeIfPresent(listLevel, forKey: .listLevel); try c.encodeIfPresent(remoteDomain, forKey: .remoteDomain)
+        try c.encodeIfPresent(remoteHost, forKey: .remoteHost); try c.encodeIfPresent(remoteAddress, forKey: .remoteAddress)
+        try c.encodeIfPresent(ports, forKey: .ports); try c.encodeIfPresent(proto, forKey: .proto)
+        if requireVPN { try c.encode(true, forKey: .requireVPN) }
+        try c.encode(enabled, forKey: .enabled); try c.encode(approved, forKey: .approved); try c.encode(lifetime, forKey: .lifetime)
+        try c.encodeIfPresent(profileID, forKey: .profileID); try c.encodeIfPresent(groupID, forKey: .groupID)
+        try c.encode(createdAt, forKey: .createdAt); try c.encodeIfPresent(note, forKey: .note)
     }
 
     // Tolerant decoding so rule files written by older versions (and hand edits) still load.
     enum CodingKeys: String, CodingKey {
         case id, verdict, processPath, signingID, teamID, executable, listLevel, remoteDomain, remoteHost, remoteAddress, ports, proto
-        case enabled, approved, lifetime, profileID, groupID, createdAt, note
+        case requireVPN, enabled, approved, lifetime, profileID, groupID, createdAt, note
     }
 
     public init(from d: Decoder) throws {
@@ -119,6 +144,7 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
         remoteAddress = try c.decodeIfPresent(String.self, forKey: .remoteAddress)
         ports = try c.decodeIfPresent(ClosedRange<Int>.self, forKey: .ports)
         proto = try c.decodeIfPresent(Connection.Proto.self, forKey: .proto)
+        requireVPN = try c.decodeIfPresent(Bool.self, forKey: .requireVPN) ?? false
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         approved = try c.decodeIfPresent(Bool.self, forKey: .approved) ?? true
         lifetime = try c.decodeIfPresent(Lifetime.self, forKey: .lifetime) ?? .forever
@@ -148,14 +174,18 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
         var what = remoteAddress ?? remoteHost ?? remoteDomain.flatMap { $0 == "*" ? nil : "*.\($0)" } ?? "any server"
         if let ports { what += ports.lowerBound == ports.upperBound ? ":\(ports.lowerBound)" : ":\(ports.lowerBound)-\(ports.upperBound)" }
         if let proto { what += " (\(proto.rawValue.uppercased()))" }
+        if requireVPN { what += ", unless through a VPN" }
         return "\(who) → \(what)"
     }
 
     /// A rule for the app and nothing narrower: what the process list's ✗/✓ on an app's row is.
     public var isWholeApp: Bool {
         processPath != nil && executable == nil && signingID == nil && teamID == nil && remoteDomain == nil && remoteHost == nil
-            && remoteAddress == nil && ports == nil && proto == nil
+            && remoteAddress == nil && ports == nil && proto == nil && !requireVPN
     }
+
+    /// A condition beyond who and where (`requireVPN`), which helpers before 1.6.0 do not know (`DaemonRules`).
+    public var hasCondition: Bool { requireVPN }
 
     /// A rule that names no process (`Any process`).
     public var isForAnyProcess: Bool { processPath == nil && executable == nil && signingID == nil && teamID == nil }
@@ -190,6 +220,8 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
             if let teamID, teamID != c.process.teamID { return false }
         }
         if let proto, proto != c.proto { return false }
+        // Only what certainly leaves outside a tunnel: a route not known yet counts as through one (see `Unknown`).
+        if requireVPN, c.offVPN != true { return false }
         if unknown.contains(.remote) { return true }
         if let ports, !ports.contains(c.port) { return false }
         if let remoteAddress, remoteAddress != c.address { return false }

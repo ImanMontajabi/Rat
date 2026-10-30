@@ -38,6 +38,9 @@ Rat detects active tunnels (`utun*`: Windscribe, WireGuard, OpenVPN, Cloudflare 
 
 Apps, processes and connections get badges such as `VPN · Windscribe`, `Proxy · ssh` or `VPN server · Windscribe` (the VPN client's own connection to its server). A connection counts as tunnelled when its socket is bound to the tunnel's address, or, when it has no address of its own, when the routing table sends it into the tunnel. No packets are inspected. To filter, use the route chip or type `vpn` or `proxy` in the search.
 
+### Only through a VPN
+Switch on **Only through a VPN** in the inspector for an app or one of its processes, or add the condition to a rule in the Rules window. The app keeps working through the VPN; every connection it makes outside a tunnel (the VPN is off or has dropped, a split tunnel leaves that server out, or a socket was opened on Wi-Fi before the VPN came up) is cut, whatever ✓ the app has. Connections inside the local network are left alone. The daemon checks the tunnels five times a second and the app's sockets every 3 ms. It is a fast cut, not a gate: Rat cannot hold a connection before it opens (no Network Extension), so the first packets of a connection outside the VPN can still leave. A connection through a local proxy follows the proxy's route: switch it on for the proxy program too.
+
 ### Blocking that leaves DNS alone
 Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
 - **How it blocks:** it blocks the **local ports** of the denied sockets with stateless `pf` rules (`block return-rst` for TCP, `block return-icmp` for UDP, inbound dropped): every socket of a denied app and its helpers, or only those of a denied process or connection, which the daemon judges itself.

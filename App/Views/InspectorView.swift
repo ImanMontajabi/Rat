@@ -321,6 +321,7 @@ struct TargetRules: View {
                     Text("Follows the \(target.level == .connection ? "process" : "app")’s \(inherited == .deny ? "Deny" : "Allow"); ✗ or ✓ on its row in the list makes an exception.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
+                if target.level != .connection, !(target.level == .app && app.identity.isSystem) { VPNOnlySwitch(app: app, target: target) }
                 let signing = app.identity.signing()
                 let list = ledger.rules.rules(for: target, signing: (signing.identifier, signing.team))
                 let decides = ledger.rules.decidingRule(for: target, signing: (signing.identifier, signing.team))?.id
@@ -349,6 +350,34 @@ struct TargetRules: View {
                 .accessibilityIdentifier("manage-rules")
         }
         .padding(.leading, 6)
+    }
+}
+
+/// "Only through a VPN" for an app or one of its processes: a deny rule for every connection that leaves outside a
+/// VPN tunnel (`Rule.requireVPN`), so the app works through the VPN and is cut when the VPN drops.
+struct VPNOnlySwitch: View {
+    @EnvironmentObject var ledger: Ledger
+    let app: AppEntry
+    let target: RulesModel.Target
+
+    /// The VPN client itself: its connection to the VPN server leaves outside the tunnel, so the switch would cut it.
+    private var carriesVPN: Bool {
+        app.remotes.contains { if case .vpnServer = $0.route { return true }; return false }
+    }
+
+    var body: some View {
+        let inherited = ledger.rules.vpnOnlyInherited(target)
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle("Only through a VPN", isOn: Binding(get: { inherited || ledger.rules.vpnOnly(target) },
+                                                     set: { ledger.setVPNOnly($0, for: target) }))
+                .toggleStyle(.switch).controlSize(.small)
+                .disabled(inherited || (carriesVPN && !ledger.rules.vpnOnly(target)))
+                .accessibilityIdentifier("inspector-vpn-only")
+            Text(carriesVPN ? "This app carries a VPN: its connection to the VPN server leaves outside the tunnel, so this would cut it."
+                 : inherited ? "Set on the app, so it covers this process too."
+                 : "Cuts every connection that leaves outside a VPN tunnel. Rat cuts a connection within milliseconds of it opening, not before: its first packets can still leave.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
