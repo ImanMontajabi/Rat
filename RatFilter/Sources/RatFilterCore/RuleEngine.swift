@@ -57,8 +57,10 @@ public final class RuleEngine: @unchecked Sendable {
     /// "Only through a VPN" (`Rule.requireVPN`) decides first: a connection that leaves outside a tunnel is denied
     /// whatever ✓ the app or its rows have, or the kill switch would let it through. Then the process list's ✗/✓
     /// decide, the narrowest level first: one connection's, then one process's, then the app's. They win over the
-    /// app's other rules (alerts made many narrow ones, one domain or address at a time), but a ✓ does not lift a deny rule for any process. Without a ✗/✓ the most specific rule decides
-    /// (`matchingRule`), or Silent Mode.
+    /// app's other rules (alerts made many narrow ones, one domain or address at a time), but a ✓ does not lift a deny
+    /// rule for any process or for a country (`Rule.country`): the strongest of those rules decides over it, so a
+    /// country denied for an app with a ✓ stays denied, unless a more specific rule of the same kind allows it.
+    /// Without a ✗/✓ the most specific rule decides (`matchingRule`), or Silent Mode.
     public func decide(_ c: Connection) -> Decision { decide(c, unknown: []) }
 
     /// The decision when part of the connection is `unknown` (the root daemon judging a socket before Rat has named
@@ -76,7 +78,7 @@ public final class RuleEngine: @unchecked Sendable {
             return Self.weaker(a, b)
         }
         if let l = listed {
-            if l.verdict == .allow, let any = matching.filter(\.isForAnyProcess).max(by: Self.weaker), any.verdict == .deny {
+            if l.verdict == .allow, let any = matching.filter({ $0.isForAnyProcess || $0.country != nil }).max(by: Self.weaker), any.verdict == .deny {
                 return Decision(verdict: .deny, rule: any)
             }
             return Decision(verdict: l.verdict, rule: l)

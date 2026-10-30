@@ -76,6 +76,8 @@ struct RemoteHost: Identifiable, Hashable {
     /// Bytes per second on the last pass (the growth of `bytesIn`/`bytesOut`; 0 on its first pass), for the map's flows.
     var rateIn = 0.0
     var rateOut = 0.0
+    /// The country rules match (`GeoService.countryCode`): nil inside the local network, or when the database has none.
+    var country: String? = nil
 }
 
 /// One executable of an app (its main binary, a helper, an XPC service working for it), by name.
@@ -178,7 +180,7 @@ extension AppEntry {
         guard process != nil || remote != nil else { return RulesModel.Target(app: identity.ruleKey) }
         guard let exe = executablePath(of: remote?.process ?? process) else { return nil }
         guard let r = remote else { return RulesModel.Target(app: identity.ruleKey, executable: exe) }
-        let e = RulesModel.Endpoint(host: r.host, address: r.address, port: r.port, proto: r.proto == "UDP" ? .udp : .tcp)
+        let e = RulesModel.Endpoint(host: r.host, address: r.address, port: r.port, proto: r.proto == "UDP" ? .udp : .tcp, country: r.country)
         if r.via == nil && (r.address.isEmpty || isLocalAddress(r.address)) { return nil }
         // Rules decide what this Mac connects to; a peer that connected to it is not one of those.
         if r.incoming { return nil }
@@ -485,7 +487,8 @@ final class Ledger: ObservableObject {
             /// `offVPN` is whether it leaves outside a VPN tunnel (nil for a connection through a local proxy).
             func decide(host: String, address: String, port: Int, proto: Connection.Proto, executable: String, offVPN: Bool?) -> (Verdict, Rule?) {
                 let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), executable: executable,
-                                      host: host == address || isIPLiteral(host) ? nil : host, address: address, port: port, proto: proto, offVPN: offVPN)
+                                      host: host == address || isIPLiteral(host) ? nil : host, address: address, port: port, proto: proto, offVPN: offVPN,
+                                      country: geo.countryCode(address))
                 // The process list's ✗/✓ decide first, narrowest first (`RuleEngine.decide`). Matches what is
                 // enforced: an app the helper blocks as a whole (`deniedAppPaths`) is denied for every server.
                 let decision = rules.engine.decide(conn)
@@ -540,6 +543,7 @@ final class Ledger: ObservableObject {
                                           pid: c.pid, process: c.processName,
                                           network: isLocalAddress(c.remoteAddress) ? nil : geo.network(c.remoteAddress)?.label,
                                           route: route, bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0, incoming: c.incoming, stream: stream))
+                remotes[remotes.count - 1].country = geo.countryCode(c.remoteAddress)
                 indexByKey[key] = remotes.count - 1
 
                 guard !isLocalAddress(c.remoteAddress) else { continue }
@@ -567,6 +571,7 @@ final class Ledger: ObservableObject {
                     remotes.append(RemoteHost(address: address ?? "", host: r.host, port: r.port, proto: "TCP", geo: point, via: hop, pid: r.pid, process: process,
                                               network: address.flatMap { isLocalAddress($0) ? nil : geo.network($0)?.label },
                                               bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0))
+                    remotes[remotes.count - 1].country = address.flatMap(geo.countryCode)
                 }
                 let verdict = judge(host: r.host, address: address ?? "", port: r.port, proto: .tcp, executable: r.path) ?? .ask
                 if fresh { remotes[remotes.count - 1].verdict = verdict }
@@ -715,7 +720,8 @@ final class Ledger: ObservableObject {
             for a in daemonNameOrder.prefix(daemonNameOrder.count - Self.daemonNamesLimit) { daemonNames[a] = nil }
             daemonNameOrder.removeFirst(daemonNameOrder.count - Self.daemonNamesLimit)
         }
-        return DaemonRules(rules: active, names: daemonNames, signatures: signatures, localRanges: AppSettings.shared.additionalLocalRanges)
+        return DaemonRules(rules: active, names: daemonNames, signatures: signatures, localRanges: AppSettings.shared.additionalLocalRanges,
+                           geoDatabase: active.contains { $0.country != nil } ? geo.loadedFile(.city)?.path : nil)
     }
 
     /// Apps denied outright. The root daemon blocks every socket of their processes (helpers included), by local
@@ -861,6 +867,7 @@ final class Ledger: ObservableObject {
                                         geo: GeoPoint(coordinate: .init(latitude: c.9, longitude: c.10), city: c.7, country: c.8, countryCode: codes[c.8] ?? ""),
                                         pid: c.2, process: c.1, network: "AS64500 Example Networks",
                                         bytesIn: UInt64(250_000 * (i + 1)), bytesOut: UInt64(25_000 * (i + 1))))
+            e.remotes[e.remotes.count - 1].country = codes[c.8]
             if c.0 == "git-remote-https" { e.launchedBy = "Warp (pid 700)" }
             if c.3 == "demo3.example.com" { e.remotes[e.remotes.count - 1].route = .vpn(name: "Windscribe", interface: "utun3") }
             // A peer connected to Steam's Remote Play port; Telegram's main connection is a long download.
@@ -889,6 +896,7 @@ final class Ledger: ObservableObject {
             RemoteHost(address: "127.0.0.1", host: "127.0.0.1", port: 9050, proto: "TCP", pid: 880, process: "Firefox",
                        route: .localProxy(program: "Tor", listener: "127.0.0.1:9050"), bytesIn: 120_000, bytesOut: 9_000),
         ]
+        fx.remotes[0].country = "ES"
         table[firefox.id] = fx
         // Traffic that stays near this Mac, for Hide Local: Bonjour, and a service that talks only to the LAN.
         if var mac = table["macOS"] {

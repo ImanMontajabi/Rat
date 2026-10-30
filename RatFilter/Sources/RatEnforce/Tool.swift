@@ -6,8 +6,17 @@ import Foundation
 /// `--rules` defaults to `deny-rules.json` next to the deny list, so the LaunchDaemon written by 1.4.0 needs no change.
 public func runEnforcerTool(_ args: [String]) -> Never {
     func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+    // `--country <address> --geoip <file>`: the country a country rule would see for an address, read the way the
+    // daemon reads it (`GeoFile`), for scripts/verify-blocking.sh. Prints the code, or "-" when there is none.
+    if let address = value("--country"), let file = value("--geoip") {
+        guard let db = GeoFile.open(file, ownerUID: getuid()) else {
+            FileHandle.standardError.write(Data("cannot read \(file)\n".utf8)); exit(66)
+        }
+        print(db.countryCode(address) ?? "-")
+        exit(0)
+    }
     guard let denied = value("--denied") else {
-        FileHandle.standardError.write(Data("usage: rat-enforcerd --denied <file> [--ports <file>] [--rules <file>] [--status <file>] [--proxied <file> --owner-uid <uid>] [--anchor <name>]\n".utf8))
+        FileHandle.standardError.write(Data("usage: rat-enforcerd --denied <file> [--ports <file>] [--rules <file>] [--status <file>] [--proxied <file> --owner-uid <uid>] [--anchor <name>]\n       rat-enforcerd --country <address> --geoip <file.mmdb>\n".utf8))
         exit(64)
     }
     var s = EnforcerDaemon.Settings(deniedFile: denied, portsFile: value("--ports"), legacyBlocklistFile: value("--blocklist"),
