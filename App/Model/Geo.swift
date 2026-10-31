@@ -31,6 +31,7 @@ final class GeoService: @unchecked Sendable {
     private var asn: ASNDatabase?
     private var cache: [String: GeoPoint?] = [:]
     private var asnCache: [String: NetworkOwner?] = [:]
+    private var countryCache: [String: String?] = [:]
     /// The caches start over past this many addresses (a week of browsing sees a few thousand), so a Mac that
     /// stays up does not keep every address it ever saw.
     static let cacheLimit = 16_384
@@ -64,7 +65,7 @@ final class GeoService: @unchecked Sendable {
         switch kind {
         case .city:
             let g = try GeoIP(path: path)
-            lock.withLock { db = g; cache.removeAll(); loaded[.city] = info }
+            lock.withLock { db = g; cache.removeAll(); countryCache.removeAll(); loaded[.city] = info }
         case .asn:
             let a = try ASNDatabase(path: path)
             lock.withLock { asn = a; asnCache.removeAll(); loaded[.asn] = info }
@@ -108,6 +109,16 @@ final class GeoService: @unchecked Sendable {
             GeoPoint(coordinate: .init(latitude: $0.latitude, longitude: $0.longitude), city: $0.city, country: $0.country, countryCode: $0.countryCode)
         }
         lock.withLock { if cache.count >= Self.cacheLimit { cache.removeAll(keepingCapacity: true) }; cache[ip] = .some(result) }
+        return result
+    }
+
+    /// The country country rules match (`GeoIP.countryCode`, the function the helper uses on the same file), nil
+    /// inside the local network or when the database has none.
+    func countryCode(_ ip: String) -> String? {
+        guard !ip.isEmpty, !isLocalAddress(ip) else { return nil }
+        if let hit = lock.withLock({ countryCache[ip] }) { return hit }
+        let result = lock.withLock { db }?.countryCode(ip)
+        lock.withLock { if countryCache.count >= Self.cacheLimit { countryCache.removeAll(keepingCapacity: true) }; countryCache[ip] = .some(result) }
         return result
     }
 
@@ -231,6 +242,19 @@ enum Flag {
         guard regions.contains(c) else { return "" }
         return String(String.UnicodeScalarView(c.unicodeScalars.compactMap { UnicodeScalar(0x1F1E6 + $0.value - 65) }))
     }
+}
+
+/// The countries a rule can name (ISO 3166-1 alpha-2), with the flag and the name in the user's language: the
+/// Rules window's picker, rule rows, and the inspector's and the country groups' rule buttons.
+enum Countries {
+    static let all: [(code: String, name: String)] = Locale.Region.isoRegions.map(\.identifier)
+        .filter { $0.count == 2 && $0 != "ZZ" && $0.allSatisfy(\.isLetter) }
+        .map { ($0, name($0)) }
+        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+
+    static func name(_ code: String) -> String { Locale.current.localizedString(forRegionCode: code) ?? code }
+    /// "🇩🇪 Germany".
+    static func label(_ code: String) -> String { [Flag.emoji(code), name(code)].filter { !$0.isEmpty }.joined(separator: " ") }
 }
 
 /// Traffic that stays near this Mac, which Hide Local leaves out: loopback, link-local, private (LAN) and the

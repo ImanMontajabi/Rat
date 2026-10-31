@@ -14,6 +14,16 @@ public final class GeoIP: @unchecked Sendable {
     public let db: MMDB
 
     public init(path: String) throws { db = try MMDB(path: path) }
+    public init(db: MMDB) { self.db = db }
+
+    /// The country of an address (ISO 3166-1 alpha-2, upper case), whether or not the record has a location: what
+    /// country rules match, in Rat and in the helper alike. Nil when the database has none (or `ZZ`, its code for
+    /// none).
+    public func countryCode(_ address: String) -> String? {
+        guard let code = db.lookup(address)?["country"]?["iso_code"]?.string?.uppercased(), code.count == 2, code != "ZZ",
+              code.allSatisfy({ $0.isASCII && $0.isLetter }) else { return nil }
+        return code
+    }
 
     public func locate(_ address: String) -> GeoLocation? {
         guard let r = db.lookup(address), let lat = r["location"]?["latitude"]?.double, let lon = r["location"]?["longitude"]?.double else { return nil }

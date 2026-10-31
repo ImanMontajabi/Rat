@@ -231,7 +231,7 @@ struct RulesList: View {
             case .target: return true
             }
         }
-        .filter { search.isEmpty || $0.summary.localizedCaseInsensitiveContains(search) }
+        .filter { search.isEmpty || $0.summary(country: Countries.label).localizedCaseInsensitiveContains(search) }
         .sorted { $0.createdAt > $1.createdAt }
     }
 
@@ -315,6 +315,15 @@ struct RulesList: View {
             }
         }
         .sheet(item: $editing) { rule in RuleEditor(rule: rule) { rules.upsert($0); editing = nil } cancel: { editing = nil } }
+        .onAppear(perform: takeDraft)
+        .onChange(of: rules.draft) { _, _ in takeDraft() }
+    }
+
+    /// Opens the editor on the rule a country's rule button started.
+    private func takeDraft() {
+        guard let d = rules.draft else { return }
+        rules.draft = nil
+        editing = d
     }
 
     private func processName(_ r: Rule) -> String {
@@ -329,6 +338,7 @@ struct RulesList: View {
         var what = r.remoteAddress ?? r.remoteHost ?? r.remoteDomain.flatMap { $0 == "*" ? nil : "*.\($0)" } ?? "any server"
         if let ports = r.ports { what += ports.lowerBound == ports.upperBound ? " : \(ports.lowerBound)" : " : \(ports.lowerBound)-\(ports.upperBound)" }
         if let proto = r.proto { what += " (\(proto.rawValue.uppercased()))" }
+        if let c = r.country { what = what == "any server" ? "servers in \(Countries.label(c))" : "\(what) in \(Countries.label(c))" }
         if r.requireVPN { return "Deny connections to \(what) outside a VPN" }
         return (r.verdict == .deny ? "Deny" : "Allow") + " connections to " + what
     }
@@ -403,6 +413,7 @@ struct RuleEditor: View {
     @State private var remoteValue = ""
     @State private var portText = ""
     @State private var protocolChoice = 0   // 0 any, 1 TCP, 2 UDP
+    @State private var countryChoice = ""   // "" any
 
     var body: some View {
         Form {
@@ -420,6 +431,15 @@ struct RuleEditor: View {
                 if remoteScope != .any { TextField("Value", text: $remoteValue).accessibilityIdentifier("rule-server") }
                 TextField("Port or range (e.g. 443 or 8000-8100)", text: $portText).accessibilityIdentifier("rule-port")
                 Picker("Protocol", selection: $protocolChoice) { Text("Any").tag(0); Text("TCP").tag(1); Text("UDP").tag(2) }.pickerStyle(.segmented)
+                Picker("Country", selection: $countryChoice) {
+                    Text("Any country").tag("")
+                    ForEach(Countries.all, id: \.code) { Text(Countries.label($0.code)).tag($0.code) }
+                }
+                .accessibilityIdentifier("rule-country")
+                if !countryChoice.isEmpty {
+                    Text("Servers the offline GeoIP database places in \(Countries.name(countryChoice)). A server it does not place (the local network, an address it lacks) is in no country.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
             }
             Section("Condition") {
                 Toggle("Only through a VPN", isOn: $rule.requireVPN).accessibilityIdentifier("rule-vpn-only")
@@ -438,7 +458,7 @@ struct RuleEditor: View {
                 }
                 Toggle("Enabled", isOn: $rule.enabled)
             }
-            Text(preview.summary).font(.callout).foregroundStyle(.secondary)
+            Text(preview.summary(country: Countries.label)).font(.callout).foregroundStyle(.secondary)
             HStack { Spacer(); Button("Cancel", action: cancel).keyboardShortcut(.cancelAction); Button("Save") { save(preview) }.keyboardShortcut(.defaultAction).disabled(!valid) }
         }
         .formStyle(.grouped).frame(width: 460, height: 640)
@@ -471,6 +491,7 @@ struct RuleEditor: View {
         switch remoteScope { case .any: break; case .domain: r.remoteDomain = remoteValue; case .host: r.remoteHost = remoteValue; case .address: r.remoteAddress = remoteValue }
         r.ports = parsedPorts ?? nil
         r.proto = protocolChoice == 1 ? .tcp : protocolChoice == 2 ? .udp : nil
+        r.country = countryChoice.isEmpty ? nil : countryChoice
         return r
     }
 
@@ -484,6 +505,7 @@ struct RuleEditor: View {
         else if let a = rule.remoteAddress { remoteScope = .address; remoteValue = a }
         if let p = rule.ports { portText = p.lowerBound == p.upperBound ? "\(p.lowerBound)" : "\(p.lowerBound)-\(p.upperBound)" }
         protocolChoice = rule.proto == .tcp ? 1 : rule.proto == .udp ? 2 : 0
+        countryChoice = rule.country ?? ""
     }
 }
 

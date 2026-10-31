@@ -253,6 +253,7 @@ struct RemoteSummary: View {
 /// much it carried.
 struct RemoteInspector: View {
     @EnvironmentObject var ledger: Ledger
+    @Environment(\.openWindow) private var openWindow
     let app: AppEntry
     let remote: RemoteHost
     @State private var rules = true
@@ -279,6 +280,16 @@ struct RemoteInspector: View {
                 if let p = r.process { kv("Process", p + (r.pid.map { " (pid \($0))" } ?? "")) }
                 if let n = r.network { kv("Network", n) }
                 if let g = r.geo { kv("Location", g.place) }
+                if let cc = r.country, !r.incoming {
+                    // A rule for every server in the country, for this app: the editor opens on it.
+                    Button("Rule for Servers in \(Countries.label(cc))…") {
+                        ledger.rules.focus = RulesModel.Target(app: app.identity.ruleKey)
+                        ledger.rules.draft = ledger.rules.newCountryRule(cc, app: app.identity.ruleKey)
+                        openWindow(id: "rules")
+                    }
+                    .controlSize(.small).padding(.leading, 70)
+                    .accessibilityIdentifier("inspector-country-rule")
+                }
                 if let route = r.route { kv("Route", route.label) }
                 if let via = r.via {
                     kv("Proxy", via.label)
@@ -330,7 +341,7 @@ struct TargetRules: View {
                     ForEach(list.prefix(8)) { r in
                         HStack(spacing: 6) {
                             Image(systemName: r.verdict == .deny ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(r.verdict == .deny ? .red : .green)
-                            Text(r.summary).lineLimit(1).truncationMode(.middle).opacity(r.enabled ? 1 : 0.5)
+                            Text(r.summary(country: Countries.label)).lineLimit(1).truncationMode(.middle).opacity(r.enabled ? 1 : 0.5)
                             if !r.approved { Circle().fill(.blue).frame(width: 7, height: 7) }
                             if r.id == decides { Text("decides").font(.caption2).foregroundStyle(.secondary) }
                         }

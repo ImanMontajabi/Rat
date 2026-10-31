@@ -1,12 +1,14 @@
 import SwiftUI
 import Charts
 import AppKit
+import RatFilterCore
 
 /// The Network Monitor's left pane. Layout follows Little Snitch's: a row of three icon buttons (filter menu,
 /// traffic chart, inspector), a search field with chips and a time-range menu, the process list, and at the
 /// bottom the sent / received pills over the traffic chart.
 struct SidebarView: View {
     @EnvironmentObject var ledger: Ledger
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject private var settings = AppSettings.shared
     @Binding var selection: MonitorSelection?
     @Binding var showChart: Bool
@@ -31,20 +33,30 @@ struct SidebarView: View {
         }
     }
 
-    private struct Group: Identifiable { let id: String; let title: String; let apps: [AppEntry] }
+    /// `country` is the ISO code of a country group, for its rule button.
+    private struct Group: Identifiable { let id: String; let title: String; let apps: [AppEntry]; var country: String? = nil }
 
     private var groups: [Group] {
         var d: [String: [AppEntry]] = [:]
+        var codes: [String: String] = [:]
         for a in filtered {
             let keys: Set<String>
             switch settings.groupBy {
             case .domain: keys = Set(a.remotes.filter { !isLocalAddress($0.address) }.map { registrableDomain($0.host) })
-            case .country: keys = Set(a.remotes.compactMap { $0.geo.map { [$0.flag, $0.country].filter { !$0.isEmpty }.joined(separator: " ") } })
+            case .country:
+                var k = Set<String>()
+                for r in a.remotes {
+                    guard let g = r.geo else { continue }
+                    let title = [g.flag, g.country].filter { !$0.isEmpty }.joined(separator: " ")
+                    k.insert(title)
+                    if let cc = r.country ?? Rule.countryCode(g.countryCode) { codes[title] = cc }
+                }
+                keys = k
             case .process: keys = []
             }
             for k in keys { d[k, default: []].append(a) }
         }
-        return d.map { Group(id: $0.key, title: $0.key, apps: $0.value) }.sorted { $0.apps.count > $1.apps.count }
+        return d.map { Group(id: $0.key, title: $0.key, apps: $0.value, country: codes[$0.key]) }.sorted { $0.apps.count > $1.apps.count }
     }
 
     // MARK: body
@@ -79,6 +91,16 @@ struct SidebarView: View {
                 Image(systemName: settings.groupBy == .domain ? "globe" : "flag").frame(width: 24)
                 Text(g.title).lineLimit(1).font(.system(size: 14, weight: .medium))
                 Spacer()
+                if let cc = g.country {
+                    // A rule for every server in the country, for any process: the editor opens on it.
+                    Button {
+                        ledger.rules.draft = ledger.rules.newCountryRule(cc, app: nil)
+                        openWindow(id: "rules")
+                    } label: { Image(systemName: "hand.raised") }
+                    .buttonStyle(.borderless).help("New rule for servers in \(Countries.label(cc))…")
+                    .accessibilityLabel("New rule for servers in \(Countries.name(cc))")
+                    .accessibilityIdentifier("country-rule-\(cc)")
+                }
                 Text("\(g.apps.count)").font(.caption).foregroundStyle(.secondary)
             }
             .padding(.vertical, 8).padding(.horizontal, 6).contentShape(Rectangle())

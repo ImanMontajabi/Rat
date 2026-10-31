@@ -58,6 +58,12 @@ final class RatUITests: XCTestCase {
         XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "label == %@ OR value == %@", text, text), evaluatedWith: e)], timeout: timeout) == .completed
     }
 
+    /// A text that starts with `prefix` and contains `part`, as its label or its value (a SwiftUI `Text` reports its
+    /// value).
+    private func text(startingWith prefix: String, containing part: String) -> NSPredicate {
+        NSPredicate(format: "(label BEGINSWITH %@ AND label CONTAINS %@) OR (value BEGINSWITH %@ AND value CONTAINS %@)", prefix, part, prefix, part)
+    }
+
     private func isActive(_ profile: String) -> Bool { el("profile-\(profile)").descendants(matching: .any)["profile-active"].exists }
 
     /// Types into the search field. Right after a menu closes the click may not focus the field, so it retries
@@ -242,6 +248,58 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(window.sheets.staticTexts["Telegram → any server, unless through a VPN"].waitForExistence(timeout: 5), "the rule's summary names the condition")
         window.sheets.buttons["Cancel"].click()
         XCTAssertTrue(waitGone(condition))
+    }
+
+    /// A connection's inspector starts a rule for every server in its country (#45): the Rules window opens its
+    /// editor on a deny for the app with the country picked, and the saved rule is one of the connection's rules.
+    /// Flags, not names, so the test does not depend on the Mac's language.
+    func testCountryRuleFromTheInspector() {
+        expand("Firefox")
+        let row = el("remote-row-news.example.org")
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.click()
+        XCTAssertTrue(waitValue(el("inspector-rules"), "0"))
+        let button = el("inspector-country-rule")
+        XCTAssertTrue(button.waitForExistence(timeout: 5), "the server is in Spain")
+        XCTAssertTrue(button.label.contains("🇪🇸"), button.label)
+        button.click()
+
+        let window = app.windows["Rules"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        let picker = el("rule-country")
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "the editor opens on the new rule")
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value CONTAINS %@", "🇪🇸"), evaluatedWith: picker)], timeout: 5) == .completed,
+                      "Spain is picked: \(picker.value ?? "nil")")
+        let preview = window.sheets.staticTexts.matching(text(startingWith: "Firefox → any server in", containing: "🇪🇸")).firstMatch
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), "the summary names the app and the country")
+        window.sheets.buttons["Save"].click()
+        XCTAssertTrue(waitGone(picker))
+        let listed = window.staticTexts.matching(text(startingWith: "Deny connections to servers in", containing: "🇪🇸")).firstMatch
+        XCTAssertTrue(listed.waitForExistence(timeout: 5), "the rule's row names the country")
+
+        row.click()
+        XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "the connection lists its country's rule")
+        XCTAssertFalse(el("inspector-policy").exists)
+    }
+
+    /// Grouped by country, a group's header starts a rule for any process.
+    func testCountryGroupStartsARuleForAnyProcess() {
+        app.terminate()
+        app.launchArguments += ["-groupBy", "Country"]
+        app.launch()
+        let button = el("country-rule-DE")
+        XCTAssertTrue(button.waitForExistence(timeout: 20), "the Germany group has its rule button")
+        XCTAssertFalse(el("country-rule-ZZ").exists)
+        button.click()
+        let window = app.windows["Rules"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        let picker = el("rule-country")
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value CONTAINS %@", "🇩🇪"), evaluatedWith: picker)], timeout: 5) == .completed,
+                      "Germany is picked: \(picker.value ?? "nil")")
+        XCTAssertTrue(window.sheets.staticTexts.matching(text(startingWith: "Any process → any server in 🇩🇪", containing: "🇩🇪")).firstMatch.waitForExistence(timeout: 5))
+        window.sheets.buttons["Cancel"].click()
+        XCTAssertTrue(waitGone(picker))
     }
 
     func testCommandLineToolShowsWhoStartedIt() {

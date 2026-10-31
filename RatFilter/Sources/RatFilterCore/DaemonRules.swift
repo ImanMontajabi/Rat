@@ -14,7 +14,7 @@ public struct DaemonRules: Codable, Equatable, Sendable {
     public var version = 1
     /// The enabled rules of the active profile (`RuleEngine.activeRules`), allow rules included: they decide too.
     public var rules: [Rule]
-    /// Rules with a condition helpers before 1.6.0 do not know (`Rule.requireVPN`). Kept apart so such a helper,
+    /// Rules with a condition helpers before 1.6.0 do not know (`Rule.hasCondition`: `requireVPN`, `country`). Kept apart so such a helper,
     /// still running until the user updates it, never reads them as a deny without the condition: it would cut the
     /// whole app. It skips them; Rat's own pass still cuts what they deny, through `denied-ports.txt`.
     public var conditionalRules: [Rule]
@@ -24,16 +24,20 @@ public struct DaemonRules: Codable, Equatable, Sendable {
     public var signatures: [String: Signature]
     /// Settings > Advanced's "Additional IP Ranges in Local Network" (see `LocalNetwork`).
     public var localRanges: String
+    /// The City database Rat looks countries up in (`.mmdb`), for rules with a `country`: the daemon reads the same
+    /// file, so both find the same country for an address. Nil while no rule names a country.
+    public var geoDatabase: String?
 
-    public init(rules: [Rule] = [], names: [String: String] = [:], signatures: [String: Signature] = [:], localRanges: String = "") {
+    public init(rules: [Rule] = [], names: [String: String] = [:], signatures: [String: Signature] = [:], localRanges: String = "",
+                geoDatabase: String? = nil) {
         self.rules = rules.filter { !$0.hasCondition }; self.conditionalRules = rules.filter(\.hasCondition)
-        self.names = names; self.signatures = signatures; self.localRanges = localRanges
+        self.names = names; self.signatures = signatures; self.localRanges = localRanges; self.geoDatabase = geoDatabase
     }
 
     /// Every rule, conditional ones included.
     public var allRules: [Rule] { rules + conditionalRules }
 
-    enum CodingKeys: String, CodingKey { case version, rules, conditionalRules, names, signatures, localRanges }
+    enum CodingKeys: String, CodingKey { case version, rules, conditionalRules, names, signatures, localRanges, geoDatabase }
 
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -43,6 +47,7 @@ public struct DaemonRules: Codable, Equatable, Sendable {
         names = try c.decodeIfPresent([String: String].self, forKey: .names) ?? [:]
         signatures = try c.decodeIfPresent([String: Signature].self, forKey: .signatures) ?? [:]
         localRanges = try c.decodeIfPresent(String.self, forKey: .localRanges) ?? ""
+        geoDatabase = try c.decodeIfPresent(String.self, forKey: .geoDatabase)
     }
 
     /// Deny rules the daemon can follow: those naming a process path, so it knows which processes to read. A deny for
@@ -82,6 +87,8 @@ public final class SocketJudge: @unchecked Sendable {
     public let watchList: [Watch]
     /// A rule asks whether a socket leaves outside a VPN tunnel (`Rule.requireVPN`), so the daemon works it out.
     public let needsRoute: Bool
+    /// A rule names a country (`Rule.country`), so the daemon looks servers up in `DaemonRules.geoDatabase`.
+    public let needsCountry: Bool
 
     public init(_ d: DaemonRules) {
         // The file holds the rules active in Rat's profile and groups already; the daemon has neither.
@@ -90,6 +97,7 @@ public final class SocketJudge: @unchecked Sendable {
         signatures = d.signatures
         local.set(d.localRanges)
         needsRoute = d.allRules.contains { $0.enabled && $0.requireVPN }
+        needsCountry = d.allRules.contains { $0.enabled && $0.country != nil }
         watchList = Array(Set(d.allRules.compactMap { r in r.enabled && r.verdict == .deny ? r.processPath.map { Watch(path: $0, executable: r.executable) } : nil })).sorted()
     }
 
@@ -107,17 +115,21 @@ public final class SocketJudge: @unchecked Sendable {
     public func isLocal(_ address: String) -> Bool { LocalNetwork.contains(address, extra: local) }
 
     /// Whether the rules deny a socket. `address` is "" (and `port` 0) for a socket not connected to a server.
-    /// `offVPN` is whether it leaves outside a VPN tunnel (`Connection.offVPN`; nil when no rule asks).
-    public func denies(app: String, executable: String, address: String, port: Int, proto: Connection.Proto, offVPN: Bool? = nil) -> Bool {
+    /// `offVPN` is whether it leaves outside a VPN tunnel (`Connection.offVPN`; nil when no rule asks). `country` is
+    /// the server's country (`Connection.country`), and `countryKnown` false when there was no database to look in.
+    public func denies(app: String, executable: String, address: String, port: Int, proto: Connection.Proto, offVPN: Bool? = nil,
+                       country: String? = nil, countryKnown: Bool = false) -> Bool {
         let sig = signatures[app]
         var unknown: Rule.Unknown = sig == nil ? [.signing] : []
+        if !countryKnown { unknown.insert(.country) }
         let connected = !address.isEmpty && port != 0
         var host: String?
         if !connected { unknown.insert(.remote) }
         else if let n = names[address] { host = n.isEmpty ? nil : n }
         else { unknown.insert(.host) }
         let c = Connection(process: ProcessIdentity(signingID: sig?.signingID, teamID: sig?.teamID, path: app), executable: executable,
-                           host: host, address: connected ? address : "", port: connected ? port : 0, proto: proto, offVPN: offVPN)
+                           host: host, address: connected ? address : "", port: connected ? port : 0, proto: proto, offVPN: offVPN,
+                           country: connected && countryKnown && !isLocal(address) ? country : nil)
         let d = engine.decide(c, unknown: unknown)
         guard d.verdict == .deny, let rule = d.rule else { return false }
         // Rat's pass does not judge connections inside the local network by rules from alerts or the Rules window;

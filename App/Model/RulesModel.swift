@@ -174,6 +174,8 @@ final class RulesModel: ObservableObject {
         var address: String
         var port: Int
         var proto: Connection.Proto
+        /// The server's country, for the rules about a connection (never part of the ✗/✓'s own rule).
+        var country: String? = nil
         /// The name a rule keeps: none for a raw address, or for a name that is an address.
         var name: String? { host.flatMap { $0 == address || isIPLiteral($0) ? nil : $0 } }
     }
@@ -282,7 +284,7 @@ final class RulesModel: ObservableObject {
     private func connection(_ t: Target, signing: (String?, String?)) -> Connection? {
         guard let exe = t.executable, let e = t.endpoint else { return nil }
         return Connection(process: ProcessIdentity(signingID: signing.0, teamID: signing.1, path: t.app), executable: exe,
-                          host: e.name, address: e.address, port: e.port, proto: e.proto)
+                          host: e.name, address: e.address, port: e.port, proto: e.proto, country: e.country)
     }
 
     /// The rules about a row, disabled ones included: for an app, those naming it or a program inside it; for a
@@ -326,6 +328,14 @@ final class RulesModel: ObservableObject {
 
     /// Set by the inspector's Manage Rules…: the Rules window opens on this row's rules.
     @Published var focus: Target?
+    /// Set by a country's rule button (the inspector, a country group): the Rules window opens its editor on it.
+    @Published var draft: Rule?
+
+    /// A rule for the servers in one country, for one app or (with none) any process: a deny to start from, which
+    /// the editor can turn into an allow.
+    func newCountryRule(_ country: String, app: String?) -> Rule {
+        Rule(verdict: .deny, processPath: app, country: country, profileID: ruleSet.activeProfileID)
+    }
 
     // MARK: alert answers
 

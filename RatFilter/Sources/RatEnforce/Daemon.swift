@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import RatFilterCore
+import RatGeo
 import RatMonitor
 
 /// Runs a command; returns its exit status. Injectable so tests never touch the firewall.
@@ -86,16 +87,18 @@ public struct EnforcerStatus: Codable, Equatable {
     /// SHA-256 of the daemon's executable when it started, so Rat can tell that the running helper is not the one in
     /// its bundle (nil from daemons before 1.4.0).
     public var executableSHA256: String?
+    /// Whether the daemon could open the City database its country rules need (nil while no rule names a country).
+    public var countryLookup: Bool?
 
     public init(pid: Int32, updated: Date, pfEnabled: Bool, anchorHooked: Bool, deniedApps: [String: App], blockedPorts: Int,
                 ruleDenied: [String: App]? = nil, denyRules: Int? = nil, blockedLoopbackPorts: Int? = nil, proxyCapture: Bool? = nil, tunnels: [String: String]? = nil,
                 pfIssue: String? = nil, repairs: Int? = nil, lastRepair: String? = nil, lastRepairAt: Date? = nil,
-                executableSHA256: String? = nil) {
+                executableSHA256: String? = nil, countryLookup: Bool? = nil) {
         self.pid = pid; self.updated = updated; self.pfEnabled = pfEnabled; self.anchorHooked = anchorHooked
         self.deniedApps = deniedApps; self.blockedPorts = blockedPorts; self.ruleDenied = ruleDenied; self.denyRules = denyRules
         self.blockedLoopbackPorts = blockedLoopbackPorts; self.proxyCapture = proxyCapture; self.tunnels = tunnels
         self.pfIssue = pfIssue; self.repairs = repairs; self.lastRepair = lastRepair; self.lastRepairAt = lastRepairAt
-        self.executableSHA256 = executableSHA256
+        self.executableSHA256 = executableSHA256; self.countryLookup = countryLookup
     }
 }
 
@@ -177,6 +180,9 @@ public final class EnforcerDaemon {
     private var vpn = VPNState()
     struct VPNState { var at = Date.distantPast; var tunnels: [String: String] = [:]; var routes: [String: String?] = [:] }
     static let vpnRefresh: TimeInterval = 0.2
+    /// The City database for rules with a country (`DaemonRules.geoDatabase`, opened by `GeoFile`), kept while the
+    /// rules name the same file (same path, device and inode: an updated Rat.app puts a new file at the same path).
+    private var geo: (file: GeoFile.Identity, db: GeoIP?)?
     /// pid -> the denied entry it belongs to ("" = not denied).
     private var verdictCache: [pid_t: String] = [:]
     private var firstSeen: [pid_t: Date] = [:]
@@ -413,7 +419,9 @@ public final class EnforcerDaemon {
                     let key = SocketKey(pid: pid, proto: c.proto == .udp ? 17 : 6, localPort: c.localPort, remotePort: c.remotePort, remote: c.remoteAddress)
                     let deny = socketVerdicts[key] ?? judge.denies(app: w.app, executable: w.executable, address: c.remoteAddress,
                                                                     port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
-                                                                    offVPN: judge.needsRoute ? leavesOutsideTunnel(c, judge) : nil)
+                                                                    offVPN: judge.needsRoute ? leavesOutsideTunnel(c, judge) : nil,
+                                                                    country: judge.needsCountry ? geo?.db?.countryCode(c.remoteAddress) : nil,
+                                                                    countryKnown: geo?.db != nil)
                     verdicts[key] = deny
                     if deny { cut.insert(c.localPort) }
                 }
@@ -624,7 +632,7 @@ public final class EnforcerDaemon {
                                     proxyCapture: settings.proxiedFile == nil ? nil : proxyWatch?.capturing ?? false,
                                     tunnels: tunnelLock.withLock { tunnels },
                                     pfIssue: pfIssue, repairs: repairs, lastRepair: lastRepair, lastRepairAt: lastRepairAt,
-                                    executableSHA256: executableSHA256)
+                                    executableSHA256: executableSHA256, countryLookup: judge?.needsCountry == true ? geo?.db != nil : nil)
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .secondsSince1970
         guard let data = try? enc.encode(status) else { return }
@@ -671,6 +679,13 @@ public final class EnforcerDaemon {
         if j?.watchList != judge?.watchList { watched.removeAll(); watchedChanged = true; verdictCache.removeAll(); deniedPIDs.removeAll() }
         judge = j
         socketVerdicts.removeAll()
+        if j?.needsCountry == true, let path = d?.geoDatabase {
+            let file = GeoFile.identity(path)
+            if geo?.file != file {
+                geo = (file, GeoFile.open(path, ownerUID: settings.ownerUID))
+                if geo?.db == nil { FileHandle.standardError.write(Data("country rules: cannot read the database \(path)\n".utf8)) }
+            }
+        } else { geo = nil }
         denyRuleCount = d?.allRules.filter { $0.enabled && $0.verdict == .deny && $0.processPath != nil }.count ?? 0
         if trace { FileHandle.standardError.write(Data("deny rules: \(denyRuleCount), watching \(j?.watchList.count ?? 0) programs\n".utf8)) }
     }
