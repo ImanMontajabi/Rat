@@ -6,6 +6,29 @@ DMG checksums, are on the [Releases](https://github.com/ImanMontajabi/Rat/releas
 
 <!-- releases -->
 
+## [1.6.0] - 2026-10-31
+
+### Added
+
+- Rules can name the servers in one country (picked with its flag in the Rules window, or started from a connection's inspector or a country group): the helper looks servers up in the same offline database as the map and cuts only the matching sockets by their local ports.
+- Only through a VPN can name the VPN's country (Only through a VPN in 🇩🇪 Germany): Rat and the helper find each tunnel's server offline from the VPN app's own connection (for WireGuard, the route it keeps to its server) and cut the app's connections through a tunnel that leads elsewhere.
+- **Only through a VPN** (#45): a switch in the inspector for an app or one of its processes, and a condition in the Rules window. Every connection the app makes outside a VPN tunnel is cut by the helper within milliseconds, whatever ✓ it has; Rat cuts after a connection opens, so its first packets can still leave (update the helper in Settings > Security for the fast cut).
+
+### Changed
+
+- The inspector's Rules section no longer repeats the ✗/✓ of the selected app, process or connection: set them on its row in the list, and the inspector lists the rules that result.
+- Local connections have a labeled Local switch beside the search field: turn it off to hide this Mac's own, LAN and Bonjour traffic in the list, the map and the Summary. It replaces the small house icon inside the search field, and keeps its setting.
+- Traffic on the map is drawn as laser tracers: a glowing beam with a fading tail races along each line (purple out from this Mac, blue in from the server) and a ring ripples out where it lands.
+
+### Fixed
+
+- With nothing blocked, the helper checks pf every 10 s instead of every 2 s (a fifth of the `pfctl` runs) and sleeps a second between passes. A new block is enforced as fast as before: the helper loads its ports first and checks pf on the next pass.
+- The map's moving traffic stays on its lines and inside the map: after the window took its saved size at launch, or the inspector was shown or hidden, pulses ran beside their lines and some were drawn over the app list.
+
+### Development
+
+- The helper deletes 1.0.3's leftover address list before its first pf check, so `verify-blocking.sh`'s start-up check no longer fails on a cold start; phase 5 skips the cut outside the tunnel when something else (a VPN's kill switch) already blocks it.
+
 ## [1.5.0] - 2026-10-28
 
 ### Added
