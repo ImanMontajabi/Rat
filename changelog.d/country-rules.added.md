@@ -1,1 +1,0 @@
-Rules can name the servers in one country (picked with its flag in the Rules window, or started from a connection's inspector or a country group): the helper looks servers up in the same offline database as the map and cuts only the matching sockets by their local ports.
