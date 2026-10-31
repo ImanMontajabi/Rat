@@ -14,12 +14,21 @@
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/ImanMontajabi/Rat"></a>
 </p>
 
-Rat is a network monitor and application firewall for macOS, modelled on Little Snitch. It shows which app, and which of its processes, talks to which server, on an offline world map. It shows which connections go through a VPN or a proxy, and unmasks the real destination behind local proxies and SSH tunnels. You can deny a whole app, one of its processes or a single connection, and Rat cuts it off with the macOS packet filter. Rat is free and open source (MIT), with no trial and no paywall.
+Rat is a network monitor and application firewall for macOS, modelled on Little Snitch. It shows which app, and which of its processes, talks to which server, on an offline world map. It shows which connections go through a VPN or a proxy, and unmasks the real destination behind local proxies and SSH tunnels. You can deny a whole app, one of its processes or a single connection, and Rat cuts it off with the macOS packet filter. You can also keep an app on your VPN (optionally a VPN in one country) and write rules for the servers in a country. Rat is free and open source (MIT), with no trial and no paywall.
 
 ![Network monitor: Telegram and Firefox filtered to connections through a VPN or proxy](docs/screenshots/monitor-hierarchy-tags.png)
 <sub>Demo data. The monitor is filtered to *Through a VPN or Proxy*: Telegram is opened down to its helper's connection through Windscribe, and Firefox's connections go through `ssh -D` and Tor. Every row has its own ✗/✓, and connections show their country's flag. The map draws This Mac → proxy server (Stockholm) → real destination (Madrid), and the Summary counts only what the filter leaves. Server locations come from a bundled offline database; nothing leaves your Mac.</sub>
 
 > **Honest limits.** Little Snitch intercepts each connection *before* it is made, using Apple's Network Extension entitlement, which needs a paid developer account. Rat has none, so it is **reactive**: it notices a connection after it starts, and cuts a denied app's connections by their local ports. A brand-new process can get its first packets out before the cut. The app is ad-hoc signed and not notarized. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (sections 7, 8 and 10).
+
+## New in 1.6
+
+- **[Only through a VPN](#only-through-a-vpn):** an app, or one of its processes, keeps working only through a VPN tunnel. Its connections outside the tunnel are cut within milliseconds.
+- **[A VPN in one country](#only-through-a-vpn):** *Only through a VPN in 🇩🇪 Germany* also cuts its connections through a VPN that leads elsewhere. Rat finds the VPN's server offline, WireGuard included.
+- **[Rules for a country](#rules-for-a-country):** deny or allow the servers in one country, picked by its flag.
+- **A labeled Local switch** beside the search field hides LAN and Bonjour traffic. Traffic on the map moves as laser tracers, and the inspector lists a row's rules without repeating its ✗/✓.
+
+Every release's notes are in [CHANGELOG.md](CHANGELOG.md) and on the [releases page](https://github.com/ImanMontajabi/Rat/releases).
 
 ## What makes Rat different
 
@@ -43,6 +52,9 @@ Switch on **Only through a VPN** in the inspector for an app or one of its proce
 
 You can also pick the VPN's country under the switch (or in the rule editor): **Only through a VPN in 🇩🇪 Germany** keeps the app working only while its traffic goes through a tunnel to a server in Germany. Rat finds the server from the VPN app's own connection (its local relay in a stealth mode, or for WireGuard the route the VPN app keeps to its server) and places it with the bundled offline database, so a multi-hop VPN counts as its entry server's country. When the VPN moves to another country, or its server cannot be placed, the app's connections through it are cut too. The inspector shows where your VPN leads now.
 
+![Only through a VPN in the Netherlands](docs/screenshots/vpn-country.png)
+<sub>Demo data. Telegram is allowed only through a VPN in 🇳🇱 the Netherlands. The inspector shows the switch, its country picker, and where the Windscribe tunnel leads now.</sub>
+
 ### Rules for a country
 A rule can name the servers in one country: deny or allow an app, one of its processes or any process the servers that the bundled offline database places in, say, 🇩🇪 Germany. Pick the country in the Rules window's editor, or start the rule from a connection's inspector (**Rule for Servers in 🇩🇪 Germany…**) or from a country's header when the list is grouped by country. A deny for a country holds over the app's ✓; a more specific rule, such as one domain, still decides over it. Servers in the local network, loopback and addresses the database does not know are in no country, so a country rule never touches them. The helper reads the same database file as the map and judges every socket of the app on its 3 ms pass, so both find the same country; nothing is looked up online. Like every Rat rule it cuts a connection once it has opened, by its local port, never the server's address.
 
@@ -62,7 +74,7 @@ Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
 ### Everything else
 - **Connection alerts:** **Silent Allow** is the default, so a fresh install never nags. **Alert Mode** shows a floating panel for unknown connections, with a scope (app, domain, host, port) and a lifetime (once, until quit, forever).
 - **Rules window** (⇧⌘R):
-  - **Rules:** match on app, team ID, signing ID, domain, host, IP, port range and protocol. The most specific rule wins, and deny beats allow on a tie.
+  - **Rules:** match on app, one of its processes, team ID, signing ID, domain, host, IP, the server's country, port range and protocol, with an optional **Only through a VPN** condition (any VPN, or a VPN in one country). The most specific rule wins, and deny beats allow on a tie.
   - **Organizing:** rule groups, profiles (Home / Work / Public Wi-Fi) with automatic switching per network, and unapproved rules with a review queue.
   - **Sharing:** JSON import and export.
 - **Readable connections:** the usual service of each port (`TCP 443 · HTTPS`, `UDP 443 · QUIC`, `5223 · APN`), the network owner (`AS13335 Cloudflare, Inc.`), the country's flag and place (*🇩🇪 Berlin, Germany*), and reverse DNS that never holds up the monitor.
@@ -111,10 +123,10 @@ xcodegen generate                           # Rat.xcodeproj is generated from pr
 | Module | Contents |
 |---|---|
 | `App/` | The SwiftUI app. `Ledger` samples every 1.5 s, groups processes into apps, evaluates each connection against the rules, raises alerts and hands the helper the denied apps and ports. It also holds the monitor, the Rules and Settings windows, the alert panel and the menu bar. |
-| `RatFilter/Sources/RatFilterCore` | The rule engine: rules, profiles, groups, network triggers, import/export. Pure Swift. |
-| `RatFilter/Sources/RatMonitor` | The `libproc` connection sampler, the `nettop` traffic sampler, process grouping, port names, and VPN, route and proxy detection (routing socket, tunnel owners, system proxies, command-line proxy settings). |
+| `RatFilter/Sources/RatFilterCore` | The rule engine: rules (with the VPN and country conditions), profiles, groups, network triggers, import/export. Pure Swift. |
+| `RatFilter/Sources/RatMonitor` | The `libproc` connection sampler, the `nettop` traffic sampler, process grouping, port names, and VPN, route and proxy detection (routing socket, tunnel owners and where each tunnel leads, system proxies, command-line proxy settings). |
 | `RatFilter/Sources/RatGeo` | A MaxMind DB (`.mmdb`) reader (City and ASN; hardened for files you choose) and the time-zone locator. |
-| `RatFilter/Sources/RatEnforce` + `Enforcerd/` | `rat-enforcerd`, the root daemon: the `pf` anchor for denied apps' local ports, and the loopback proxy-request reader (BPF on `lo0`). It never blocks remote addresses. |
+| `RatFilter/Sources/RatEnforce` + `Enforcerd/` | `rat-enforcerd`, the root daemon: the `pf` anchor for denied sockets' local ports, the rules it follows on its 3 ms pass (one process, one connection, Only through a VPN, countries), and the loopback proxy-request reader (BPF on `lo0`). It never blocks remote addresses. |
 | `RatFilter/Sources/RatFilterExtension` | A dormant `NEFilterDataProvider` that needs the Network Extension entitlement. |
 
 The full design, including why Rat blocks local ports and not addresses, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -136,7 +148,7 @@ The UI tests and screenshots run a separate demo build (bundle ID `com.imanmonta
 - **Pull requests:** every change goes through a PR into `main` from a `feat/`, `fix/`, `ci/`, `test/` or `docs/` branch, and adds a fragment in [`changelog.d/`](changelog.d/README.md) (`scripts/changelog.py new <type> <slug> "…"`). CI checks the fragment and the `Version` file, runs the tests, and builds a DMG.
 - **Version:** the root `Version` file (`X.Y.Z`) is the version being developed. `scripts/version.sh set X.Y.Z` keeps `project.yml` in step.
 - **Nightly:** every merge into `main` publishes `v<Version>-nightly.<date>.<sha>` as a pre-release with its DMG and notes.
-- **Stable:** a PR from `main` into `release` publishes `v<Version>`. The workflow then opens a PR back to `main` that compiles the fragments into [CHANGELOG.md](CHANGELOG.md) and bumps `Version`.
+- **Stable:** a PR from `main` into `release`, merged with a merge commit so the two branches keep sharing history, publishes `v<Version>`. The workflow then opens a PR back to `main` that compiles the fragments into [CHANGELOG.md](CHANGELOG.md) and bumps `Version`.
 
 ## Where the design comes from
 
