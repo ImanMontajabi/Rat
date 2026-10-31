@@ -154,7 +154,8 @@ final class PFHealTests: XCTestCase {
     }
 
     /// What happened on this Mac: WARP replaced the main ruleset with its own anchor and stopped pf. Within one
-    /// watchdog pass pf runs again with Apple's anchors, and Rat's anchor is loaded again.
+    /// watchdog pass pf runs again with Apple's anchors, and Rat's anchor is loaded again (with nothing enforced the
+    /// check comes every 10 s).
     func testDaemonRecoversFromAVPNThatStoppedPFAndReplacedItsRuleset() throws {
         let dir = try tempDir()
         let pf = FakePF(enabled: true, rules: appleRules, nat: appleNat)
@@ -169,12 +170,12 @@ final class PFHealTests: XCTestCase {
         // The VPN client disconnects.
         pf.rules = "anchor \"com.cloudflare.warp_svc\" all\n"; pf.nat = ""; pf.enabled = false
         let loadsBefore = pf.anchorLoads.count
-        d.tick(now: t0.addingTimeInterval(2.1))
+        d.tick(now: t0.addingTimeInterval(10.1))
         XCTAssertTrue(pf.enabled, "turned on again")
         XCTAssertEqual(pf.configLoads, 1, "with /etc/pf.conf loaded first, so no stale rule of the VPN's comes back")
         XCTAssertTrue(PFStates.hooksAnchor(pf.rules, anchor: anchor))
         XCTAssertGreaterThan(pf.anchorLoads.count + pf.commands.filter { $0 == ["-a", anchor, "-F", "all"] }.count, loadsBefore, "Rat's anchor is loaded again")
-        d.tick(now: t0.addingTimeInterval(3.2))
+        d.tick(now: t0.addingTimeInterval(11.2))
         let st = try status(dir)
         XCTAssertTrue(st.pfEnabled); XCTAssertTrue(st.anchorHooked); XCTAssertNil(st.pfIssue)
         XCTAssertEqual(st.repairs, 1)
@@ -217,13 +218,15 @@ final class PFHealTests: XCTestCase {
         XCTAssertEqual(pf.configLoads, 1, "one request, one repair")
     }
 
-    /// A program that keeps stopping pf is not fought every 2 s.
+    /// A program that keeps stopping pf is not fought every 2 s. (An app is denied, so pf is checked every 2 s: with
+    /// nothing enforced it is every 10 s anyway.)
     func testRepairsBackOffWhenAnotherProgramKeepsUndoingThem() throws {
         let dir = try tempDir()
         let pf = FakePF(enabled: false, rules: appleRules, nat: appleNat)
-        let (d, _) = try daemon(pf, dir: dir)
+        let (d, _) = try daemon(pf, dir: dir, denied: "/Applications/Rat Unit Test Not Running.app\n")
         d.start()
         let t0 = Date()
+        d.tick(now: t0)   // reads the deny list; pf is checked from the next pass on
         var enables = 0
         for i in 1...20 {
             pf.enabled = false
@@ -233,6 +236,73 @@ final class PFHealTests: XCTestCase {
         }
         XCTAssertLessThan(enables, 12, "about five in the first minute, then one every 30 s")
         XCTAssertTrue(try status(dir).pfIssue?.contains("keeps turning pf off") ?? false)
+    }
+
+    // MARK: how often pf is checked
+
+    private func checks(_ pf: FakePF) -> Int { pf.commands.filter { $0 == ["-s", "info"] }.count }
+
+    /// Nothing enforced: pf off blocks nothing, so the two `pfctl` runs of a check come every 10 s, not every 2 s.
+    func testPFIsCheckedEveryTenSecondsWhileNothingIsEnforced() throws {
+        let dir = try tempDir()
+        let pf = FakePF(enabled: true, rules: appleRules, nat: appleNat)
+        let (d, s) = try daemon(pf, dir: dir)
+        XCTAssertEqual(s.watchdogInterval, 2)
+        XCTAssertEqual(s.idleWatchdogInterval, 10)
+        let t0 = Date()
+        d.start()
+        let atStart = checks(pf)
+        XCTAssertEqual(atStart, 1, "checked at the start")
+        for i in 1...39 { XCTAssertFalse(d.tick(now: t0.addingTimeInterval(Double(i) * 0.25))) }
+        XCTAssertEqual(checks(pf), atStart, "not within 10 s")
+        d.tick(now: t0.addingTimeInterval(10.05))
+        XCTAssertEqual(checks(pf), atStart + 1)
+        for i in 1...39 { d.tick(now: t0.addingTimeInterval(10.05 + Double(i) * 0.25)) }
+        d.tick(now: t0.addingTimeInterval(20.1))
+        XCTAssertEqual(checks(pf), atStart + 2, "one check every 10 s")
+    }
+
+    /// The first deny after a quiet spell: its pass loads the ports before any `pfctl -s` (a check first made it
+    /// 5-65 ms later), and the next pass checks pf; from then on every 2 s.
+    func testTheFirstDenyLoadsItsPortsBeforePFIsChecked() throws {
+        let dir = try tempDir()
+        let pf = FakePF(enabled: true, rules: appleRules, nat: appleNat)
+        let (d, s) = try daemon(pf, dir: dir)
+        let (fd, port) = socket(AF_INET, any: true)
+        defer { close(fd) }
+        let t0 = Date()
+        d.start()
+        XCTAssertFalse(d.tick(now: t0))
+        let before = pf.commands.count
+        let checked = checks(pf)
+
+        // 12 s later the check is overdue when Rat writes the deny.
+        try (ConnectionSampler.path(of: getpid()) + "\n").write(toFile: s.deniedFile, atomically: true, encoding: .utf8)
+        d.filesChanged()
+        let t1 = t0.addingTimeInterval(12)
+        XCTAssertTrue(d.tick(now: t1))
+        XCTAssertTrue(d.loadedPorts.contains(port), "loaded on the pass that read the deny")
+        let pass = pf.commands[before...]
+        XCTAssertTrue(pass.contains { $0.first == "-a" && $0.contains("-f") }, "the anchor was loaded")
+        XCTAssertEqual(checks(pf), checked, "with no pfctl -s before it: \(Array(pass))")
+
+        d.tick(now: t1.addingTimeInterval(0.003))
+        XCTAssertEqual(checks(pf), checked + 1, "pf checked on the next pass")
+        d.tick(now: t1.addingTimeInterval(1.9))
+        XCTAssertEqual(checks(pf), checked + 1)
+        d.tick(now: t1.addingTimeInterval(2.1))
+        XCTAssertEqual(checks(pf), checked + 2, "every 2 s while something is enforced")
+
+        // The deny is lifted: once its ports are released (`portHold`), back to every 10 s.
+        try "".write(toFile: s.deniedFile, atomically: true, encoding: .utf8)
+        d.filesChanged()
+        d.tick(now: t1.addingTimeInterval(2.2))
+        d.tick(now: t1.addingTimeInterval(2.2 + s.portHold + 0.1))
+        XCTAssertTrue(d.loadedPorts.isEmpty)
+        let idle = checks(pf)
+        d.tick(now: t1.addingTimeInterval(2.2 + s.portHold + 0.2))
+        d.tick(now: t1.addingTimeInterval(2.2 + s.portHold + 9))
+        XCTAssertEqual(checks(pf), idle, "nothing enforced again")
     }
 
     // MARK: every socket of a denied app

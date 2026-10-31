@@ -47,9 +47,21 @@ final class RatUITests: XCTestCase {
         XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: e)], timeout: timeout) == .completed
     }
 
+    /// Waits until a switch is on or off (a switch reports its own value, 1 or 0).
+    private func waitSwitch(_ e: XCUIElement, on: Bool, timeout: TimeInterval = 5) -> Bool {
+        let n = on ? 1 : 0
+        return XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value == %@ OR value == %@", NSNumber(value: n), "\(n)"), evaluatedWith: e)], timeout: timeout) == .completed
+    }
+
     /// Waits until a text shows `text` (as its label or its value, whichever the element reports).
     private func waitText(_ e: XCUIElement, _ text: String, timeout: TimeInterval = 5) -> Bool {
         XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "label == %@ OR value == %@", text, text), evaluatedWith: e)], timeout: timeout) == .completed
+    }
+
+    /// A text that starts with `prefix` and contains `part`, as its label or its value (a SwiftUI `Text` reports its
+    /// value).
+    private func text(startingWith prefix: String, containing part: String) -> NSPredicate {
+        NSPredicate(format: "(label BEGINSWITH %@ AND label CONTAINS %@) OR (value BEGINSWITH %@ AND value CONTAINS %@)", prefix, part, prefix, part)
     }
 
     private func isActive(_ profile: String) -> Bool { el("profile-\(profile)").descendants(matching: .any)["profile-active"].exists }
@@ -148,7 +160,8 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(el("process-row-apsd").descendants(matching: .any)["policy-locked"].exists, "apsd")
     }
 
-    /// The inspector lists the rules about the selected row and sets that row's ✗/✓.
+    /// The inspector lists the rules about the selected row, and follows the ✗/✓ set on that row in the list (it
+    /// has no ✗/✓ of its own).
     func testInspectorShowsTheSelectedRowsRules() {
         expand("Steam")
         el("process-row-Steam Helper").click()
@@ -160,12 +173,12 @@ final class RatUITests: XCTestCase {
         el("remote-row-demo5.example.com").click()
         XCTAssertTrue(inspectorTitle().contains("demo5.example.com"), inspectorTitle())
         XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "the UDP 27015 rule matches this connection")
-        let deny = el("inspector-policy").buttons["policy-deny"]
+        XCTAssertFalse(el("inspector-policy").exists, "no ✗/✓ in the inspector")
+        let deny = el("remote-policy-demo5.example.com").buttons["policy-deny"]
         XCTAssertTrue(deny.waitForExistence(timeout: 5))
         deny.click()
         XCTAssertTrue(waitValue(deny, "on"))
-        XCTAssertTrue(waitValue(el("inspector-rules"), "2"), "the connection's own ✗ is listed")
-        XCTAssertEqual(el("remote-policy-demo5.example.com").buttons["policy-deny"].value as? String, "on", "the list shows the same choice")
+        XCTAssertTrue(waitValue(el("inspector-rules"), "2"), "the connection's own ✗ from the list is listed")
         el("app-row-Telegram").click()
         XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "Telegram's rule from an alert")
     }
@@ -198,6 +211,145 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(waitText(el("rules-title"), "Steam"))
     }
 
+    /// "Only through a VPN" (#45): the inspector's switch on an app makes one rule, listed under it; its processes
+    /// follow it (switched on, greyed out); the Rules window's editor has the same condition.
+    func testVPNOnlySwitchInTheInspector() {
+        el("app-row-Telegram").click()
+        let vpn = el("inspector-vpn-only")
+        XCTAssertTrue(vpn.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitSwitch(vpn, on: false))
+        XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "Telegram's rule from an alert")
+        vpn.click()
+        XCTAssertTrue(waitSwitch(vpn, on: true))
+        XCTAssertTrue(waitValue(el("inspector-rules"), "2"), "the VPN-only rule is listed")
+
+        expand("Telegram")
+        el("process-row-Telegram Helper").click()
+        XCTAssertTrue(inspectorTitle().contains("Telegram Helper"), inspectorTitle())
+        let inherited = el("inspector-vpn-only")
+        XCTAssertTrue(waitSwitch(inherited, on: true), "the process follows the app")
+        XCTAssertFalse(inherited.isEnabled, "set on the app, so it is switched there")
+
+        el("app-row-Telegram").click()
+        XCTAssertTrue(waitSwitch(el("inspector-vpn-only"), on: true))
+        el("inspector-vpn-only").click()
+        XCTAssertTrue(waitSwitch(el("inspector-vpn-only"), on: false))
+        XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "switched off, the rule is gone")
+
+        el("manage-rules").click()
+        let window = app.windows["Rules"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        window.toolbars.buttons["New Rule"].click()
+        let condition = el("rule-vpn-only")
+        XCTAssertTrue(condition.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitSwitch(condition, on: false))
+        condition.click()
+        XCTAssertTrue(waitSwitch(condition, on: true))
+        XCTAssertTrue(window.sheets.staticTexts["Telegram → any server, unless through a VPN"].waitForExistence(timeout: 5), "the rule's summary names the condition")
+        window.sheets.buttons["Cancel"].click()
+        XCTAssertTrue(waitGone(condition))
+    }
+
+    /// "Only through a VPN" names the VPN's country (#45): the inspector's picker sets it on the app's rule, says
+    /// where the demo's tunnel leads (Windscribe → 🇳🇱), and the app's process shows the country it follows; the
+    /// Rules window's editor has the same picker under the condition. Flags, not names: the Mac's language varies.
+    func testVPNCountryInTheInspector() {
+        el("app-row-Telegram").click()
+        let vpn = el("inspector-vpn-only")
+        XCTAssertTrue(vpn.waitForExistence(timeout: 5))
+        XCTAssertFalse(el("inspector-vpn-country").exists, "no picker while the switch is off")
+        vpn.click()
+        XCTAssertTrue(waitSwitch(vpn, on: true))
+        let picker = el("inspector-vpn-country")
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "the switch on, its country picker shows")
+        picker.click()
+        let netherlands = app.menuItems.matching(NSPredicate(format: "title BEGINSWITH %@", "🇳🇱")).firstMatch
+        XCTAssertTrue(netherlands.waitForExistence(timeout: 5))
+        netherlands.click()
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value CONTAINS %@", "🇳🇱"), evaluatedWith: picker)], timeout: 5) == .completed,
+                      "the Netherlands picked: \(picker.value ?? "nil")")
+        let now = el("inspector-vpn-servers")
+        XCTAssertTrue(now.waitForExistence(timeout: 5))
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: text(startingWith: "Now: Windscribe →", containing: "🇳🇱"), evaluatedWith: now)], timeout: 5) == .completed,
+                      "where the tunnel leads: \(now.label) \(now.value ?? "")")
+        XCTAssertTrue(waitValue(el("inspector-rules"), "2"), "still one VPN rule, with its country")
+
+        expand("Telegram")
+        el("process-row-Telegram Helper").click()
+        let inherited = el("inspector-vpn-country")
+        XCTAssertTrue(inherited.waitForExistence(timeout: 5))
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: text(startingWith: "Only through a VPN in", containing: "🇳🇱"), evaluatedWith: inherited)], timeout: 5) == .completed,
+                      "the process follows the app's country: \(inherited.label) \(inherited.value ?? "")")
+
+        el("manage-rules").click()
+        let window = app.windows["Rules"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        XCTAssertTrue(window.staticTexts.matching(text(startingWith: "Only through a VPN in", containing: "🇳🇱")).firstMatch.waitForExistence(timeout: 5),
+                      "the rule's row names the country")
+        window.toolbars.buttons["New Rule"].click()
+        let condition = el("rule-vpn-only")
+        XCTAssertTrue(condition.waitForExistence(timeout: 5))
+        XCTAssertFalse(el("rule-vpn-country").exists)
+        condition.click()
+        let editorPicker = el("rule-vpn-country")
+        XCTAssertTrue(editorPicker.waitForExistence(timeout: 5), "the editor's picker under the condition")
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value CONTAINS %@", "Any"), evaluatedWith: editorPicker)], timeout: 5) == .completed)
+        window.sheets.buttons["Cancel"].click()
+        XCTAssertTrue(waitGone(condition))
+    }
+
+    /// A connection's inspector starts a rule for every server in its country (#45): the Rules window opens its
+    /// editor on a deny for the app with the country picked, and the saved rule is one of the connection's rules.
+    /// Flags, not names, so the test does not depend on the Mac's language.
+    func testCountryRuleFromTheInspector() {
+        expand("Firefox")
+        let row = el("remote-row-news.example.org")
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.click()
+        XCTAssertTrue(waitValue(el("inspector-rules"), "0"))
+        let button = el("inspector-country-rule")
+        XCTAssertTrue(button.waitForExistence(timeout: 5), "the server is in Spain")
+        XCTAssertTrue(button.label.contains("🇪🇸"), button.label)
+        button.click()
+
+        let window = app.windows["Rules"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        let picker = el("rule-country")
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "the editor opens on the new rule")
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value CONTAINS %@", "🇪🇸"), evaluatedWith: picker)], timeout: 5) == .completed,
+                      "Spain is picked: \(picker.value ?? "nil")")
+        let preview = window.sheets.staticTexts.matching(text(startingWith: "Firefox → any server in", containing: "🇪🇸")).firstMatch
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), "the summary names the app and the country")
+        window.sheets.buttons["Save"].click()
+        XCTAssertTrue(waitGone(picker))
+        let listed = window.staticTexts.matching(text(startingWith: "Deny connections to servers in", containing: "🇪🇸")).firstMatch
+        XCTAssertTrue(listed.waitForExistence(timeout: 5), "the rule's row names the country")
+
+        row.click()
+        XCTAssertTrue(waitValue(el("inspector-rules"), "1"), "the connection lists its country's rule")
+        XCTAssertFalse(el("inspector-policy").exists)
+    }
+
+    /// Grouped by country, a group's header starts a rule for any process.
+    func testCountryGroupStartsARuleForAnyProcess() {
+        app.terminate()
+        app.launchArguments += ["-groupBy", "Country"]
+        app.launch()
+        let button = el("country-rule-DE")
+        XCTAssertTrue(button.waitForExistence(timeout: 20), "the Germany group has its rule button")
+        XCTAssertFalse(el("country-rule-ZZ").exists)
+        button.click()
+        let window = app.windows["Rules"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        let picker = el("rule-country")
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value CONTAINS %@", "🇩🇪"), evaluatedWith: picker)], timeout: 5) == .completed,
+                      "Germany is picked: \(picker.value ?? "nil")")
+        XCTAssertTrue(window.sheets.staticTexts.matching(text(startingWith: "Any process → any server in 🇩🇪", containing: "🇩🇪")).firstMatch.waitForExistence(timeout: 5))
+        window.sheets.buttons["Cancel"].click()
+        XCTAssertTrue(waitGone(picker))
+    }
+
     func testCommandLineToolShowsWhoStartedIt() {
         el("app-row-git-remote-https").click()
         XCTAssertTrue(app.staticTexts["Warp (pid 700)"].waitForExistence(timeout: 5), "Started by: Warp")
@@ -217,7 +369,7 @@ final class RatUITests: XCTestCase {
         XCTAssertFalse(el("remote-policy-demo4.example.com").buttons["policy-deny"].exists, "no ✗/✓ for a connection a peer started")
         incoming.click()
         XCTAssertTrue(inspectorTitle().contains("demo4.example.com"), inspectorTitle())
-        XCTAssertFalse(el("inspector-policy").exists, "the inspector offers none either")
+        XCTAssertFalse(el("inspector-policy").exists, "the inspector has no ✗/✓ for any row")
 
         expand("Telegram")
         let stream = el("remote-row-demo2.example.com")
@@ -239,12 +391,14 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["🇬🇧 London, United Kingdom"].waitForExistence(timeout: 5), "the inspector's location")
     }
 
-    /// Hide Local leaves out Bonjour and LAN connections, and the processes that have only those; a connection
-    /// through a local proxy stays (it leaves the Mac). The chip remembers its state for the next launch.
-    func testHideLocalHidesLocalConnections() {
-        let chip = el("hide-local")
+    /// The Local switch beside the search field, turned off, leaves out Bonjour and LAN connections, and the
+    /// processes that have only those; a connection through a local proxy stays (it leaves the Mac). It remembers
+    /// its state for the next launch.
+    func testLocalSwitchHidesLocalConnections() {
+        let chip = el("show-local")
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
-        XCTAssertEqual(chip.value as? String, "off")
+        XCTAssertTrue(waitSwitch(chip, on: true), "local connections are shown at first: \(String(describing: chip.value))")
+        XCTAssertTrue(app.staticTexts["Local"].exists, "a labeled switch")
         let counts = el("summary-counts")
         XCTAssertTrue(counts.waitForExistence(timeout: 5))
         let before = [counts.label, counts.value as? String ?? ""].joined()
@@ -256,7 +410,7 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(el("remote-row-127.0.0.1").waitForExistence(timeout: 5))
 
         chip.click()
-        XCTAssertTrue(waitValue(chip, "on"))
+        XCTAssertTrue(waitSwitch(chip, on: false))
         XCTAssertTrue(waitGone(el("process-row-rapportd")), "a process with only local connections is hidden")
         XCTAssertTrue(waitGone(el("remote-row-224.0.0.251")))
         XCTAssertTrue(el("remote-row-dns.example").exists, "mDNSResponder's outside connection stays")
@@ -265,7 +419,7 @@ final class RatUITests: XCTestCase {
         XCTAssertNotEqual([counts.label, counts.value as? String ?? ""].joined(), before, "the Summary counts fewer domains")
 
         chip.click()
-        XCTAssertTrue(waitValue(chip, "off"))
+        XCTAssertTrue(waitSwitch(chip, on: true))
         XCTAssertTrue(el("process-row-rapportd").waitForExistence(timeout: 5))
     }
 

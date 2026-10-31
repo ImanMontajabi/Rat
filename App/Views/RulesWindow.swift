@@ -231,7 +231,7 @@ struct RulesList: View {
             case .target: return true
             }
         }
-        .filter { search.isEmpty || $0.summary.localizedCaseInsensitiveContains(search) }
+        .filter { search.isEmpty || $0.summary(country: Countries.label).localizedCaseInsensitiveContains(search) }
         .sorted { $0.createdAt > $1.createdAt }
     }
 
@@ -315,6 +315,15 @@ struct RulesList: View {
             }
         }
         .sheet(item: $editing) { rule in RuleEditor(rule: rule) { rules.upsert($0); editing = nil } cancel: { editing = nil } }
+        .onAppear(perform: takeDraft)
+        .onChange(of: rules.draft) { _, _ in takeDraft() }
+    }
+
+    /// Opens the editor on the rule a country's rule button started.
+    private func takeDraft() {
+        guard let d = rules.draft else { return }
+        rules.draft = nil
+        editing = d
     }
 
     private func processName(_ r: Rule) -> String {
@@ -329,6 +338,8 @@ struct RulesList: View {
         var what = r.remoteAddress ?? r.remoteHost ?? r.remoteDomain.flatMap { $0 == "*" ? nil : "*.\($0)" } ?? "any server"
         if let ports = r.ports { what += ports.lowerBound == ports.upperBound ? " : \(ports.lowerBound)" : " : \(ports.lowerBound)-\(ports.upperBound)" }
         if let proto = r.proto { what += " (\(proto.rawValue.uppercased()))" }
+        if let c = r.country { what = what == "any server" ? "servers in \(Countries.label(c))" : "\(what) in \(Countries.label(c))" }
+        if r.requireVPN { return VPNCountryNote.title(r.vpnCountry) + (what == "any server" ? "" : ": \(what)") }
         return (r.verdict == .deny ? "Deny" : "Allow") + " connections to " + what
     }
 
@@ -402,10 +413,13 @@ struct RuleEditor: View {
     @State private var remoteValue = ""
     @State private var portText = ""
     @State private var protocolChoice = 0   // 0 any, 1 TCP, 2 UDP
+    @State private var countryChoice = ""   // "" any
+    @State private var vpnCountryChoice = ""   // "" any VPN
 
     var body: some View {
         Form {
             Picker("Action", selection: $rule.verdict) { Text("Allow").tag(Verdict.allow); Text("Deny").tag(Verdict.deny) }.pickerStyle(.segmented)
+                .disabled(rule.requireVPN)
             Section("Process") {
                 Picker("Match", selection: $processScope) { ForEach(ProcessScope.allCases) { Text($0.rawValue).tag($0) } }
                 if processScope != .any {
@@ -418,6 +432,25 @@ struct RuleEditor: View {
                 if remoteScope != .any { TextField("Value", text: $remoteValue).accessibilityIdentifier("rule-server") }
                 TextField("Port or range (e.g. 443 or 8000-8100)", text: $portText).accessibilityIdentifier("rule-port")
                 Picker("Protocol", selection: $protocolChoice) { Text("Any").tag(0); Text("TCP").tag(1); Text("UDP").tag(2) }.pickerStyle(.segmented)
+                Picker("Country", selection: $countryChoice) {
+                    Text("Any country").tag("")
+                    ForEach(Countries.all, id: \.code) { Text(Countries.label($0.code)).tag($0.code) }
+                }
+                .accessibilityIdentifier("rule-country")
+                if !countryChoice.isEmpty {
+                    Text("Servers the offline GeoIP database places in \(Countries.name(countryChoice)). A server it does not place (the local network, an address it lacks) is in no country.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Section("Condition") {
+                Toggle("Only through a VPN", isOn: $rule.requireVPN).accessibilityIdentifier("rule-vpn-only")
+                if rule.requireVPN {
+                    VPNCountryPicker(selection: $vpnCountryChoice).accessibilityIdentifier("rule-vpn-country")
+                }
+                Text(processScope == .any ? "Needs a process: for any process it would cut the VPN client's own connection too."
+                     : "Denies only the connections that leave outside a VPN tunnel, before the app's other rules. They are cut within milliseconds of opening, not before: the first packets can still leave.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if rule.requireVPN, !vpnCountryChoice.isEmpty { Text(VPNCountryNote.text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             }
             Section("Where it applies") {
                 Picker("Profile", selection: $rule.profileID) {
@@ -430,10 +463,10 @@ struct RuleEditor: View {
                 }
                 Toggle("Enabled", isOn: $rule.enabled)
             }
-            Text(preview.summary).font(.callout).foregroundStyle(.secondary)
+            Text(preview.summary(country: Countries.label)).font(.callout).foregroundStyle(.secondary)
             HStack { Spacer(); Button("Cancel", action: cancel).keyboardShortcut(.cancelAction); Button("Save") { save(preview) }.keyboardShortcut(.defaultAction).disabled(!valid) }
         }
-        .formStyle(.grouped).frame(width: 460, height: 560)
+        .formStyle(.grouped).frame(width: 460, height: 640)
         .onAppear(perform: load)
     }
 
@@ -448,10 +481,13 @@ struct RuleEditor: View {
 
     private var valid: Bool {
         parsedPorts != nil && (processScope == .any || !processValue.isEmpty) && (remoteScope == .any || !remoteValue.isEmpty)
+            && !(rule.requireVPN && processScope == .any)
     }
 
     private var preview: Rule {
         var r = rule
+        // "Only through a VPN" is a deny (`Rule.requireVPN`).
+        if r.requireVPN { r.verdict = .deny }
         r.processPath = nil; r.teamID = nil; r.signingID = nil; r.executable = nil
         switch processScope { case .any: break; case .app: r.processPath = processValue; case .team: r.teamID = processValue; case .signing: r.signingID = processValue }
         let exe = executableValue.trimmingCharacters(in: .whitespaces)
@@ -460,6 +496,8 @@ struct RuleEditor: View {
         switch remoteScope { case .any: break; case .domain: r.remoteDomain = remoteValue; case .host: r.remoteHost = remoteValue; case .address: r.remoteAddress = remoteValue }
         r.ports = parsedPorts ?? nil
         r.proto = protocolChoice == 1 ? .tcp : protocolChoice == 2 ? .udp : nil
+        r.country = countryChoice.isEmpty ? nil : countryChoice
+        r.vpnCountry = r.requireVPN && !vpnCountryChoice.isEmpty ? vpnCountryChoice : nil
         return r
     }
 
@@ -473,6 +511,8 @@ struct RuleEditor: View {
         else if let a = rule.remoteAddress { remoteScope = .address; remoteValue = a }
         if let p = rule.ports { portText = p.lowerBound == p.upperBound ? "\(p.lowerBound)" : "\(p.lowerBound)-\(p.upperBound)" }
         protocolChoice = rule.proto == .tcp ? 1 : rule.proto == .udp ? 2 : 0
+        countryChoice = rule.country ?? ""
+        vpnCountryChoice = rule.vpnCountry ?? ""
     }
 }
 

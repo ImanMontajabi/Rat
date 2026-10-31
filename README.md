@@ -38,6 +38,14 @@ Rat detects active tunnels (`utun*`: Windscribe, WireGuard, OpenVPN, Cloudflare 
 
 Apps, processes and connections get badges such as `VPN · Windscribe`, `Proxy · ssh` or `VPN server · Windscribe` (the VPN client's own connection to its server). A connection counts as tunnelled when its socket is bound to the tunnel's address, or, when it has no address of its own, when the routing table sends it into the tunnel. No packets are inspected. To filter, use the route chip or type `vpn` or `proxy` in the search.
 
+### Only through a VPN
+Switch on **Only through a VPN** in the inspector for an app or one of its processes, or add the condition to a rule in the Rules window. The app keeps working through the VPN; every connection it makes outside a tunnel (the VPN is off or has dropped, a split tunnel leaves that server out, or a socket was opened on Wi-Fi before the VPN came up) is cut, whatever ✓ the app has. Connections inside the local network are left alone. The daemon checks the tunnels five times a second and the app's sockets every 3 ms. It is a fast cut, not a gate: Rat cannot hold a connection before it opens (no Network Extension), so the first packets of a connection outside the VPN can still leave. A connection through a local proxy follows the proxy's route: switch it on for the proxy program too.
+
+You can also pick the VPN's country under the switch (or in the rule editor): **Only through a VPN in 🇩🇪 Germany** keeps the app working only while its traffic goes through a tunnel to a server in Germany. Rat finds the server from the VPN app's own connection (its local relay in a stealth mode, or for WireGuard the route the VPN app keeps to its server) and places it with the bundled offline database, so a multi-hop VPN counts as its entry server's country. When the VPN moves to another country, or its server cannot be placed, the app's connections through it are cut too. The inspector shows where your VPN leads now.
+
+### Rules for a country
+A rule can name the servers in one country: deny or allow an app, one of its processes or any process the servers that the bundled offline database places in, say, 🇩🇪 Germany. Pick the country in the Rules window's editor, or start the rule from a connection's inspector (**Rule for Servers in 🇩🇪 Germany…**) or from a country's header when the list is grouped by country. A deny for a country holds over the app's ✓; a more specific rule, such as one domain, still decides over it. Servers in the local network, loopback and addresses the database does not know are in no country, so a country rule never touches them. The helper reads the same database file as the map and judges every socket of the app on its 3 ms pass, so both find the same country; nothing is looked up online. Like every Rat rule it cuts a connection once it has opened, by its local port, never the server's address.
+
 ### Blocking that leaves DNS alone
 Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
 - **How it blocks:** it blocks the **local ports** of the denied sockets with stateless `pf` rules (`block return-rst` for TCP, `block return-icmp` for UDP, inbound dropped): every socket of a denied app and its helpers, or only those of a denied process or connection, which the daemon judges itself.
@@ -49,7 +57,7 @@ Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
 - **Left:** the app list with sparklines, session totals and a 5m / 1h / 1d / 1w traffic chart.
 - **Middle:** the world map, drawing only what the list shows. Busy connections show their traffic moving, purple for sent and blue for received, only while the window is visible and Reduce Motion is off.
 - **Right:** the inspector for the selected app, process or connection, or a Summary of top processes, domains, countries and networks that follows the search and filters.
-- **Hide Local:** one chip hides local-network traffic (the LAN, multicast and Bonjour) in the list, the map and the Summary, and Rat remembers it.
+- **Local switch:** the Local switch beside the search field hides local-network traffic (the LAN, multicast and Bonjour) in the list, the map and the Summary when turned off, and Rat remembers it.
 
 ### Everything else
 - **Connection alerts:** **Silent Allow** is the default, so a fresh install never nags. **Alert Mode** shows a floating panel for unknown connections, with a scope (app, domain, host, port) and a lifetime (once, until quit, forever).

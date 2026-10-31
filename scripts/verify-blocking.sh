@@ -21,10 +21,26 @@
 #     curl as a process of the macOS row cuts its stream and fresh curls while python3 keeps downloading; a ✗ on
 #     one connection (curl to one server address, then to one server by the name Rat gave it) cuts only that
 #     connection, and curl to other servers keeps working.
+#  5. Only through a VPN (1.6.0, #45; `conditionalRules`): curl may connect only through a VPN tunnel. A curl bound
+#     to the Wi-Fi or Ethernet address (`--interface`), which works without the rule, is cut whether or not a VPN is
+#     up (skipped when it does not work without the rule: a VPN's own kill switch); with a VPN carrying the Internet a
+#     plain curl goes through it and works, without one it is cut. dig keeps resolving.
+#  6. Servers in one country (#45; `Rule.country`, `DaemonRules.geoDatabase`): curl is denied the country the
+#     offline City database places $HOST in (looked up with the daemon's own `--country`). Its running download is
+#     cut and fresh curls to that server are blocked, while curl to a server in another country keeps working and
+#     python3 keeps downloading from the denied country; the anchor still holds ports only. With no readable
+#     database the daemon cuts nothing for a country. The database is the one next to the daemon in Rat.app, else
+#     RAT_GEOIP_DB, else the repo's App/Vendor copy.
+#  7. Only through a VPN in one country (#45; `Rule.vpnCountry`): needs a VPN carrying the Internet (skipped
+#     without one). The daemon's own `--tunnels` says where the tunnel leads; with the rule naming that country a
+#     plain curl through the VPN works, naming another country fresh curls through it are blocked, dig keeps
+#     resolving and the anchor holds ports only. A tunnel whose server cannot be placed is reported, and still cut.
 set -u
 [ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 2; }
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-DAEMON="${1:-$(ls -d "$HOME"/Library/Developer/Xcode/DerivedData/Rat-*/Build/Products/Debug/Rat.app/Contents/MacOS/rat-enforcerd 2>/dev/null | head -1)}"
+# The newest build: Xcode's Debug builds or the installed app's (an old Debug build lacks the newest phases' options).
+DAEMON="${1:-$(ls -td "$HOME"/Library/Developer/Xcode/DerivedData/Rat-*/Build/Products/Debug/Rat.app/Contents/MacOS/rat-enforcerd \
+  /Applications/Rat.app/Contents/MacOS/rat-enforcerd 2>/dev/null | head -1)}"
 [ -x "$DAEMON" ] || DAEMON="$ROOT/RatFilter/.build/debug/rat-enforcerd"
 [ -x "$DAEMON" ] || { echo "rat-enforcerd not found; pass its path" >&2; exit 2; }
 
@@ -280,10 +296,119 @@ r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_co
 [ "$r" = 200 ] && echo "  ok curl to another server still works (example.com -> 200)" || { echo "  FAIL curl to another server -> $r (collateral)"; FAIL=1; }
 echo '{}' > "$WORK/deny-rules.json"
 
+echo "== phase 5, only through a VPN"
+VPN_ONLY='[{"verdict": "deny", "processPath": "macOS", "executable": "/usr/bin/curl", "requireVPN": true}]'
+PHYS=; for i in en0 en1 en2 en3 en4 en5; do /usr/sbin/ipconfig getifaddr "$i" >/dev/null 2>&1 && { PHYS=$i; break; }; done
+FULL=$(/sbin/route -n get 1.1.1.1 2>/dev/null | awk '/interface:/ { print $2 }')
+# Without the rule a curl outside the tunnel must work, or a block proves nothing: a VPN's own firewall (Windscribe's
+# with its kill switch on) already stops everything outside the tunnel.
+OUTSIDE=
+if [ -n "$PHYS" ]; then
+  r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' --interface "$PHYS" https://example.com)
+  [ "$r" = 200 ] && OUTSIDE=1 || echo "  note: without the rule a curl bound to $PHYS already fails ($r): something else blocks traffic outside the tunnel"
+fi
+/usr/bin/python3 -I -c 'import json, sys; json.dump({"version": 1, "rules": [], "conditionalRules": json.loads(sys.argv[1]), "names": {}, "signatures": {}, "localRanges": ""}, open(sys.argv[2] + ".tmp", "w"))' \
+  "$VPN_ONLY" "$WORK/deny-rules.json" && apply_rules
+sleep 0.5
+if [ -n "$OUTSIDE" ]; then
+  RW=$(fresh 10 --interface "$PHYS" https://example.com)
+  echo "  $RW/10 fresh curls bound to $PHYS ($(/usr/sbin/ipconfig getifaddr "$PHYS")) blocked completely"
+  [ "$RW" -gt 0 ] || { echo "  FAIL no curl outside the tunnel was blocked"; FAIL=1; }
+else RW=; echo "  skip: no curl outside the tunnel to cut (no Wi-Fi or Ethernet address, or it is blocked already)"; fi
+case "$FULL" in
+  utun*|ipsec*|ppp*|tun*|wg*)
+    r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' https://example.com)
+    [ "$r" = 200 ] && echo "  ok through the VPN ($FULL) curl works (example.com -> 200)" || { echo "  FAIL curl through the VPN ($FULL) -> $r"; FAIL=1; } ;;
+  *)
+    RV=$(fresh 10 https://example.com)
+    echo "  no VPN carries the Internet (route via ${FULL:-?}): $RV/10 plain curls blocked completely"
+    [ "$RV" -gt 0 ] || { echo "  FAIL no curl was blocked without a VPN"; FAIL=1; } ;;
+esac
+/usr/bin/dig +short +time=2 +tries=1 example.com @1.1.1.1 | grep -q . && echo "  ok DNS (dig @1.1.1.1)" || { echo "  FAIL DNS to 1.1.1.1"; FAIL=1; }
+/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -qE '^pass|<' && { echo "  FAIL pass rule or table"; FAIL=1; } || echo "  ok anchor: ports only"
+echo '{}' > "$WORK/deny-rules.json"
+
+echo "== phase 6, servers in one country"
+GEODB="$(dirname "$DAEMON")/../Resources/Vendor/dbip-city-lite.mmdb"
+[ -r "$GEODB" ] || GEODB="${RAT_GEOIP_DB:-$ROOT/App/Vendor/dbip-city-lite.mmdb}"
+CC=; [ -r "$GEODB" ] && CC=$("$DAEMON" --country "$IP" --geoip "$GEODB" 2>/dev/null)
+OTHER_IP=$(/usr/bin/dig +short +time=3 +tries=1 A example.com | grep -E '^[0-9.]+$' | head -1)
+OTHER_CC=; [ -n "$CC" ] && [ -n "$OTHER_IP" ] && OTHER_CC=$("$DAEMON" --country "$OTHER_IP" --geoip "$GEODB" 2>/dev/null)
+country_rules() {  # country_rules <database path>: curl denied the servers in $CC
+  /usr/bin/python3 -I -c 'import json, sys; json.dump({"version": 1, "rules": [], "conditionalRules": [{"verdict": "deny", "processPath": "macOS", "executable": "/usr/bin/curl", "country": sys.argv[1]}], "names": {}, "signatures": {}, "localRanges": "", "geoDatabase": sys.argv[2]}, open(sys.argv[3] + ".tmp", "w"))' \
+    "$CC" "$1" "$WORK/deny-rules.json"
+}
+if [ -z "$CC" ] || [ "$CC" = - ]; then
+  echo "  FAIL no country for $IP (database: $GEODB)"; FAIL=1; RK=
+else
+  echo "  $HOST ($IP) is in $CC by $GEODB; example.com ($OTHER_IP) in ${OTHER_CC:-?}"
+  /usr/bin/curl -s --limit-rate 400k --resolve "$HOST:443:$IP" -o "$WORK/ka.out" "https://$HOST/files/1Gb.dat" &
+  APID=$!
+  /usr/bin/python3 - "$IP" "$HOST" "$WORK/kb.out" <<'PY' &
+import socket, ssl, sys, time
+ip, host, out = sys.argv[1:4]
+c = ssl.create_default_context().wrap_socket(socket.create_connection((ip, 443), timeout=10), server_hostname=host)
+c.sendall(f"GET /files/1Gb.dat HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+with open(out, "wb") as f:
+    while True:
+        d = c.recv(16384)
+        if not d: break
+        f.write(d); f.flush(); time.sleep(0.04)
+PY
+  BPID=$!
+  sleep 4
+  echo "  6a. curl denied the servers in $CC mid-stream"
+  country_rules "$GEODB"
+  midstream "$IP.443" $APID "$WORK/ka.out" "$WORK/kb.out" apply_rules
+  kill -9 $APID $BPID 2>/dev/null; wait $APID $BPID 2>/dev/null; APID=; BPID=
+  RK=$(fresh 10 --resolve "$HOST:443:$IP" "https://$HOST/")
+  echo "  $RK/10 fresh curls to $IP ($CC) blocked completely"
+  [ "$RK" -gt 0 ] || { echo "  FAIL no curl to a server in $CC was blocked"; FAIL=1; }
+  if [ -n "$OTHER_CC" ] && [ "$OTHER_CC" != - ] && [ "$OTHER_CC" != "$CC" ]; then
+    r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' --resolve "example.com:443:$OTHER_IP" https://example.com)
+    [ "$r" = 200 ] && echo "  ok curl to a server in $OTHER_CC still works (example.com -> 200)" || { echo "  FAIL curl to a server in $OTHER_CC -> $r (collateral)"; FAIL=1; }
+  else echo "  skip: example.com is not in another country the database knows (${OTHER_CC:-?})"; fi
+  /usr/bin/dig +short +time=2 +tries=1 example.com @1.1.1.1 | grep -q . && echo "  ok DNS (dig @1.1.1.1)" || { echo "  FAIL DNS to 1.1.1.1"; FAIL=1; }
+  /sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -qE '^pass|<' && { echo "  FAIL pass rule or table"; FAIL=1; } || echo "  ok anchor: ports only"
+
+  echo "  6b. the same rule with no readable database: nothing is cut for a country"
+  echo '{}' > "$WORK/deny-rules.json"; sleep 7   # the ports of 6a are held a few seconds (packets in flight)
+  country_rules "$WORK/no-such.mmdb" && apply_rules; sleep 0.5
+  RU=$(fresh 3 --resolve "$HOST:443:$IP" "https://$HOST/")
+  [ "$RU" = 0 ] && echo "  ok 0/3 curls blocked" || { echo "  FAIL $RU/3 curls blocked without a database"; FAIL=1; }
+fi
+echo '{}' > "$WORK/deny-rules.json"
+
+echo "== phase 7, only through a VPN in one country"
+vpn_country_rules() {  # vpn_country_rules <country>: curl only through a VPN whose server is in it
+  /usr/bin/python3 -I -c 'import json, sys; json.dump({"version": 1, "rules": [], "conditionalRules": [{"verdict": "deny", "processPath": "macOS", "executable": "/usr/bin/curl", "requireVPN": True, "vpnCountry": sys.argv[1]}], "names": {}, "signatures": {}, "localRanges": "", "geoDatabase": sys.argv[2]}, open(sys.argv[3] + ".tmp", "w"))' \
+    "$1" "$GEODB" "$WORK/deny-rules.json" && apply_rules
+}
+FULL=$(/sbin/route -n get 1.1.1.1 2>/dev/null | awk '/interface:/ { print $2 }')
+case "$FULL" in
+  utun*|ipsec*|ppp*|tun*|wg*)
+    LEADS=$("$DAEMON" --tunnels --geoip "$GEODB" 2>/dev/null | awk -v i="$FULL" '$1 == i { print $2; exit }')
+    echo "  the Internet goes through $FULL; its server is in ${LEADS:-?} ($("$DAEMON" --tunnels --geoip "$GEODB" 2>/dev/null | awk -v i="$FULL" '$1 == i { $1 = ""; $2 = ""; print; exit }' | sed 's/^ *//'))"
+    OTHER=IS; [ "$LEADS" = IS ] && OTHER=NZ
+    if [ -n "$LEADS" ] && [ "$LEADS" != - ]; then
+      vpn_country_rules "$LEADS"; sleep 1.5   # the tunnels' clients are scanned off the watch loop once
+      r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' https://example.com)
+      [ "$r" = 200 ] && echo "  ok through the VPN to $LEADS curl works (example.com -> 200)" || { echo "  FAIL curl through the VPN to $LEADS -> $r"; FAIL=1; }
+    else echo "  note: the tunnel's server cannot be placed; a rule naming any country cuts it"; fi
+    vpn_country_rules "$OTHER"; sleep 1.5
+    RVC=$(fresh 10 https://example.com)
+    echo "  rule for a VPN in $OTHER: $RVC/10 fresh curls through $FULL blocked completely"
+    [ "$RVC" -gt 0 ] || { echo "  FAIL no curl through a VPN to another country was blocked"; FAIL=1; }
+    /usr/bin/dig +short +time=2 +tries=1 example.com @1.1.1.1 | grep -q . && echo "  ok DNS (dig @1.1.1.1)" || { echo "  FAIL DNS to 1.1.1.1"; FAIL=1; }
+    /sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -qE '^pass|<' && { echo "  FAIL pass rule or table"; FAIL=1; } || echo "  ok anchor: ports only" ;;
+  *) RVC=; echo "  skip: no VPN carries the Internet (route via ${FULL:-?})" ;;
+esac
+echo '{}' > "$WORK/deny-rules.json"
+
 echo "== deny list and rules emptied: curl must work again"
 : > "$WORK/denied.txt"; sleep 7
 r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' https://example.com)
 [ "$r" = 200 ] && echo "  ok example.com -> 200" || { echo "  FAIL example.com -> $r"; FAIL=1; }
 
-[ "$FAIL" = 0 ] && echo "PASS (fresh-process leak rate: $LEAKS/$TOTAL direct, ${PL:-?}/${PT:-?} through the proxy; rules: process $((10 - ${RP:-0}))/10, connection $((10 - ${RC:-0}))/10, by name $((10 - ${RN:-0}))/10)" || echo "FAIL"
+[ "$FAIL" = 0 ] && echo "PASS (fresh-process leak rate: $LEAKS/$TOTAL direct, ${PL:-?}/${PT:-?} through the proxy; rules: process $((10 - ${RP:-0}))/10, connection $((10 - ${RC:-0}))/10, by name $((10 - ${RN:-0}))/10, outside the VPN $([ -n "${RW:-}" ] && echo "$((10 - RW))/10" || echo skipped), country $([ -n "${RK:-}" ] && echo "$((10 - RK))/10" || echo skipped), VPN country $([ -n "${RVC:-}" ] && echo "$((10 - RVC))/10" || echo skipped))" || echo "FAIL"
 exit "$FAIL"

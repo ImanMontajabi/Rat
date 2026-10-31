@@ -1,4 +1,5 @@
 import SwiftUI
+import RatFilterCore
 
 struct InspectorView: View {
     @EnvironmentObject var ledger: Ledger
@@ -137,7 +138,7 @@ struct ProcessInspector: View {
             }
             SectionHeader(title: "Rules", open: $rules)
             if rules {
-                TargetRules(app: app, target: app.ruleTarget(process: process), service: process)
+                TargetRules(app: app, target: app.ruleTarget(process: process))
                 // Rules from alerts and the Rules window yield to the process list's ✗/✓ (`RuleEngine.decide`).
                 let fromAlerts = ledger.rules.rules(for: app.identity.ruleKey).filter { $0.effectiveListLevel == nil }
                 if process == nil, ledger.rules.policy(for: app.identity.ruleKey) == .deny, fromAlerts.contains(where: { $0.verdict == .allow }) {
@@ -253,6 +254,7 @@ struct RemoteSummary: View {
 /// much it carried.
 struct RemoteInspector: View {
     @EnvironmentObject var ledger: Ledger
+    @Environment(\.openWindow) private var openWindow
     let app: AppEntry
     let remote: RemoteHost
     @State private var rules = true
@@ -279,6 +281,16 @@ struct RemoteInspector: View {
                 if let p = r.process { kv("Process", p + (r.pid.map { " (pid \($0))" } ?? "")) }
                 if let n = r.network { kv("Network", n) }
                 if let g = r.geo { kv("Location", g.place) }
+                if let cc = r.country, !r.incoming {
+                    // A rule for every server in the country, for this app: the editor opens on it.
+                    Button("Rule for Servers in \(Countries.label(cc))…") {
+                        ledger.rules.focus = RulesModel.Target(app: app.identity.ruleKey)
+                        ledger.rules.draft = ledger.rules.newCountryRule(cc, app: app.identity.ruleKey)
+                        openWindow(id: "rules")
+                    }
+                    .controlSize(.small).padding(.leading, 70)
+                    .accessibilityIdentifier("inspector-country-rule")
+                }
                 if let route = r.route { kv("Route", route.label) }
                 if let via = r.via {
                     kv("Proxy", via.label)
@@ -286,7 +298,7 @@ struct RemoteInspector: View {
                 }
             }
             SectionHeader(title: "Rules", open: $rules)
-            if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), service: r.process, incoming: r.incoming) }
+            if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), incoming: r.incoming) }
         }
     }
 
@@ -298,16 +310,14 @@ struct RemoteInspector: View {
     }
 }
 
-/// The Rules section for the selected row (an app, one of its processes, one connection): its own ✗/✓, the rules
-/// about it, and Manage Rules…, which opens the Rules window on those rules.
+/// The Rules section for the selected row (an app, one of its processes, one connection): the rules about it, and
+/// Manage Rules…, which opens the Rules window on those rules. The row's ✗/✓ are in the list only.
 struct TargetRules: View {
     @EnvironmentObject var ledger: Ledger
     @Environment(\.openWindow) private var openWindow
     let app: AppEntry
     /// Nil for a connection no rule can name (inside the local network).
     let target: RulesModel.Target?
-    /// The process, for services that work for every app (no one-click Deny).
-    var service: String? = nil
     /// A connection a peer started (no rule names it).
     var incoming = false
 
@@ -319,23 +329,11 @@ struct TargetRules: View {
         VStack(alignment: .leading, spacing: 6) {
             if let target {
                 let p = ledger.rules.rowPolicy(target)
-                let shared = app.identity.isSystem && (target.level == .app || service.flatMap(SharedServices.note(for:)) != nil)
-                HStack {
-                    Text(subject.prefix(1).uppercased() + subject.dropFirst()).font(.callout)
-                    Spacer()
-                    if shared && p.own == nil {
-                        Image(systemName: "lock.fill").foregroundStyle(.secondary)
-                            .help("Works for every app: denying it would cut them all. Use a rule for one service in the Rules window.")
-                    } else {
-                        PolicyToggle(policy: p.own, inherited: p.inherited, subject: subject) { ledger.setPolicy($0, for: target) }
-                    }
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("inspector-policy")
                 if p.own == nil, let inherited = p.inherited {
-                    Text("Follows the \(target.level == .connection ? "process" : "app")’s \(inherited == .deny ? "Deny" : "Allow"); ✗ or ✓ here makes an exception.")
+                    Text("Follows the \(target.level == .connection ? "process" : "app")’s \(inherited == .deny ? "Deny" : "Allow"); ✗ or ✓ on its row in the list makes an exception.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
+                if target.level != .connection, !(target.level == .app && app.identity.isSystem) { VPNOnlySwitch(app: app, target: target) }
                 let signing = app.identity.signing()
                 let list = ledger.rules.rules(for: target, signing: (signing.identifier, signing.team))
                 let decides = ledger.rules.decidingRule(for: target, signing: (signing.identifier, signing.team))?.id
@@ -344,7 +342,7 @@ struct TargetRules: View {
                     ForEach(list.prefix(8)) { r in
                         HStack(spacing: 6) {
                             Image(systemName: r.verdict == .deny ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(r.verdict == .deny ? .red : .green)
-                            Text(r.summary).lineLimit(1).truncationMode(.middle).opacity(r.enabled ? 1 : 0.5)
+                            Text(r.summary(country: Countries.label)).lineLimit(1).truncationMode(.middle).opacity(r.enabled ? 1 : 0.5)
                             if !r.approved { Circle().fill(.blue).frame(width: 7, height: 7) }
                             if r.id == decides { Text("decides").font(.caption2).foregroundStyle(.secondary) }
                         }
@@ -364,6 +362,83 @@ struct TargetRules: View {
                 .accessibilityIdentifier("manage-rules")
         }
         .padding(.leading, 6)
+    }
+}
+
+/// "Only through a VPN" for an app or one of its processes: a deny rule for every connection that leaves outside a
+/// VPN tunnel (`Rule.requireVPN`), so the app works through the VPN and is cut when the VPN drops.
+struct VPNOnlySwitch: View {
+    @EnvironmentObject var ledger: Ledger
+    let app: AppEntry
+    let target: RulesModel.Target
+
+    /// The VPN client itself: its connection to the VPN server leaves outside the tunnel, so the switch would cut it.
+    private var carriesVPN: Bool {
+        app.remotes.contains { if case .vpnServer = $0.route { return true }; return false }
+    }
+
+    var body: some View {
+        let inherited = ledger.rules.vpnOnlyInherited(target)
+        let own = ledger.rules.vpnOnly(target)
+        let country = ledger.rules.vpnCountry(target)
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle("Only through a VPN", isOn: Binding(get: { inherited || own },
+                                                     set: { ledger.setVPNOnly($0, for: target) }))
+                .toggleStyle(.switch).controlSize(.small)
+                .disabled(inherited || (carriesVPN && !own))
+                .accessibilityIdentifier("inspector-vpn-only")
+            if own {
+                VPNCountryPicker(selection: Binding(get: { country ?? "" }, set: { ledger.setVPNCountry($0.isEmpty ? nil : $0, for: target) }))
+                    .controlSize(.small)
+                    .accessibilityIdentifier("inspector-vpn-country")
+            } else if inherited {
+                Text(VPNCountryNote.title(country)).font(.caption).accessibilityIdentifier("inspector-vpn-country")
+            }
+            Text(carriesVPN ? "This app carries a VPN: its connection to the VPN server leaves outside the tunnel, so this would cut it."
+                 : inherited ? "Set on the app, so it covers this process too."
+                 : "Cuts every connection that leaves outside a VPN tunnel. Rat cuts a connection within milliseconds of it opening, not before: its first packets can still leave.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if (own || inherited) && country != nil {
+                Text(VPNCountryNote.text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(VPNCountryNote.now(ledger.tunnelServers, up: Set(ledger.routes.tunnelAddresses.values), names: ledger.routes.tunnelNames))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("inspector-vpn-servers")
+            }
+        }
+    }
+}
+
+/// "Any VPN", then every country with its flag: where the VPN's server must be (`Rule.vpnCountry`).
+struct VPNCountryPicker: View {
+    @Binding var selection: String
+    var body: some View {
+        Picker("VPN server in", selection: $selection) {
+            Text("Any country").tag("")
+            ForEach(Countries.all, id: \.code) { Text(Countries.label($0.code)).tag($0.code) }
+        }
+    }
+}
+
+/// The words for a VPN country, shared by the inspector and the Rules window.
+enum VPNCountryNote {
+    /// "Only through a VPN in 🇩🇪 Germany".
+    static func title(_ country: String?) -> String { "Only through a VPN" + (country.map { " in \(Countries.label($0))" } ?? "") }
+
+    static let text = "The VPN's country is read offline from the address of its server (the VPN app's own connection, or the route it keeps to its server, in the bundled database), so a multi-hop VPN counts as its entry server's country. A connection through a VPN whose server is elsewhere, or cannot be placed, is cut too."
+
+    /// Where the tunnels that are up (`up`, and every one in `servers`) lead now: "Now: Windscribe → 🇳🇱 Netherlands". A
+    /// tunnel with no entry is still being looked at (the helper has not scanned it yet).
+    static func now(_ servers: [String: TunnelServer], up: Set<String> = [], names: [String: String]) -> String {
+        let tunnels = up.union(servers.keys)
+        guard !tunnels.isEmpty else { return "No VPN is up now." }
+        return "Now: " + tunnels.sorted().map { iface in
+            let name = names[iface] ?? iface
+            switch servers[iface] {
+            case let .country(c)?: return "\(name) → \(Countries.label(c))"
+            case .unknown?: return "\(name) → server not placed"
+            case nil: return "\(name) → finding its server…"
+            }
+        }.joined(separator: ", ")
     }
 }
 
