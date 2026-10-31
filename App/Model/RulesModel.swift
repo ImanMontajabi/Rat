@@ -174,6 +174,8 @@ final class RulesModel: ObservableObject {
         var address: String
         var port: Int
         var proto: Connection.Proto
+        /// The server's country, for the rules about a connection (never part of the ✗/✓'s own rule).
+        var country: String? = nil
         /// The name a rule keeps: none for a raw address, or for a name that is an address.
         var name: String? { host.flatMap { $0 == address || isIPLiteral($0) ? nil : $0 } }
     }
@@ -202,6 +204,48 @@ final class RulesModel: ObservableObject {
 
     func rules(for appID: String) -> [Rule] {
         ruleSet.rules.filter { $0.processPath == appID }
+    }
+
+    // MARK: only through a VPN (the inspector's switch)
+
+    /// The "Only through a VPN" rule of an app, or of one of its processes: a deny for every connection that leaves
+    /// outside a VPN tunnel (`Rule.requireVPN`), and for nothing else.
+    private func isVPNOnlyRule(_ r: Rule, _ t: Target) -> Bool {
+        r.requireVPN && r.verdict == .deny && r.processPath == t.app && r.signingID == nil && r.teamID == nil
+            && r.remoteDomain == nil && r.remoteHost == nil && r.remoteAddress == nil && r.ports == nil && r.proto == nil && r.country == nil
+            && (t.executable.map { exe in r.executable.map { ProgramPath.same($0, exe) } == true } ?? (r.executable == nil))
+    }
+
+    /// Whether an app or process row (not a connection) has its own "Only through a VPN".
+    func vpnOnly(_ t: Target) -> Bool {
+        t.endpoint == nil && ruleSet.rules.contains { isVPNOnlyRule($0, t) && $0.enabled && activeHere($0) }
+    }
+
+    /// A process follows its app's "Only through a VPN".
+    func vpnOnlyInherited(_ t: Target) -> Bool { t.level == .process && vpnOnly(Target(app: t.app)) }
+
+    /// The VPN country a row's "Only through a VPN" names (`Rule.vpnCountry`): its own, else (a process) its app's.
+    func vpnCountry(_ t: Target) -> String? {
+        let own = ruleSet.rules.first { isVPNOnlyRule($0, t) && $0.enabled && activeHere($0) }
+        return own.map(\.vpnCountry) ?? (t.level == .process ? vpnCountry(Target(app: t.app)) : nil)
+    }
+
+    /// Names the VPN's country on the row's own "Only through a VPN" (nil for any VPN); nothing without one.
+    func setVPNCountry(_ country: String?, for t: Target) {
+        guard t.endpoint == nil, let i = ruleSet.rules.firstIndex(where: { isVPNOnlyRule($0, t) && $0.enabled && activeHere($0) }) else { return }
+        ruleSet.rules[i].vpnCountry = Rule.countryCode(country)
+    }
+
+    /// `country` names the VPN's country (`Rule.vpnCountry`) for a rule switched on.
+    func setVPNOnly(_ on: Bool, for t: Target, country: String? = nil) {
+        guard t.endpoint == nil else { return }
+        ruleSet.rules.removeAll { isVPNOnlyRule($0, t) && activeHere($0) }
+        guard on else { return }
+        var r = Rule(verdict: .deny, processPath: t.app, executable: t.executable, requireVPN: true, vpnCountry: country)
+        r.approved = !ruleSet.markNewRulesAsUnapproved
+        r.profileID = ruleSet.activeProfileID
+        r.note = "Only through a VPN"
+        ruleSet.rules.append(r)
     }
 
     // MARK: rows of the process list (app, process, connection)
@@ -253,7 +297,7 @@ final class RulesModel: ObservableObject {
     private func connection(_ t: Target, signing: (String?, String?)) -> Connection? {
         guard let exe = t.executable, let e = t.endpoint else { return nil }
         return Connection(process: ProcessIdentity(signingID: signing.0, teamID: signing.1, path: t.app), executable: exe,
-                          host: e.name, address: e.address, port: e.port, proto: e.proto)
+                          host: e.name, address: e.address, port: e.port, proto: e.proto, country: e.country)
     }
 
     /// The rules about a row, disabled ones included: for an app, those naming it or a program inside it; for a
@@ -272,7 +316,8 @@ final class RulesModel: ObservableObject {
             }
         case .connection:
             guard let c = connection(t, signing: signing) else { return [] }
-            return here.filter { var r = $0; r.enabled = true; return r.matches(c) }
+            // "Only through a VPN" is listed for every connection it can cut, through the VPN or not.
+            return here.filter { var r = $0; r.enabled = true; r.requireVPN = false; return r.matches(c) }
         }
     }
 
@@ -296,6 +341,14 @@ final class RulesModel: ObservableObject {
 
     /// Set by the inspector's Manage Rules…: the Rules window opens on this row's rules.
     @Published var focus: Target?
+    /// Set by a country's rule button (the inspector, a country group): the Rules window opens its editor on it.
+    @Published var draft: Rule?
+
+    /// A rule for the servers in one country, for one app or (with none) any process: a deny to start from, which
+    /// the editor can turn into an allow.
+    func newCountryRule(_ country: String, app: String?) -> Rule {
+        Rule(verdict: .deny, processPath: app, country: country, profileID: ruleSet.activeProfileID)
+    }
 
     // MARK: alert answers
 

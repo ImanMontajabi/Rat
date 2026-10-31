@@ -6,6 +6,33 @@ DMG checksums, are on the [Releases](https://github.com/ImanMontajabi/Rat/releas
 
 <!-- releases -->
 
+## [1.5.0] - 2026-10-28
+
+### Added
+
+- Connections a peer started (to a port this Mac listens on) are rows of their own, tagged ↓ Incoming, without ✗/✓ and never asked about in Alert Mode; long-lived connections that mostly receive (a download, a server push, a media stream) are tagged ↓ stream.
+- The helper now applies rules for one process of an app and for one connection itself, every few milliseconds, as it does for an app denied as a whole: such a connection is cut while it is being opened instead of after Rat's next pass, when it is already open. Rat hands the helper its rules and the names it found for servers in `deny-rules.json`; only the local ports of matching sockets are blocked, never a server's address. Update Helper in Settings > Security to use it.
+- Places show their country's flag (connection rows and their tooltips, the inspector, Top Countries, map labels), and a Hide Local chip, remembered between launches, leaves out loopback, LAN, link-local, Bonjour and mDNS connections and the apps and processes that have only those, in the list, the map and the Summary.
+- The map shows traffic moving: purple pulses run out from This Mac for what it sends, blue ones run in for what it receives, both on a two-way line, at 24–30 frames a second and only while the window is seen and something moves (Reduce Motion stops them).
+- Rules can be for one process of an app (a helper, an updater, the WebKit process working for Safari) and for one connection of a process (its server, port and protocol). The process list's Deny and Allow decide the narrowest first: a connection's, then a process's, then the app's, over the app's rules from alerts.
+- The process list has ✗/✓ for each process and each connection (a TCP and a UDP connection to one server are separate rows), showing what a row follows from its process or app; the inspector lists the rules about the selected app, process or connection and sets its ✗/✓; Manage Rules… opens the Rules window on that row (new Apps / Processes section) and New Rule starts from it.
+
+### Fixed
+
+- Rows in the list keep their numbers whole: a connection's port and size and a process's connection count and size are never cut or wrapped ("TCP…", "1,7…", "430 / bytes"). With little room the tags shrink to their symbols, the port drops its service name and a process drops its pid, and only then is a long name cut in the middle. The macOS inspector writes pids without a thousands separator ("pid 2086", not "pid 2.086").
+- A ✗ on a process or connection of Safari or another program macOS loads from a cryptex (WebKit's networking process, Safari's helpers) now blocks it: Rat took some paths from `ps` and the helper from the kernel, which name those programs differently, so the rule never matched. Rat now names every process by the kernel's path and both compare paths in one spelling; rules saved before still match. A ✗ or ✓ in the list now takes effect at once instead of on the next 1.5 s pass.
+- A deny made while nothing else was denied takes effect at once: the helper now wakes as soon as Rat hands it the change, instead of up to a quarter of a second later, so a download already under way is cut before more of it arrives.
+- When an app opens several connections to the same server and port, a rule that denies them now cuts all of them, not only the first.
+- The helper no longer stops enforcing rules after running for a while: every pfctl run left a file open until it hit the system's limit, after which pf could not be checked, repaired or updated.
+- The helper uses much less CPU while a ✗ is set on one process or connection (14.5 % → 3.6 % with a ✗ on Safari's SearchHelper): it reads only the processes the rule can match, not every process of the app, and lists the Mac's processes only when one has started. While a denied program is not running, the helper now checks for it every 20 ms instead of every 0.25 s.
+- The map no longer redraws on every pass when only traffic numbers change, address caches stay bounded on a Mac that stays up, and the helper no longer keeps a core busy for two seconds when it starts or when an app is denied or allowed.
+- A rule for one system service in the macOS row (for example /usr/sbin/mDNSResponder or /usr/bin/curl), or for one helper's path, now matches that service; before, only the app's path was compared and such rules never applied.
+
+### Development
+
+- A weekly security audit (Mondays, on demand, and on PRs that change dependencies or workflows) checks the pinned GitHub Actions against the GitHub Advisory Database and package lockfiles with osv-scanner, and opens a security issue when something is found. CLAUDE.md now requires tests, UI tests, live verification and a CPU and memory measurement (scripts/measure-resources.sh) for every change.
+- scripts/verify-blocking.sh's mid-stream checks measure what was already in curl's socket buffer at the deny (macOS grows it to 4 MB, and a rate-limited curl reads it for seconds after the cut) and the pf states of its port, so buffered bytes no longer count as a leak; a buffer that cannot be read fails the check.
+
 ## [1.4.0] - 2026-10-26
 
 ### Changed

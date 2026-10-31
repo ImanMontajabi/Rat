@@ -24,6 +24,17 @@ final class GeoTests: XCTestCase {
         XCTAssertNil(g.locate("127.0.0.1"))
     }
 
+    /// What country rules match (#45): the record's ISO code in upper case, the same as `locate` gives, and none for
+    /// what the database does not place.
+    func testCountryCodes() throws {
+        let g = try db()
+        XCTAssertEqual(g.countryCode("8.8.8.8"), "US")
+        for a in ["8.8.8.8", "1.1.1.1", "46.4.0.1", "194.109.6.66", "2001:4860:4860::8888"] {
+            XCTAssertEqual(g.countryCode(a), g.locate(a)?.countryCode.uppercased(), a)
+        }
+        for a in ["192.168.1.1", "127.0.0.1", "::1", "fe80::1", "not an ip", ""] { XCTAssertNil(g.countryCode(a), a) }
+    }
+
     func testRejectsGarbageFile() {
         XCTAssertThrowsError(try MMDB(data: Data("hello".utf8)))
     }

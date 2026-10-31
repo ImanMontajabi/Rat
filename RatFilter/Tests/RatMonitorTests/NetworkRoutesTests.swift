@@ -85,4 +85,28 @@ final class NetworkRoutesTests: XCTestCase {
         XCTAssertNil(NetworkRoutes.localProxyProgram(inPath: "/usr/local/bin/node"), "a dev server is no proxy")
         XCTAssertNil(NetworkRoutes.localProxyProgram(inPath: "/usr/bin/sshd-keygen-wrapper"))
     }
+
+    /// Whether a socket leaves outside a VPN tunnel ("Only through a VPN", #45).
+    func testLeavesOutsideTunnel() {
+        let tunnels = ["100.127.80.66": "utun420", "fd00::66": "utun420"]
+        let lan: (String) -> Bool = { $0.hasPrefix("192.168.") || $0.hasPrefix("127.") || $0 == "::1" }
+        let routes: [String: String] = ["203.0.113.8": "utun420", "198.51.100.3": "en0", "": "utun420"]
+        func off(_ local: String, _ remote: String, tunnels: [String: String] = tunnels, routes: [String: String] = routes) -> Bool {
+            NetworkRoutes.leavesOutsideTunnel(localAddress: local, remoteAddress: remote, tunnels: tunnels, isLocal: lan) { routes[$0 ?? ""] }
+        }
+        XCTAssertFalse(off("100.127.80.66", "142.251.20.113"), "bound to the tunnel")
+        XCTAssertFalse(off("fd00::66", "2001:db8::1"))
+        XCTAssertTrue(off("192.168.178.39", "203.0.113.8"), "opened on Wi-Fi before the VPN: stays on Wi-Fi")
+        XCTAssertFalse(off("", "203.0.113.8"), "no address of its own: the routing table sends it through the tunnel")
+        XCTAssertTrue(off("", "198.51.100.3"), "routed outside the tunnel (split tunnel)")
+        XCTAssertTrue(off("", "198.51.100.99"), "no route")
+        XCTAssertFalse(off("", ""), "unconnected, the Internet's route is the tunnel")
+        XCTAssertTrue(off("", "", routes: [:]), "unconnected, the Internet's route is Wi-Fi")
+        XCTAssertFalse(off("192.168.178.39", "192.168.178.1"), "the local network never needs a VPN")
+        XCTAssertFalse(off("127.0.0.1", "127.0.0.1"))
+        XCTAssertFalse(off("127.0.0.1", ""), "bound to loopback, not connected")
+        XCTAssertTrue(off("192.168.178.39", "203.0.113.8", tunnels: [:]), "no VPN up")
+        XCTAssertTrue(off("100.127.80.66", "203.0.113.8", tunnels: [:]), "the tunnel's address is gone: the VPN dropped")
+        XCTAssertTrue(off("", "203.0.113.8", tunnels: [:]), "a stale route without a tunnel")
+    }
 }

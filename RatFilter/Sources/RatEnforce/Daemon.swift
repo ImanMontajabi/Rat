@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import RatFilterCore
+import RatGeo
 import RatMonitor
 
 /// Runs a command; returns its exit status. Injectable so tests never touch the firewall.
@@ -86,16 +87,25 @@ public struct EnforcerStatus: Codable, Equatable {
     /// SHA-256 of the daemon's executable when it started, so Rat can tell that the running helper is not the one in
     /// its bundle (nil from daemons before 1.4.0).
     public var executableSHA256: String?
+    /// Whether the daemon could open the City database its country rules need (nil while no rule names a country).
+    public var countryLookup: Bool?
+    /// While a rule names a VPN's country (`Rule.vpnCountry`): tunnel interface → the servers its client carries it
+    /// to (`NetworkRoutes.carrierServers`), and → their country ("" when it is not known). Rat shows and judges by
+    /// the same.
+    public var tunnelServers: [String: [String]]?
+    public var tunnelCountries: [String: String]?
 
     public init(pid: Int32, updated: Date, pfEnabled: Bool, anchorHooked: Bool, deniedApps: [String: App], blockedPorts: Int,
                 ruleDenied: [String: App]? = nil, denyRules: Int? = nil, blockedLoopbackPorts: Int? = nil, proxyCapture: Bool? = nil, tunnels: [String: String]? = nil,
                 pfIssue: String? = nil, repairs: Int? = nil, lastRepair: String? = nil, lastRepairAt: Date? = nil,
-                executableSHA256: String? = nil) {
+                executableSHA256: String? = nil, countryLookup: Bool? = nil, tunnelServers: [String: [String]]? = nil,
+                tunnelCountries: [String: String]? = nil) {
         self.pid = pid; self.updated = updated; self.pfEnabled = pfEnabled; self.anchorHooked = anchorHooked
         self.deniedApps = deniedApps; self.blockedPorts = blockedPorts; self.ruleDenied = ruleDenied; self.denyRules = denyRules
         self.blockedLoopbackPorts = blockedLoopbackPorts; self.proxyCapture = proxyCapture; self.tunnels = tunnels
         self.pfIssue = pfIssue; self.repairs = repairs; self.lastRepair = lastRepair; self.lastRepairAt = lastRepairAt
-        self.executableSHA256 = executableSHA256
+        self.executableSHA256 = executableSHA256; self.countryLookup = countryLookup
+        self.tunnelServers = tunnelServers; self.tunnelCountries = tunnelCountries
     }
 }
 
@@ -130,12 +140,19 @@ public final class EnforcerDaemon {
         /// Pass interval while something is denied but none of it runs: how soon a denied program that starts is
         /// seen (about 3 % CPU at 20 ms, against 8 % at 3 ms).
         public var standbyInterval: TimeInterval = 0.02
+        /// Pass interval with nothing to enforce when `FileWake` cannot watch the folders of Rat's files.
         public var idleInterval: TimeInterval = 0.25
+        /// Pass interval with nothing to enforce while `FileWake` watches those folders: a change to a file ends the
+        /// sleep at once, so a deny is not later for it, and the sleep only paces the status file and pf's check.
+        public var watchedIdleInterval: TimeInterval = 1
         /// Ports stay blocked this long after their socket disappears, to cover packets still in flight.
         public var portHold: TimeInterval = 5
         /// How often pf is checked to still run and evaluate our anchor (a VPN client may stop it or replace the
         /// main ruleset) and put right (`PFHeal`).
         public var watchdogInterval: TimeInterval = 2
+        /// The same check while nothing is enforced (nothing denied, no deny rule, no port in the anchor): pf off then
+        /// blocks nothing, and the first deny brings the check forward to the pass after its ports are loaded.
+        public var idleWatchdogInterval: TimeInterval = 10
         /// Rat touches this file (in the user's data folder) for Settings > Security's Repair Firewall; only its
         /// modification time is read. Optional.
         public var repairFile: String?
@@ -165,6 +182,19 @@ public final class EnforcerDaemon {
     private var socketVerdicts: [SocketKey: Bool] = [:]
     struct SocketKey: Hashable { var pid: pid_t; var proto: UInt8; var localPort: Int; var remotePort: Int; var remote: String }
     private var portsByRuleApp: [String: (processes: Int, ports: Set<Int>)] = [:]
+    /// The tunnels' addresses and the routes read for them, while a rule asks whether a socket leaves outside a VPN
+    /// (`SocketJudge.needsRoute`): read again every `vpnRefresh`, so a VPN that drops is seen within a fifth of a second.
+    private var vpn = VPNState()
+    /// With a VPN country to check (`SocketJudge.needsVPNCountry`), also each tunnel's carrier servers and where they
+    /// are (nil without a database: nothing is cut for a VPN's country then).
+    struct VPNState {
+        var at = Date.distantPast; var tunnels: [String: String] = [:]; var routes: [String: String?] = [:]
+        var servers: [String: [String]] = [:]; var countries: [String: TunnelServer] = [:]
+    }
+    static let vpnRefresh: TimeInterval = 0.2
+    /// The City database for rules with a country (`DaemonRules.geoDatabase`, opened by `GeoFile`), kept while the
+    /// rules name the same file (same path, device and inode: an updated Rat.app puts a new file at the same path).
+    private var geo: (file: GeoFile.Identity, db: GeoIP?)?
     /// pid -> the denied entry it belongs to ("" = not denied).
     private var verdictCache: [pid_t: String] = [:]
     private var firstSeen: [pid_t: Date] = [:]
@@ -202,8 +232,14 @@ public final class EnforcerDaemon {
     private var repairStamp: Date?
     private var executableSHA256: String?
     private var lastTunnelScan = Date.distantPast
+    private var watchdogIdle = true
     private let tunnelLock = NSLock()
     private var tunnels: [String: String] = [:]
+    /// The processes that opened the tunnels, and their relays (5 s scan, under `tunnelLock`), and the tunnels that
+    /// were up when a scan with relays began: a tunnel no such scan saw yet has no known client, which is not the
+    /// same as none (blocking its sockets' ports would reset good connections).
+    private var tunnelProcesses: [String: NetworkRoutes.TunnelOwner] = [:]
+    private var scannedTunnels = Set<String>()
     public private(set) var reloads = 0
     private let trace = !(ProcessInfo.processInfo.environment["RAT_TRACE"] ?? "").isEmpty
     private var traceTicks = 0, traceTime = 0.0
@@ -215,6 +251,8 @@ public final class EnforcerDaemon {
     }
 
     public func start() {
+        // 1.0.3's address list goes first, before any pfctl run (the watchdog's can take a second on a cold start).
+        if let legacy = settings.legacyBlocklistFile { try? FileManager.default.removeItem(atPath: legacy) }
         // Read once: an update replaces the file on disk while this process keeps running the old code.
         executableSHA256 = FileDigest.sha256(atPath: ConnectionSampler.path(of: getpid()))
         // A repair asked for before this start is not replayed.
@@ -225,7 +263,6 @@ public final class EnforcerDaemon {
         if token == nil, pfEnabled { enablePF() }
         // Start clean: whatever an earlier version left in the anchor (address tables, old ports) is removed.
         _ = run("/sbin/pfctl", ["-a", settings.anchor, "-F", "all"], nil)
-        if let legacy = settings.legacyBlocklistFile { try? FileManager.default.removeItem(atPath: legacy) }
         loadedPorts = []
         loadedLoopbackPorts = []
         loaded = true
@@ -258,8 +295,14 @@ public final class EnforcerDaemon {
         while true {
             let busy = autoreleasepool { tick() }
             if trace, busy, watching { traceTicks += 1; traceTime += lastTickDuration; if traceTicks == 400 { FileHandle.standardError.write(Data("avg tick \(Int(traceTime / 400 * 1e6)) us, reloads \(reloads)\n".utf8)); traceTicks = 0; traceTime = 0 } }
-            if wake.wait(!busy ? settings.idleInterval : watching ? settings.interval : settings.standbyInterval) { filesChanged() }
+            if wake.wait(busy ? watching ? settings.interval : settings.standbyInterval : idleSleep(wake)) { filesChanged() }
         }
+    }
+
+    /// The sleep with nothing to enforce: `watchedIdleInterval` while `wake` watches every folder of Rat's files
+    /// (a deny then ends it at once), `idleInterval` otherwise.
+    func idleSleep(_ wake: FileWake) -> TimeInterval {
+        wake.watchesFolders ? settings.watchedIdleInterval : settings.idleInterval
     }
 
     /// A file Rat hands over changed: the next pass reads it, whenever the last check was.
@@ -267,7 +310,7 @@ public final class EnforcerDaemon {
 
     /// One pass. Returns whether there is anything to enforce (a denied app or a deny rule for a process); `watching`
     /// says whether one of its processes runs. The loop then passes every `interval`, every `standbyInterval` while
-    /// none runs, and every `idleInterval` with nothing to enforce.
+    /// none runs, and every `watchedIdleInterval` (`idleInterval` without `FileWake`) with nothing to enforce.
     @discardableResult
     public func tick(now: Date = Date()) -> Bool {
         let began = Date()
@@ -349,7 +392,7 @@ public final class EnforcerDaemon {
             ruledList = watched.compactMap { pid, w in w.map { (pid, $0) } }
         }
         let ruled = judge == nil ? [] : ruledList
-        // Nothing it names runs: the next pass comes after `standbyInterval`, not the 0.25 s idle sleep, so a denied
+        // Nothing it names runs: the next pass comes after `standbyInterval`, not the idle sleep, so a denied
         // program that starts is cut within about 20 ms. A process is first seen before its `exec`, as its parent's
         // program, so the passes that follow are what notice it became the denied one.
         watching = !deniedPIDs.isEmpty || !ruled.isEmpty
@@ -384,6 +427,7 @@ public final class EnforcerDaemon {
         var verdicts: [SocketKey: Bool] = [:]
         var byRuleApp: [String: (processes: Int, ports: Set<Int>)] = [:]
         if let judge {
+            if judge.needsRoute { refreshVPN(now: now) }
             for (pid, w) in ruled {
                 var cut = Set<Int>()
                 for fd in ConnectionSampler.socketFDs(of: pid) {
@@ -391,7 +435,11 @@ public final class EnforcerDaemon {
                           !ProxyWatch.isLoopback(c.remoteAddress) else { continue }
                     let key = SocketKey(pid: pid, proto: c.proto == .udp ? 17 : 6, localPort: c.localPort, remotePort: c.remotePort, remote: c.remoteAddress)
                     let deny = socketVerdicts[key] ?? judge.denies(app: w.app, executable: w.executable, address: c.remoteAddress,
-                                                                    port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp)
+                                                                    port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
+                                                                    offVPN: judge.needsRoute ? leavesOutsideTunnel(c, judge) : nil,
+                                                                    country: judge.needsCountry ? geo?.db?.countryCode(c.remoteAddress) : nil,
+                                                                    countryKnown: geo?.db != nil,
+                                                                    tunnelServer: judge.needsVPNCountry ? tunnelServer(c, judge) : nil)
                     verdicts[key] = deny
                     if deny { cut.insert(c.localPort) }
                 }
@@ -480,16 +528,33 @@ public final class EnforcerDaemon {
 
     /// pf must keep running and evaluating our anchor, or the rules do nothing. Another program (a VPN client)
     /// may stop pf or replace its main ruleset at any time; `PFHeal` decides what may be put right.
+    ///
+    /// Two `pfctl` runs a check (5-65 ms): every `watchdogInterval` while something is enforced, every
+    /// `idleWatchdogInterval` while nothing is. The pass that starts enforcing loads its ports first (a check before
+    /// them made the first deny that much later) and the next pass checks pf.
     private func watchdog(now: Date, force: Bool = false) {
-        guard force || now.timeIntervalSince(lastWatchdog) >= settings.watchdogInterval else { return }
+        scanTunnels(now: now)
+        let idle = denied.isEmpty && judge == nil && filePorts.isEmpty && fileLoopbackPorts.isEmpty
+            && loadedPorts.isEmpty && loadedLoopbackPorts.isEmpty
+        defer { watchdogIdle = idle }
+        // (A daemon that never checked pf, not `start`ed, checks it first.)
+        if watchdogIdle, !idle, !force, lastWatchdog != .distantPast { lastWatchdog = .distantPast; return }
+        guard force || now.timeIntervalSince(lastWatchdog) >= (idle ? settings.idleWatchdogInterval : settings.watchdogInterval) else { return }
         lastWatchdog = now
         heal(now: now, force: force)
-        // Which process opened each VPN tunnel: a scan of every socket, so it runs off the watch loop.
+    }
+
+    /// Which process opened each VPN tunnel (published for Rat's VPN names, every 5 s whatever is enforced): a scan of
+    /// every socket, so it runs off the watch loop.
+    /// With a VPN country to check, also the loopback relays the clients send their traffic through.
+    private func scanTunnels(now: Date) {
         if now.timeIntervalSince(lastTunnelScan) >= 5 {
             lastTunnelScan = now
+            let relays = judge?.needsVPNCountry == true
             background.async { [self] in
-                let t = NetworkRoutes.tunnelOwners()
-                tunnelLock.withLock { tunnels = t }
+                let up = Set(NetworkRoutes.tunnelAddresses().values)
+                let t = NetworkRoutes.tunnelOwnerProcesses(relays: relays)
+                tunnelLock.withLock { tunnels = t.mapValues(\.path); tunnelProcesses = t; scannedTunnels = relays ? up : [] }
             }
         }
     }
@@ -510,7 +575,7 @@ public final class EnforcerDaemon {
             verifyAnchor(now: now)
             return
         }
-        // Another program that keeps undoing the repair is not fought every 2 s: after five repairs in a minute,
+        // Another program that keeps undoing the repair is not fought every check: after five repairs in a minute,
         // once every 30 s.
         recentRepairs = recentRepairs.filter { now.timeIntervalSince($0) < 60 }
         if !force, recentRepairs.count >= 5, let last = recentRepairs.last, now.timeIntervalSince(last) < 30 {
@@ -588,7 +653,10 @@ public final class EnforcerDaemon {
                                     proxyCapture: settings.proxiedFile == nil ? nil : proxyWatch?.capturing ?? false,
                                     tunnels: tunnelLock.withLock { tunnels },
                                     pfIssue: pfIssue, repairs: repairs, lastRepair: lastRepair, lastRepairAt: lastRepairAt,
-                                    executableSHA256: executableSHA256)
+                                    executableSHA256: executableSHA256, countryLookup: judge?.needsGeo == true ? geo?.db != nil : nil,
+                                    tunnelServers: judge?.needsVPNCountry == true ? vpn.servers : nil,
+                                    tunnelCountries: judge?.needsVPNCountry == true && geo?.db != nil
+                                        ? vpn.countries.mapValues { if case .country(let c) = $0 { return c }; return "" } : nil)
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .secondsSince1970
         guard let data = try? enc.encode(status) else { return }
@@ -599,6 +667,53 @@ public final class EnforcerDaemon {
     }
 
     private var lastFileCheck = Date.distantPast
+
+    /// Reads the tunnels' addresses again every `vpnRefresh`. A change (a VPN came up, dropped or moved) judges
+    /// every socket again: whether one leaves outside a tunnel is kept with its verdict.
+    private func refreshVPN(now: Date) {
+        guard now.timeIntervalSince(vpn.at) >= Self.vpnRefresh || now < vpn.at else { return }
+        let tunnels = NetworkRoutes.tunnelAddresses()
+        var next = VPNState(at: now, tunnels: tunnels)
+        if let judge, judge.needsVPNCountry {
+            // A tunnel that just came up has no known client until the next scan: ask for it now.
+            if Set(tunnels.values) != Set(vpn.tunnels.values) { lastTunnelScan = .distantPast }
+            let (owners, scanned) = tunnelLock.withLock { (tunnelProcesses, scannedTunnels) }
+            for iface in Set(tunnels.values) where scanned.contains(iface) {
+                let o = owners[iface]
+                let servers = o.map { o in
+                    NetworkRoutes.carrierServers(owner: ConnectionSampler.connections(of: o.pid), relays: o.relays.flatMap(ConnectionSampler.connections(of:)),
+                                                 tunnels: tunnels, isLocal: judge.isLocal,
+                                                 pinned: { NetworkRoutes.pinnedServers(for: iface, isLocal: judge.isLocal) })
+                } ?? []
+                next.servers[iface] = servers
+                if let db = geo?.db { next.countries[iface] = NetworkRoutes.serverCountry(servers, lookup: db.countryCode).map(TunnelServer.country) ?? .unknown }
+            }
+        }
+        if tunnels != vpn.tunnels || next.countries != vpn.countries { socketVerdicts.removeAll() }
+        vpn = next
+    }
+
+    /// The interface the routing table sends a server to (nil asks for the Internet's), kept until the next refresh.
+    private func cachedRoute(_ remote: String?) -> String? {
+        let key = remote ?? ""
+        if let known = vpn.routes[key] { return known }
+        let iface = remote.map(NetworkRoutes.routeInterface(to:)) ?? NetworkRoutes.internetTunnel()
+        vpn.routes[key] = .some(iface)
+        return iface
+    }
+
+    private func leavesOutsideTunnel(_ c: ObservedConnection, _ judge: SocketJudge) -> Bool {
+        NetworkRoutes.leavesOutsideTunnel(localAddress: c.localAddress, remoteAddress: c.remoteAddress, tunnels: vpn.tunnels,
+                                          isLocal: judge.isLocal, route: cachedRoute)
+    }
+
+    /// Where the tunnel a socket goes through leads: nil outside every tunnel, without a database to look in, or for a
+    /// tunnel not scanned yet (judged again once it is: the countries change).
+    private func tunnelServer(_ c: ObservedConnection, _ judge: SocketJudge) -> TunnelServer? {
+        guard geo?.db != nil, let iface = NetworkRoutes.tunnelInterface(localAddress: c.localAddress, remoteAddress: c.remoteAddress, tunnels: vpn.tunnels,
+                                                                        isLocal: judge.isLocal, route: cachedRoute) else { return nil }
+        return vpn.countries[iface]
+    }
 
     /// The file is written by Rat as the user, so it is read as untrusted: at most `maxRulesFile` bytes, and one that
     /// does not parse counts as no rules (the deny list and Rat's ports still apply).
@@ -613,9 +728,20 @@ public final class EnforcerDaemon {
         let j = d.flatMap { $0.hasProcessDenies ? SocketJudge($0) : nil }
         // Which processes are read depends only on what deny rules name; new names only judge sockets again.
         if j?.watchList != judge?.watchList { watched.removeAll(); watchedChanged = true; verdictCache.removeAll(); deniedPIDs.removeAll() }
+        // The first VPN country to check: the tunnels' clients and relays are scanned for at once, not in 5 s.
+        if j?.needsVPNCountry == true, judge?.needsVPNCountry != true {
+            lastTunnelScan = .distantPast; vpn = VPNState(); tunnelLock.withLock { scannedTunnels = [] }
+        }
         judge = j
         socketVerdicts.removeAll()
-        denyRuleCount = d?.rules.filter { $0.enabled && $0.verdict == .deny && $0.processPath != nil }.count ?? 0
+        if j?.needsGeo == true, let path = d?.geoDatabase {
+            let file = GeoFile.identity(path)
+            if geo?.file != file {
+                geo = (file, GeoFile.open(path, ownerUID: settings.ownerUID))
+                if geo?.db == nil { FileHandle.standardError.write(Data("country rules: cannot read the database \(path)\n".utf8)) }
+            }
+        } else { geo = nil }
+        denyRuleCount = d?.allRules.filter { $0.enabled && $0.verdict == .deny && $0.processPath != nil }.count ?? 0
         if trace { FileHandle.standardError.write(Data("deny rules: \(denyRuleCount), watching \(j?.watchList.count ?? 0) programs\n".utf8)) }
     }
 

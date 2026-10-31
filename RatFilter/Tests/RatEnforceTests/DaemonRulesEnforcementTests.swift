@@ -163,3 +163,51 @@ final class DaemonRulesEnforcementTests: XCTestCase {
                        "/Users/me/Library/Application Support/com.imanmontajabi.Rat/deny-rules.json")
     }
 }
+
+/// "Only through a VPN" (#45): the daemon works out per socket whether it leaves outside a tunnel and cuts it then,
+/// on the fast pass. This test process is the app; which of its sockets is cut follows this Mac's routes now.
+final class VPNOnlyEnforcementTests: XCTestCase {
+    let exe = ConnectionSampler.path(of: getpid())
+    var app: String { ProcessGrouping.owner(of: exe, responsiblePath: { nil }).ruleKey }
+
+    private func udp(to server: String?) throws -> (port: Int, local: String) {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        addTeardownBlock { close(fd) }
+        var addr = sockaddr_in(); addr.sin_family = sa_family_t(AF_INET); addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        if let server {
+            inet_pton(AF_INET, server, &addr.sin_addr); addr.sin_port = UInt16(443).bigEndian
+            let r = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+            try XCTSkipIf(r != 0, "no route to \(server) here (errno \(errno))")
+        } else {
+            addr.sin_addr.s_addr = UInt32(0x7f000001).bigEndian
+            _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        }
+        var bound = sockaddr_in(); var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &bound) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) } }
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        let local = inet_ntop(AF_INET, &bound.sin_addr, &buf, socklen_t(buf.count)).map { String(cString: $0) } ?? ""
+        return (Int(UInt16(bigEndian: bound.sin_port)), local)
+    }
+
+    func testTheDaemonCutsWhatLeavesOutsideTheTunnel() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-enf-vpn-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let internet = try udp(to: "203.0.113.5")
+        let loopback = try udp(to: nil)
+        try "".write(to: dir.appendingPathComponent("denied.txt"), atomically: true, encoding: .utf8)
+        let rules = DaemonRules(rules: [Rule(verdict: .deny, processPath: app, requireVPN: true), Rule(verdict: .allow, processPath: app, listLevel: .app)])
+        try rules.encoded().write(to: dir.appendingPathComponent("deny-rules.json"))
+        var s = EnforcerDaemon.Settings(deniedFile: dir.appendingPathComponent("denied.txt").path, statusFile: nil)
+        s.rulesFile = dir.appendingPathComponent("deny-rules.json").path
+        s.anchor = "com.apple/rat-unittest"
+        let d = EnforcerDaemon(settings: s, run: { _, _, _ in 0 },
+                               capture: { _, args in args == ["-s", "info"] ? "Status: Enabled" : args == ["-s", "rules"] ? "anchor \"com.apple/*\" all" : "" })
+        XCTAssertTrue(d.tick())
+        let throughTunnel = NetworkRoutes.tunnelAddresses()[internet.local] != nil
+        XCTAssertEqual(d.loadedPorts.contains(internet.port), !throughTunnel,
+                       "a socket from \(internet.local) is cut unless that is a tunnel's address (tunnels: \(NetworkRoutes.tunnelAddresses()))")
+        XCTAssertFalse(d.loadedPorts.contains(loopback.port), "bound to loopback: never cut")
+        XCTAssertTrue(d.deniedPIDs.isEmpty, "never the whole app")
+    }
+}

@@ -69,6 +69,8 @@ final class RouteMarker {
     private(set) var internetTunnel: String?
     /// Executable paths of the VPN clients holding the tunnels → the VPN's name.
     private(set) var tunnelClients: [String: String] = [:]
+    /// Tunnel interface → the executable path of the VPN client holding it.
+    private(set) var tunnelOwners: [String: String] = [:]
     /// Interface the routing table picks per remote address, for sockets without an address of their own.
     private var routeCache: [String: String?] = [:]
     private var proxyAddresses: [String: Set<String>] = [:]
@@ -83,12 +85,13 @@ final class RouteMarker {
         tunnelAddresses = NetworkRoutes.tunnelAddresses()
         routeCache = [:]
         let interfaces = Set(tunnelAddresses.values)
-        if interfaces.isEmpty { tunnelNames = [:]; tunnelClients = [:]; internetTunnel = nil } else {
+        if interfaces.isEmpty { tunnelNames = [:]; tunnelClients = [:]; tunnelOwners = [:]; internetTunnel = nil } else {
             let services = NetworkRoutes.vpnServiceNames()
             let owners = (helperTunnels ?? [:]).merging(NetworkRoutes.tunnelOwners()) { helper, _ in helper }
             tunnelNames = Dictionary(uniqueKeysWithValues: interfaces.map { ($0, Self.name(interface: $0, service: services[$0], owner: owners[$0])) })
             tunnelClients = [:]
             for i in interfaces { if let o = owners[i] { tunnelClients[o] = tunnelNames[i] } }
+            tunnelOwners = owners.filter { interfaces.contains($0.key) }
             internetTunnel = NetworkRoutes.internetTunnel().flatMap { interfaces.contains($0) ? $0 : nil }
         }
         proxies = NetworkRoutes.systemProxies()
@@ -141,9 +144,9 @@ final class RouteMarker {
 
     /// Test hook: fixed tunnels and proxies instead of the Mac's.
     func set(tunnelAddresses: [String: String], tunnelNames: [String: String], proxies: [NetworkRoutes.ProxyEndpoint], proxyAddresses: [String: Set<String>] = [:],
-             tunnelClients: [String: String] = [:], routes: [String: String] = [:]) {
+             tunnelClients: [String: String] = [:], routes: [String: String] = [:], tunnelOwners: [String: String] = [:]) {
         self.tunnelAddresses = tunnelAddresses; self.tunnelNames = tunnelNames; self.proxies = proxies; self.proxyAddresses = proxyAddresses
-        self.tunnelClients = tunnelClients
+        self.tunnelClients = tunnelClients; self.tunnelOwners = tunnelOwners
         routeCache = routes.mapValues { .some($0) }
         lastRefresh = .distantFuture
     }

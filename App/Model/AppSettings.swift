@@ -57,7 +57,7 @@ final class AppSettings: ObservableObject {
     @Published var groupBy: GroupBy { didSet { defaults.set(groupBy.rawValue, forKey: "groupBy") } }
     @Published var sortKey: SortKey { didSet { defaults.set(sortKey.rawValue, forKey: "sortKey") } }
     @Published var floatOnTop: Bool { didSet { defaults.set(floatOnTop, forKey: "floatOnTop") } }
-    /// The monitor's Hide Local chip: leave out connections that stay near this Mac (`RemoteHost.isLocal`).
+    /// The monitor's Local switch, off: leave out connections that stay near this Mac (`RemoteHost.isLocal`).
     @Published var hideLocal: Bool { didSet { defaults.set(hideLocal, forKey: "hideLocal") } }
     @Published var additionalLocalRanges: String {
         didSet { defaults.set(additionalLocalRanges, forKey: "additionalLocalRanges"); LocalRanges.shared.set(additionalLocalRanges) }

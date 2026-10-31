@@ -1,1 +1,0 @@
-The map shows traffic moving: purple pulses run out from This Mac for what it sends, blue ones run in for what it receives, both on a two-way line, at 24–30 frames a second and only while the window is seen and something moves (Reduce Motion stops them).

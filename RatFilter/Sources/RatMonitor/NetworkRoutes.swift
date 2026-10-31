@@ -113,10 +113,144 @@ public enum NetworkRoutes {
         return nil
     }
 
-    /// Tunnel interface → path of the process holding its kernel control socket (the VPN client that opened
-    /// `utunN`). Root sees every process; a user only their own.
-    public static func tunnelOwners(pids: [pid_t] = ConnectionSampler.allPIDs()) -> [String: String] {
-        var out: [String: String] = [:]
+    /// Whether a socket leaves the Mac outside a VPN tunnel (what "Only through a VPN" cuts). A server inside the
+    /// local network (`isLocal`) never does. A socket bound to a tunnel's address goes through that tunnel; one
+    /// bound to another address (Wi-Fi, Ethernet) does not, even while a VPN is up (it was opened before the VPN, or
+    /// the VPN splits). A socket with no address of its own goes where the routing table sends its server
+    /// (`route`; nil asks for the Internet's route, for a socket not connected to a server).
+    public static func leavesOutsideTunnel(localAddress: String, remoteAddress: String, tunnels: [String: String],
+                                           isLocal: (String) -> Bool, route: (String?) -> String?) -> Bool {
+        if !remoteAddress.isEmpty, isLocal(remoteAddress) { return false }
+        // Bound to loopback, it can reach nothing else.
+        if tunnels[localAddress] != nil || localAddress == "::1" || localAddress.hasPrefix("127.") { return false }
+        guard ["", "*", "0.0.0.0", "::"].contains(localAddress), !tunnels.isEmpty else { return true }
+        guard let iface = route(remoteAddress.isEmpty ? nil : remoteAddress) else { return true }
+        return !isTunnel(iface)
+    }
+
+    /// The tunnel a socket goes through, by the same reading as `leavesOutsideTunnel`: the tunnel whose address it is
+    /// bound to, or, with no address of its own, the tunnel the routing table sends its server to. Nil inside the
+    /// local network, on loopback, or outside every tunnel.
+    public static func tunnelInterface(localAddress: String, remoteAddress: String, tunnels: [String: String],
+                                       isLocal: (String) -> Bool, route: (String?) -> String?) -> String? {
+        if !remoteAddress.isEmpty, isLocal(remoteAddress) { return nil }
+        if let iface = tunnels[localAddress] { return iface }
+        if localAddress == "::1" || localAddress.hasPrefix("127.") { return nil }
+        guard ["", "*", "0.0.0.0", "::"].contains(localAddress), !tunnels.isEmpty, let iface = route(remoteAddress.isEmpty ? nil : remoteAddress),
+              isTunnel(iface) else { return nil }
+        return iface
+    }
+
+    // MARK: tunnel servers (#45)
+
+    /// The VPN client that opened a tunnel, and the local relays it sends its traffic through (a stealth or
+    /// obfuscation mode: the client connects to a program on loopback, which carries it to the server).
+    public struct TunnelOwner: Equatable, Sendable {
+        public var pid: pid_t
+        public var path: String
+        public var relays: [pid_t]
+        public init(pid: pid_t, path: String, relays: [pid_t] = []) { self.pid = pid; self.path = path; self.relays = relays }
+    }
+
+    /// The addresses a tunnel's client carries it to: the client's own connections to servers outside every tunnel
+    /// (not on loopback, not inside the local network, not bound to a tunnel's address), else its relays'. UDP ones
+    /// first: WireGuard, OpenVPN and IKE carry a tunnel over UDP, while a client's TCP connections are mostly its own
+    /// API. A WireGuard client sends from one unconnected UDP socket, which names no server: with none of those and
+    /// such a socket, `pinned` (the servers the routing table keeps outside the tunnel, `pinnedServers(for:)`).
+    /// Sorted, without repeats.
+    public static func carrierServers(owner: [ObservedConnection], relays: [ObservedConnection], tunnels: [String: String],
+                                      isLocal: (String) -> Bool, pinned: () -> [String] = { [] }) -> [String] {
+        func outside(_ cs: [ObservedConnection]) -> [ObservedConnection] {
+            cs.filter { c in
+                c.tcpState != "LISTEN" && c.remotePort != 0 && !c.remoteAddress.isEmpty && !["*", "0.0.0.0", "::"].contains(c.remoteAddress)
+                    && !isLoopback(c.remoteAddress) && !isLocal(c.remoteAddress) && tunnels[c.localAddress] == nil
+            }
+        }
+        var found = outside(owner)
+        if found.isEmpty { found = outside(relays) }
+        if found.isEmpty, owner.contains(where: { $0.proto == .udp && $0.remotePort == 0 && $0.localPort != 0 && !isLoopback($0.localAddress) }) {
+            return Array(Set(pinned().filter { !isLoopback($0) && !isLocal($0) })).sorted()
+        }
+        let udp = found.filter { $0.proto == .udp }
+        return Array(Set((udp.isEmpty ? found : udp).map(\.remoteAddress))).sorted()
+    }
+
+    /// A route to one host through a gateway, added by a program (`netstat -rn` flags `UGHS`), and its interface.
+    public struct HostRoute: Equatable, Sendable {
+        public var destination: String
+        public var interface: String
+        public init(destination: String, interface: String) { self.destination = destination; self.interface = interface }
+    }
+
+    /// The static gateway routes to single hosts in the routing table (`sysctl` `NET_RT_DUMP`; no root needed).
+    /// A VPN client that routes the Internet into its tunnel pins its server's address to the real gateway this way, so
+    /// the tunnel's own packets do not go into the tunnel.
+    public static func hostRoutes() -> [HostRoute] {
+        var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, AF_UNSPEC, NET_RT_DUMP, 0]
+        var size = 0
+        guard sysctl(&mib, 6, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+        size += size / 4   // room for routes added in between
+        var buf = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 6, &buf, &size, nil, 0) == 0 else { return [] }
+        let header = MemoryLayout<rt_msghdr>.size
+        let wanted = RTF_UP | RTF_GATEWAY | RTF_HOST | RTF_STATIC
+        var out: [HostRoute] = []
+        var at = 0
+        while at + header <= size {
+            let m = buf.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: at, as: rt_msghdr.self) }
+            let length = Int(m.rtm_msglen)
+            guard length >= header, at + length <= size else { break }
+            defer { at += length }
+            guard m.rtm_version == UInt8(RTM_VERSION), m.rtm_flags & wanted == wanted, m.rtm_flags & RTF_WASCLONED == 0,
+                  m.rtm_addrs & RTA_DST != 0, length >= header + 2 else { continue }
+            // RTA_DST is the first address after the header.
+            let sa = at + header
+            let family = Int32(buf[sa + 1])
+            var text = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            var destination: String?
+            if family == AF_INET, sa + MemoryLayout<sockaddr_in>.size <= at + length {
+                var a = buf.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: sa, as: sockaddr_in.self) }.sin_addr
+                destination = inet_ntop(AF_INET, &a, &text, socklen_t(text.count)).map { String(cString: $0) }
+            } else if family == AF_INET6, sa + MemoryLayout<sockaddr_in6>.size <= at + length {
+                var a = buf.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: sa, as: sockaddr_in6.self) }.sin6_addr
+                destination = inet_ntop(AF_INET6, &a, &text, socklen_t(text.count)).map { String(cString: $0) }
+            }
+            var name = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
+            guard let destination, if_indextoname(UInt32(m.rtm_index), &name) != nil else { continue }
+            out.append(HostRoute(destination: destination, interface: String(cString: name)))
+        }
+        return out
+    }
+
+    /// The servers the routing table keeps outside every tunnel (`hostRoutes` to public addresses through an interface
+    /// that is not a tunnel), handed to `iface` only while it carries the Internet: the pinned routes tell no tunnel
+    /// apart, and only a VPN taking the Internet needs one. Empty for any other tunnel.
+    public static func pinnedServers(for iface: String, isLocal: (String) -> Bool, routes: () -> [HostRoute] = hostRoutes,
+                                     internet: () -> String? = internetTunnel) -> [String] {
+        guard internet() == iface else { return [] }
+        return Array(Set(routes().filter { !isTunnel($0.interface) && $0.interface != "lo0" && !isLoopback($0.destination) && !isLocal($0.destination)
+            && !$0.destination.lowercased().hasPrefix("fe80") }.map(\.destination))).sorted()
+    }
+
+    static func isLoopback(_ a: String) -> Bool { a.hasPrefix("127.") || a == "::1" || a.hasPrefix("::ffff:127.") }
+
+    /// The loopback ports a client connects to that another program holds (its relays), from the client's sockets.
+    public static func relayPorts(of owner: [ObservedConnection]) -> Set<Int> {
+        Set(owner.filter { $0.remotePort != 0 && isLoopback($0.remoteAddress) }.map(\.remotePort))
+    }
+
+    /// The country a tunnel leads to: its carriers' country when they all have the same one, else unknown (none
+    /// found, a carrier the database does not place, or carriers in different countries).
+    public static func serverCountry(_ carriers: [String], lookup: (String) -> String?) -> String? {
+        let codes = carriers.map(lookup)
+        guard let first = codes.first ?? nil, codes.allSatisfy({ $0 == first }) else { return nil }
+        return first
+    }
+
+    /// Tunnel interface → the process holding its kernel control socket, with (`relays`) the processes holding the
+    /// loopback ports it connects to. Root sees every process; a user only their own.
+    public static func tunnelOwnerProcesses(pids: [pid_t] = ConnectionSampler.allPIDs(), relays: Bool = false) -> [String: TunnelOwner] {
+        var out: [String: TunnelOwner] = [:]
         for pid in pids {
             for fd in ConnectionSampler.socketFDs(of: pid) {
                 var info = socket_fdinfo()
@@ -126,10 +260,30 @@ public enum NetworkRoutes {
                 let name = withUnsafeBytes(of: kc.kcsi_name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
                 guard kc.kcsi_unit > 0, let prefix = ["com.apple.net.utun_control": "utun", "com.apple.net.ipsec_control": "ipsec"][name] else { continue }
                 let iface = "\(prefix)\(kc.kcsi_unit - 1)"
-                if out[iface] == nil { out[iface] = ConnectionSampler.path(of: pid) }
+                if out[iface] == nil { out[iface] = TunnelOwner(pid: pid, path: ConnectionSampler.path(of: pid)) }
             }
         }
+        guard relays, !out.isEmpty else { return out }
+        // Only for a client that talks to a program on loopback: one more pass over the processes' sockets.
+        var wanted: [pid_t: Set<Int>] = [:]
+        for (_, o) in out { let p = relayPorts(of: ConnectionSampler.connections(of: o.pid)); if !p.isEmpty { wanted[o.pid] = p } }
+        guard !wanted.isEmpty else { return out }
+        let ports = wanted.values.reduce(into: Set<Int>()) { $0.formUnion($1) }
+        var holders: [Int: pid_t] = [:]
+        for pid in pids where !wanted.keys.contains(pid) {
+            for c in ConnectionSampler.connections(of: pid) where ports.contains(c.localPort) && isLoopback(c.localAddress)
+                && (c.tcpState == "LISTEN" || (c.proto == .udp && c.remotePort == 0)) {
+                holders[c.localPort] = pid
+            }
+        }
+        for (iface, o) in out { if let p = wanted[o.pid] { out[iface]?.relays = Array(Set(p.compactMap { holders[$0] })).sorted() } }
         return out
+    }
+
+    /// Tunnel interface → path of the process holding its kernel control socket (the VPN client that opened
+    /// `utunN`). Root sees every process; a user only their own.
+    public static func tunnelOwners(pids: [pid_t] = ConnectionSampler.allPIDs()) -> [String: String] {
+        tunnelOwnerProcesses(pids: pids).mapValues(\.path)
     }
 
     /// Names of VPN services configured in System Settings, by the tunnel interface they are up on.

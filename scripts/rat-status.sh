@@ -38,6 +38,11 @@ if s.get("denyRules") is not None:
     print(f"  deny rules followed by the daemon: {s['denyRules']}")
     for app, a in sorted((s.get("ruleDenied") or {}).items()):
         print(f"  {a['processes']:3} processes, {a['ports']:3} sockets cut by rules   {app}")
+if s.get("countryLookup") is not None:
+    print(f"  country rules: {'database open' if s['countryLookup'] else 'CANNOT READ the City database (no country is cut by the helper)'}")
+for iface, servers in sorted((s.get("tunnelServers") or {}).items()):
+    cc = (s.get("tunnelCountries") or {}).get(iface)
+    print(f"  VPN {iface} leads to {cc or 'a server not placed'} ({', '.join(servers) or 'no carrier found'})")
 if s.get("proxyCapture") is not None:
     print(f"  proxy unmasking on lo0: {'on' if s['proxyCapture'] else 'OFF (no BPF device)'}   loopback connections cut: {s.get('blockedLoopbackPorts', 0)}")
 PY
