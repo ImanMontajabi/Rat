@@ -1,0 +1,1 @@
+Demo mode, used for the README screenshots and UI tests, shows a fixed account name and a fixed place for This Mac, and the screenshots use English number formats, so they show nothing of the Mac they were taken on; the screenshots are retaken.

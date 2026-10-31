@@ -125,7 +125,7 @@ struct ProcessInspector: View {
                 } else {
                     kv("Path", app.identity.bundlePath ?? app.identity.id)
                     kv("Code ID", [team, ident].compactMap { $0 }.joined(separator: "/").nilIfEmpty ?? "unsigned")
-                    kv("User", NSUserName())
+                    kv("User", Preferences.userName())
                     kv("PIDs", app.pids.sorted().map(String.init).joined(separator: ", "))
                     let others = app.processes.keys.filter { $0 != app.mainProcess }.sorted()
                     if !others.isEmpty, app.identity.bundlePath != nil { kv("Helpers", others.joined(separator: ", ")) }

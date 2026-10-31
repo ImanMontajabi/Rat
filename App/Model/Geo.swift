@@ -133,8 +133,12 @@ final class GeoService: @unchecked Sendable {
         return result
     }
 
-    /// Where this Mac probably is, from its time zone (offline).
-    static func localPoint() -> GeoPoint? {
+    /// Where demo mode puts "This Mac": a fixed place, so screenshots never show where this Mac is.
+    static let demoPoint = GeoPoint(coordinate: .init(latitude: 52.52, longitude: 13.405), city: "Berlin", country: "Germany", countryCode: "DE")
+
+    /// Where this Mac probably is, from its time zone (offline); in demo mode, `demoPoint`.
+    static func localPoint(demo: Bool = false) -> GeoPoint? {
+        if demo { return demoPoint }
         guard let z = TimeZoneLocator.coordinates() else { return nil }
         let country = Locale.current.region.flatMap { Locale.current.localizedString(forRegionCode: $0.identifier) } ?? ""
         return GeoPoint(coordinate: .init(latitude: z.lat, longitude: z.lon), city: z.city, country: country, countryCode: Locale.current.region?.identifier ?? "")
