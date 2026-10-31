@@ -250,6 +250,54 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(waitGone(condition))
     }
 
+    /// "Only through a VPN" names the VPN's country (#45): the inspector's picker sets it on the app's rule, says
+    /// where the demo's tunnel leads (Windscribe → 🇳🇱), and the app's process shows the country it follows; the
+    /// Rules window's editor has the same picker under the condition. Flags, not names: the Mac's language varies.
+    func testVPNCountryInTheInspector() {
+        el("app-row-Telegram").click()
+        let vpn = el("inspector-vpn-only")
+        XCTAssertTrue(vpn.waitForExistence(timeout: 5))
+        XCTAssertFalse(el("inspector-vpn-country").exists, "no picker while the switch is off")
+        vpn.click()
+        XCTAssertTrue(waitSwitch(vpn, on: true))
+        let picker = el("inspector-vpn-country")
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "the switch on, its country picker shows")
+        picker.click()
+        let netherlands = app.menuItems.matching(NSPredicate(format: "title BEGINSWITH %@", "🇳🇱")).firstMatch
+        XCTAssertTrue(netherlands.waitForExistence(timeout: 5))
+        netherlands.click()
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value CONTAINS %@", "🇳🇱"), evaluatedWith: picker)], timeout: 5) == .completed,
+                      "the Netherlands picked: \(picker.value ?? "nil")")
+        let now = el("inspector-vpn-servers")
+        XCTAssertTrue(now.waitForExistence(timeout: 5))
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: text(startingWith: "Now: Windscribe →", containing: "🇳🇱"), evaluatedWith: now)], timeout: 5) == .completed,
+                      "where the tunnel leads: \(now.label) \(now.value ?? "")")
+        XCTAssertTrue(waitValue(el("inspector-rules"), "2"), "still one VPN rule, with its country")
+
+        expand("Telegram")
+        el("process-row-Telegram Helper").click()
+        let inherited = el("inspector-vpn-country")
+        XCTAssertTrue(inherited.waitForExistence(timeout: 5))
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: text(startingWith: "Only through a VPN in", containing: "🇳🇱"), evaluatedWith: inherited)], timeout: 5) == .completed,
+                      "the process follows the app's country: \(inherited.label) \(inherited.value ?? "")")
+
+        el("manage-rules").click()
+        let window = app.windows["Rules"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        XCTAssertTrue(window.staticTexts.matching(text(startingWith: "Only through a VPN in", containing: "🇳🇱")).firstMatch.waitForExistence(timeout: 5),
+                      "the rule's row names the country")
+        window.toolbars.buttons["New Rule"].click()
+        let condition = el("rule-vpn-only")
+        XCTAssertTrue(condition.waitForExistence(timeout: 5))
+        XCTAssertFalse(el("rule-vpn-country").exists)
+        condition.click()
+        let editorPicker = el("rule-vpn-country")
+        XCTAssertTrue(editorPicker.waitForExistence(timeout: 5), "the editor's picker under the condition")
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "value CONTAINS %@", "Any"), evaluatedWith: editorPicker)], timeout: 5) == .completed)
+        window.sheets.buttons["Cancel"].click()
+        XCTAssertTrue(waitGone(condition))
+    }
+
     /// A connection's inspector starts a rule for every server in its country (#45): the Rules window opens its
     /// editor on a deny for the app with the country picked, and the saved rule is one of the connection's rules.
     /// Flags, not names, so the test does not depend on the Mac's language.

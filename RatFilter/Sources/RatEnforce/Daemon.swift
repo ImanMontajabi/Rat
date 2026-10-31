@@ -89,16 +89,23 @@ public struct EnforcerStatus: Codable, Equatable {
     public var executableSHA256: String?
     /// Whether the daemon could open the City database its country rules need (nil while no rule names a country).
     public var countryLookup: Bool?
+    /// While a rule names a VPN's country (`Rule.vpnCountry`): tunnel interface → the servers its client carries it
+    /// to (`NetworkRoutes.carrierServers`), and → their country ("" when it is not known). Rat shows and judges by
+    /// the same.
+    public var tunnelServers: [String: [String]]?
+    public var tunnelCountries: [String: String]?
 
     public init(pid: Int32, updated: Date, pfEnabled: Bool, anchorHooked: Bool, deniedApps: [String: App], blockedPorts: Int,
                 ruleDenied: [String: App]? = nil, denyRules: Int? = nil, blockedLoopbackPorts: Int? = nil, proxyCapture: Bool? = nil, tunnels: [String: String]? = nil,
                 pfIssue: String? = nil, repairs: Int? = nil, lastRepair: String? = nil, lastRepairAt: Date? = nil,
-                executableSHA256: String? = nil, countryLookup: Bool? = nil) {
+                executableSHA256: String? = nil, countryLookup: Bool? = nil, tunnelServers: [String: [String]]? = nil,
+                tunnelCountries: [String: String]? = nil) {
         self.pid = pid; self.updated = updated; self.pfEnabled = pfEnabled; self.anchorHooked = anchorHooked
         self.deniedApps = deniedApps; self.blockedPorts = blockedPorts; self.ruleDenied = ruleDenied; self.denyRules = denyRules
         self.blockedLoopbackPorts = blockedLoopbackPorts; self.proxyCapture = proxyCapture; self.tunnels = tunnels
         self.pfIssue = pfIssue; self.repairs = repairs; self.lastRepair = lastRepair; self.lastRepairAt = lastRepairAt
         self.executableSHA256 = executableSHA256; self.countryLookup = countryLookup
+        self.tunnelServers = tunnelServers; self.tunnelCountries = tunnelCountries
     }
 }
 
@@ -178,7 +185,12 @@ public final class EnforcerDaemon {
     /// The tunnels' addresses and the routes read for them, while a rule asks whether a socket leaves outside a VPN
     /// (`SocketJudge.needsRoute`): read again every `vpnRefresh`, so a VPN that drops is seen within a fifth of a second.
     private var vpn = VPNState()
-    struct VPNState { var at = Date.distantPast; var tunnels: [String: String] = [:]; var routes: [String: String?] = [:] }
+    /// With a VPN country to check (`SocketJudge.needsVPNCountry`), also each tunnel's carrier servers and where they
+    /// are (nil without a database: nothing is cut for a VPN's country then).
+    struct VPNState {
+        var at = Date.distantPast; var tunnels: [String: String] = [:]; var routes: [String: String?] = [:]
+        var servers: [String: [String]] = [:]; var countries: [String: TunnelServer] = [:]
+    }
     static let vpnRefresh: TimeInterval = 0.2
     /// The City database for rules with a country (`DaemonRules.geoDatabase`, opened by `GeoFile`), kept while the
     /// rules name the same file (same path, device and inode: an updated Rat.app puts a new file at the same path).
@@ -223,6 +235,11 @@ public final class EnforcerDaemon {
     private var watchdogIdle = true
     private let tunnelLock = NSLock()
     private var tunnels: [String: String] = [:]
+    /// The processes that opened the tunnels, and their relays (5 s scan, under `tunnelLock`), and the tunnels that
+    /// were up when a scan with relays began: a tunnel no such scan saw yet has no known client, which is not the
+    /// same as none (blocking its sockets' ports would reset good connections).
+    private var tunnelProcesses: [String: NetworkRoutes.TunnelOwner] = [:]
+    private var scannedTunnels = Set<String>()
     public private(set) var reloads = 0
     private let trace = !(ProcessInfo.processInfo.environment["RAT_TRACE"] ?? "").isEmpty
     private var traceTicks = 0, traceTime = 0.0
@@ -421,7 +438,8 @@ public final class EnforcerDaemon {
                                                                     port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
                                                                     offVPN: judge.needsRoute ? leavesOutsideTunnel(c, judge) : nil,
                                                                     country: judge.needsCountry ? geo?.db?.countryCode(c.remoteAddress) : nil,
-                                                                    countryKnown: geo?.db != nil)
+                                                                    countryKnown: geo?.db != nil,
+                                                                    tunnelServer: judge.needsVPNCountry ? tunnelServer(c, judge) : nil)
                     verdicts[key] = deny
                     if deny { cut.insert(c.localPort) }
                 }
@@ -528,12 +546,15 @@ public final class EnforcerDaemon {
 
     /// Which process opened each VPN tunnel (published for Rat's VPN names, every 5 s whatever is enforced): a scan of
     /// every socket, so it runs off the watch loop.
+    /// With a VPN country to check, also the loopback relays the clients send their traffic through.
     private func scanTunnels(now: Date) {
         if now.timeIntervalSince(lastTunnelScan) >= 5 {
             lastTunnelScan = now
+            let relays = judge?.needsVPNCountry == true
             background.async { [self] in
-                let t = NetworkRoutes.tunnelOwners()
-                tunnelLock.withLock { tunnels = t }
+                let up = Set(NetworkRoutes.tunnelAddresses().values)
+                let t = NetworkRoutes.tunnelOwnerProcesses(relays: relays)
+                tunnelLock.withLock { tunnels = t.mapValues(\.path); tunnelProcesses = t; scannedTunnels = relays ? up : [] }
             }
         }
     }
@@ -632,7 +653,10 @@ public final class EnforcerDaemon {
                                     proxyCapture: settings.proxiedFile == nil ? nil : proxyWatch?.capturing ?? false,
                                     tunnels: tunnelLock.withLock { tunnels },
                                     pfIssue: pfIssue, repairs: repairs, lastRepair: lastRepair, lastRepairAt: lastRepairAt,
-                                    executableSHA256: executableSHA256, countryLookup: judge?.needsCountry == true ? geo?.db != nil : nil)
+                                    executableSHA256: executableSHA256, countryLookup: judge?.needsGeo == true ? geo?.db != nil : nil,
+                                    tunnelServers: judge?.needsVPNCountry == true ? vpn.servers : nil,
+                                    tunnelCountries: judge?.needsVPNCountry == true && geo?.db != nil
+                                        ? vpn.countries.mapValues { if case .country(let c) = $0 { return c }; return "" } : nil)
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .secondsSince1970
         guard let data = try? enc.encode(status) else { return }
@@ -649,19 +673,46 @@ public final class EnforcerDaemon {
     private func refreshVPN(now: Date) {
         guard now.timeIntervalSince(vpn.at) >= Self.vpnRefresh || now < vpn.at else { return }
         let tunnels = NetworkRoutes.tunnelAddresses()
-        if tunnels != vpn.tunnels { socketVerdicts.removeAll() }
-        vpn = VPNState(at: now, tunnels: tunnels)
+        var next = VPNState(at: now, tunnels: tunnels)
+        if let judge, judge.needsVPNCountry {
+            // A tunnel that just came up has no known client until the next scan: ask for it now.
+            if Set(tunnels.values) != Set(vpn.tunnels.values) { lastTunnelScan = .distantPast }
+            let (owners, scanned) = tunnelLock.withLock { (tunnelProcesses, scannedTunnels) }
+            for iface in Set(tunnels.values) where scanned.contains(iface) {
+                let o = owners[iface]
+                let servers = o.map { o in
+                    NetworkRoutes.carrierServers(owner: ConnectionSampler.connections(of: o.pid), relays: o.relays.flatMap(ConnectionSampler.connections(of:)),
+                                                 tunnels: tunnels, isLocal: judge.isLocal,
+                                                 pinned: { NetworkRoutes.pinnedServers(for: iface, isLocal: judge.isLocal) })
+                } ?? []
+                next.servers[iface] = servers
+                if let db = geo?.db { next.countries[iface] = NetworkRoutes.serverCountry(servers, lookup: db.countryCode).map(TunnelServer.country) ?? .unknown }
+            }
+        }
+        if tunnels != vpn.tunnels || next.countries != vpn.countries { socketVerdicts.removeAll() }
+        vpn = next
+    }
+
+    /// The interface the routing table sends a server to (nil asks for the Internet's), kept until the next refresh.
+    private func cachedRoute(_ remote: String?) -> String? {
+        let key = remote ?? ""
+        if let known = vpn.routes[key] { return known }
+        let iface = remote.map(NetworkRoutes.routeInterface(to:)) ?? NetworkRoutes.internetTunnel()
+        vpn.routes[key] = .some(iface)
+        return iface
     }
 
     private func leavesOutsideTunnel(_ c: ObservedConnection, _ judge: SocketJudge) -> Bool {
         NetworkRoutes.leavesOutsideTunnel(localAddress: c.localAddress, remoteAddress: c.remoteAddress, tunnels: vpn.tunnels,
-                                          isLocal: judge.isLocal) { remote in
-            let key = remote ?? ""
-            if let known = vpn.routes[key] { return known }
-            let iface = remote.map(NetworkRoutes.routeInterface(to:)) ?? NetworkRoutes.internetTunnel()
-            vpn.routes[key] = .some(iface)
-            return iface
-        }
+                                          isLocal: judge.isLocal, route: cachedRoute)
+    }
+
+    /// Where the tunnel a socket goes through leads: nil outside every tunnel, without a database to look in, or for a
+    /// tunnel not scanned yet (judged again once it is: the countries change).
+    private func tunnelServer(_ c: ObservedConnection, _ judge: SocketJudge) -> TunnelServer? {
+        guard geo?.db != nil, let iface = NetworkRoutes.tunnelInterface(localAddress: c.localAddress, remoteAddress: c.remoteAddress, tunnels: vpn.tunnels,
+                                                                        isLocal: judge.isLocal, route: cachedRoute) else { return nil }
+        return vpn.countries[iface]
     }
 
     /// The file is written by Rat as the user, so it is read as untrusted: at most `maxRulesFile` bytes, and one that
@@ -677,9 +728,13 @@ public final class EnforcerDaemon {
         let j = d.flatMap { $0.hasProcessDenies ? SocketJudge($0) : nil }
         // Which processes are read depends only on what deny rules name; new names only judge sockets again.
         if j?.watchList != judge?.watchList { watched.removeAll(); watchedChanged = true; verdictCache.removeAll(); deniedPIDs.removeAll() }
+        // The first VPN country to check: the tunnels' clients and relays are scanned for at once, not in 5 s.
+        if j?.needsVPNCountry == true, judge?.needsVPNCountry != true {
+            lastTunnelScan = .distantPast; vpn = VPNState(); tunnelLock.withLock { scannedTunnels = [] }
+        }
         judge = j
         socketVerdicts.removeAll()
-        if j?.needsCountry == true, let path = d?.geoDatabase {
+        if j?.needsGeo == true, let path = d?.geoDatabase {
             let file = GeoFile.identity(path)
             if geo?.file != file {
                 geo = (file, GeoFile.open(path, ownerUID: settings.ownerUID))

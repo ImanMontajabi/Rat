@@ -269,6 +269,12 @@ final class Ledger: ObservableObject {
     /// Each row's byte counters on the last pass (app id and row id), for its rate.
     private var rowBytes: [String: (in: UInt64, out: UInt64)] = [:]
     let routes = RouteMarker()
+    /// Where each VPN tunnel leads, by interface (#45): the country of the server its client carries it to, from the
+    /// helper's view when it publishes one (it sees VPN clients running as root, and their local relays), else from
+    /// this pass's connections of each tunnel's client. What "Only through a VPN in <country>" judges by.
+    private(set) var tunnelServers: [String: TunnelServer] = [:]
+    /// The carrier addresses behind `tunnelServers`, by interface.
+    private(set) var tunnelCarriers: [String: [String]] = [:]
     private var signingCache: [String: (identifier: String?, team: String?)] = [:]
     private var rulesChanged: AnyCancellable?
     private var running = false
@@ -417,6 +423,7 @@ final class Ledger: ObservableObject {
         let bytesByFlow = Dictionary(flows.map { ($0.key, ($0.bytesIn, $0.bytesOut)) }, uniquingKeysWith: { a, b in (a.0 + b.0, a.1 + b.1) })
 
         routes.refresh(now: now, helperTunnels: enforcer.status?.tunnels)
+        updateTunnelServers(conns)
         // Connections through a local proxy: the destination the client asked for replaces its loopback socket.
         let unmasked = ProxyUnmasking.unmask(flows: enforcer.proxiedFlows(), conns: conns, now: now, arguments: { ProcessArguments.read(pid: $0) })
         var proxiedByApp: [String: [ProxiedRemote]] = [:]
@@ -485,10 +492,12 @@ final class Ledger: ObservableObject {
             /// `executable` is the process that holds the socket, for rules about one of the app's processes.
             /// A connection a peer started is judged too (an app's ✗ cuts it, as the helper does), but never asks.
             /// `offVPN` is whether it leaves outside a VPN tunnel (nil for a connection through a local proxy).
-            func decide(host: String, address: String, port: Int, proto: Connection.Proto, executable: String, offVPN: Bool?) -> (Verdict, Rule?) {
+            /// `route` gives the tunnel it goes through, for a rule that names the VPN's country.
+            func decide(host: String, address: String, port: Int, proto: Connection.Proto, executable: String, offVPN: Bool?,
+                        route: RouteTag? = nil) -> (Verdict, Rule?) {
                 let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), executable: executable,
                                       host: host == address || isIPLiteral(host) ? nil : host, address: address, port: port, proto: proto, offVPN: offVPN,
-                                      country: geo.countryCode(address))
+                                      country: geo.countryCode(address), tunnelServer: route.flatMap(tunnelServer(through:)))
                 // The process list's ✗/✓ decide first, narrowest first (`RuleEngine.decide`). Matches what is
                 // enforced: an app the helper blocks as a whole (`deniedAppPaths`) is denied for every server.
                 let decision = rules.engine.decide(conn)
@@ -496,7 +505,7 @@ final class Ledger: ObservableObject {
             }
             func judge(host: String, address: String, port: Int, proto: Connection.Proto, executable: String, route: RouteTag? = nil, incoming: Bool = false,
                        offVPN: Bool? = nil) -> Verdict? {
-                let (verdict, rule) = decide(host: host, address: address, port: port, proto: proto, executable: executable, offVPN: offVPN)
+                let (verdict, rule) = decide(host: host, address: address, port: port, proto: proto, executable: executable, offVPN: offVPN, route: route)
                 if incoming && verdict == .ask { return nil }
                 if rule == nil, verdict != .ask, warmedUp, !incoming { noteSilentConnection(app: e.identity.name, host: host, allowed: verdict == .allow) }
                 switch verdict {
@@ -526,10 +535,11 @@ final class Ledger: ObservableObject {
                     if stream { remotes[i].stream = true }
                     // Each of them has its own local port, and all are cut. With "Only through a VPN" a socket on the
                     // other side of the tunnel than the row's first is judged on its own (one opened before the VPN).
-                    let offVPN = !(routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort, processPath: c.processPath)?.isVPN ?? false)
-                    let denied = !vpnOnly || remotes[i].verdict == nil || offVPN == !remotes[i].isVPN ? deniedKeys.contains(key)
+                    let socketRoute = routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort, processPath: c.processPath)
+                    let offVPN = !(socketRoute?.isVPN ?? false)
+                    let denied = !vpnOnly || remotes[i].verdict == nil || socketRoute == remotes[i].route ? deniedKeys.contains(key)
                         : decide(host: remotes[i].host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
-                                 executable: c.processPath, offVPN: offVPN).0 == .deny
+                                 executable: c.processPath, offVPN: offVPN, route: socketRoute).0 == .deny
                     if denied, c.localPort != 0 { portsNow.insert(c.localPort) }
                     continue
                 }
@@ -671,6 +681,11 @@ final class Ledger: ObservableObject {
 
     /// "Only through a VPN" for an app or one of its processes (`RulesModel.setVPNOnly`). The helper follows it at
     /// once (`DaemonRules`), Rat's pass from the next one.
+    func setVPNCountry(_ country: String?, for t: RulesModel.Target) {
+        rules.setVPNCountry(country, for: t)
+        refreshEnforcement()
+    }
+
     func setVPNOnly(_ on: Bool, for t: RulesModel.Target) {
         rules.setVPNOnly(on, for: t)
         alerts.revalidate()
@@ -721,7 +736,41 @@ final class Ledger: ObservableObject {
             daemonNameOrder.removeFirst(daemonNameOrder.count - Self.daemonNamesLimit)
         }
         return DaemonRules(rules: active, names: daemonNames, signatures: signatures, localRanges: AppSettings.shared.additionalLocalRanges,
-                           geoDatabase: active.contains { $0.country != nil } ? geo.loadedFile(.city)?.path : nil)
+                           geoDatabase: active.contains { $0.country != nil || $0.vpnCountry != nil } ? geo.loadedFile(.city)?.path : nil)
+    }
+
+    /// Where the tunnel a connection goes through leads (nil outside every tunnel).
+    func tunnelServer(through route: RouteTag) -> TunnelServer? {
+        guard case let .vpn(_, iface) = route else { return nil }
+        return tunnelServers[iface]
+    }
+
+    /// Reads each tunnel's carrier servers and their country (`NetworkRoutes.carrierServers` / `serverCountry`, as the
+    /// helper does). While a helper of this copy of Rat runs, its scan is the one read: it sees VPN clients running as
+    /// root, and a tunnel it has not scanned yet (a rule just made, a VPN just up) is not placed, so neither cuts it.
+    /// Without one, the tunnel client's connections in this pass.
+    func updateTunnelServers(_ conns: [ObservedConnection]) {
+        let interfaces = Set(routes.tunnelAddresses.values)
+        guard !interfaces.isEmpty else { tunnelServers = [:]; tunnelCarriers = [:]; return }
+        var servers: [String: TunnelServer] = [:], carriers: [String: [String]] = [:]
+        if let status = enforcer.status, !enforcer.helperOutdated {
+            for iface in interfaces {
+                guard let found = status.tunnelServers?[iface] else { continue }
+                carriers[iface] = found
+                servers[iface] = NetworkRoutes.serverCountry(found, lookup: geo.countryCode).map(TunnelServer.country) ?? .unknown
+            }
+            tunnelServers = servers; tunnelCarriers = carriers
+            return
+        }
+        for iface in interfaces {
+            let found = routes.tunnelOwners[iface].map { owner in
+                NetworkRoutes.carrierServers(owner: conns.filter { $0.processPath == owner }, relays: [], tunnels: routes.tunnelAddresses, isLocal: isLocalAddress,
+                                             pinned: { NetworkRoutes.pinnedServers(for: iface, isLocal: isLocalAddress, internet: { self.routes.internetTunnel }) })
+            } ?? []
+            carriers[iface] = found
+            servers[iface] = NetworkRoutes.serverCountry(found, lookup: geo.countryCode).map(TunnelServer.country) ?? .unknown
+        }
+        tunnelServers = servers; tunnelCarriers = carriers
     }
 
     /// Apps denied outright. The root daemon blocks every socket of their processes (helpers included), by local
@@ -898,6 +947,9 @@ final class Ledger: ObservableObject {
         ]
         fx.remotes[0].country = "ES"
         table[firefox.id] = fx
+        // Telegram Helper's tunnel goes to a server in the Netherlands.
+        routes.set(tunnelAddresses: ["100.64.0.2": "utun3"], tunnelNames: ["utun3": "Windscribe"], proxies: [])
+        tunnelServers = ["utun3": .country("NL")]; tunnelCarriers = ["utun3": ["192.0.2.99"]]
         // Traffic that stays near this Mac, for Hide Local: Bonjour, and a service that talks only to the LAN.
         if var mac = table["macOS"] {
             mac.remotes.append(RemoteHost(address: "224.0.0.251", host: "224.0.0.251", port: 5353, proto: "UDP", pid: 90, process: "mDNSResponder"))

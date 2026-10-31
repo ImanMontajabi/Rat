@@ -1,4 +1,5 @@
 import SwiftUI
+import RatFilterCore
 
 struct InspectorView: View {
     @EnvironmentObject var ledger: Ledger
@@ -378,17 +379,66 @@ struct VPNOnlySwitch: View {
 
     var body: some View {
         let inherited = ledger.rules.vpnOnlyInherited(target)
+        let own = ledger.rules.vpnOnly(target)
+        let country = ledger.rules.vpnCountry(target)
         VStack(alignment: .leading, spacing: 2) {
-            Toggle("Only through a VPN", isOn: Binding(get: { inherited || ledger.rules.vpnOnly(target) },
+            Toggle("Only through a VPN", isOn: Binding(get: { inherited || own },
                                                      set: { ledger.setVPNOnly($0, for: target) }))
                 .toggleStyle(.switch).controlSize(.small)
-                .disabled(inherited || (carriesVPN && !ledger.rules.vpnOnly(target)))
+                .disabled(inherited || (carriesVPN && !own))
                 .accessibilityIdentifier("inspector-vpn-only")
+            if own {
+                VPNCountryPicker(selection: Binding(get: { country ?? "" }, set: { ledger.setVPNCountry($0.isEmpty ? nil : $0, for: target) }))
+                    .controlSize(.small)
+                    .accessibilityIdentifier("inspector-vpn-country")
+            } else if inherited {
+                Text(VPNCountryNote.title(country)).font(.caption).accessibilityIdentifier("inspector-vpn-country")
+            }
             Text(carriesVPN ? "This app carries a VPN: its connection to the VPN server leaves outside the tunnel, so this would cut it."
                  : inherited ? "Set on the app, so it covers this process too."
                  : "Cuts every connection that leaves outside a VPN tunnel. Rat cuts a connection within milliseconds of it opening, not before: its first packets can still leave.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if (own || inherited) && country != nil {
+                Text(VPNCountryNote.text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(VPNCountryNote.now(ledger.tunnelServers, up: Set(ledger.routes.tunnelAddresses.values), names: ledger.routes.tunnelNames))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("inspector-vpn-servers")
+            }
         }
+    }
+}
+
+/// "Any VPN", then every country with its flag: where the VPN's server must be (`Rule.vpnCountry`).
+struct VPNCountryPicker: View {
+    @Binding var selection: String
+    var body: some View {
+        Picker("VPN server in", selection: $selection) {
+            Text("Any country").tag("")
+            ForEach(Countries.all, id: \.code) { Text(Countries.label($0.code)).tag($0.code) }
+        }
+    }
+}
+
+/// The words for a VPN country, shared by the inspector and the Rules window.
+enum VPNCountryNote {
+    /// "Only through a VPN in 🇩🇪 Germany".
+    static func title(_ country: String?) -> String { "Only through a VPN" + (country.map { " in \(Countries.label($0))" } ?? "") }
+
+    static let text = "The VPN's country is read offline from the address of its server (the VPN app's own connection, or the route it keeps to its server, in the bundled database), so a multi-hop VPN counts as its entry server's country. A connection through a VPN whose server is elsewhere, or cannot be placed, is cut too."
+
+    /// Where the tunnels that are up (`up`, and every one in `servers`) lead now: "Now: Windscribe → 🇳🇱 Netherlands". A
+    /// tunnel with no entry is still being looked at (the helper has not scanned it yet).
+    static func now(_ servers: [String: TunnelServer], up: Set<String> = [], names: [String: String]) -> String {
+        let tunnels = up.union(servers.keys)
+        guard !tunnels.isEmpty else { return "No VPN is up now." }
+        return "Now: " + tunnels.sorted().map { iface in
+            let name = names[iface] ?? iface
+            switch servers[iface] {
+            case let .country(c)?: return "\(name) → \(Countries.label(c))"
+            case .unknown?: return "\(name) → server not placed"
+            case nil: return "\(name) → finding its server…"
+            }
+        }.joined(separator: ", ")
     }
 }
 
