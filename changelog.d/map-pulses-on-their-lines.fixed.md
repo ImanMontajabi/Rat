@@ -1,1 +1,0 @@
-The map's moving traffic stays on its lines and inside the map: after the window took its saved size at launch, or the inspector was shown or hidden, pulses ran beside their lines and some were drawn over the app list.
