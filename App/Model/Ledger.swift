@@ -294,7 +294,7 @@ final class Ledger: ObservableObject {
         enforcer = Enforcer(supportDirectory: store.directory, helperInstalled: helperInstalled,
                             statusPath: helperInstalled == nil ? nil : store.directory.appendingPathComponent("enforcer-status.json").path,
                             proxiedPath: helperInstalled == nil ? nil : store.directory.appendingPathComponent("proxied.json").path)
-        myLocation = GeoService.localPoint()
+        myLocation = GeoService.localPoint(demo: demo)
         let saved = store.load()
         for a in saved.apps where !a.id.hasPrefix("pid ") {
             // Re-resolve plain executables so names learned by older versions ("2.1.308") are corrected and merged.

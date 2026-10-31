@@ -13,7 +13,8 @@ final class ReadmeScreenshots: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchEnvironment["RAT_DEMO_MAP"] = "1"
-        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        // English formats ("1.1 MB"), whatever this Mac's region is.
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-AppleLocale", "en_US", "-AppleLanguages", "(en)"]
         app.launch()
         XCTAssertTrue(el("app-row-Google Chrome").waitForExistence(timeout: 20))
     }

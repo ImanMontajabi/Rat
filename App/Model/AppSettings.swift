@@ -19,6 +19,9 @@ enum Preferences {
         #endif
     }()
 
+    /// The account name the inspector shows: a fixed one in demo mode, so screenshots never show this Mac's.
+    static func userName(demo: Bool = isDemo) -> String { demo ? "demo" : NSUserName() }
+
     static let store: UserDefaults = {
         guard isTesting || isDemo else { return UserDefaults.standard }
         let name = isDemo ? "com.imanmontajabi.Rat.demo" : "com.imanmontajabi.Rat.tests"

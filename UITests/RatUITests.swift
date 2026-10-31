@@ -257,6 +257,8 @@ final class RatUITests: XCTestCase {
         el("app-row-Telegram").click()
         let vpn = el("inspector-vpn-only")
         XCTAssertTrue(vpn.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["demo"].exists, "the demo's Process section shows a fixed account name")
+        XCTAssertFalse(app.staticTexts[NSUserName()].exists, "never this Mac's")
         XCTAssertFalse(el("inspector-vpn-country").exists, "no picker while the switch is off")
         vpn.click()
         XCTAssertTrue(waitSwitch(vpn, on: true))
