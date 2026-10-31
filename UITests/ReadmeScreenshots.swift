@@ -48,6 +48,23 @@ final class ReadmeScreenshots: XCTestCase {
         save(app.windows["Network Monitor"], "monitor-hierarchy-tags.png")
     }
 
+    /// Telegram allowed only through a VPN in the Netherlands: the inspector's switch, its country picker and where the
+    /// demo's Windscribe tunnel leads now.
+    func testVPNCountry() throws {
+        el("app-row-Telegram").click()
+        let vpn = el("inspector-vpn-only")
+        XCTAssertTrue(vpn.waitForExistence(timeout: 5))
+        vpn.click()
+        let picker = el("inspector-vpn-country")
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        picker.click()
+        let netherlands = app.menuItems.matching(NSPredicate(format: "title BEGINSWITH %@", "🇳🇱")).firstMatch
+        XCTAssertTrue(netherlands.waitForExistence(timeout: 5))
+        netherlands.click()
+        XCTAssertTrue(el("inspector-vpn-servers").waitForExistence(timeout: 5))
+        save(app.windows["Network Monitor"], "vpn-country.png")
+    }
+
     func testRulesWindow() throws {
         app.typeKey("r", modifierFlags: [.command, .shift])
         let rules = app.windows["Rules"]
