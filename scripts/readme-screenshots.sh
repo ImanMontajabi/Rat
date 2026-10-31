@@ -1,5 +1,5 @@
 #!/bin/sh
-# Retakes the README's screenshots (docs/screenshots/{monitor-hierarchy-tags,rules-window,settings-window}.png)
+# Retakes the README's screenshots (docs/screenshots/{monitor-hierarchy-tags,vpn-country,rules-window,settings-window}.png)
 # from the demo data with UITests/ReadmeScreenshots: nothing of this Mac's connections, rules or settings is shown.
 # Like scripts/test-ui.sh it needs a logged-in GUI session; keep hands off the keyboard and mouse while it runs.
 set -eu
@@ -27,7 +27,7 @@ os.makedirs(out, exist_ok=True)
 for test in json.load(open(os.path.join(src, "manifest.json"))):
     for a in test.get("attachments", []):
         name = a.get("suggestedHumanReadableName", "")
-        wanted = next((n for n in ("monitor-hierarchy-tags.png", "rules-window.png", "settings-window.png") if name.startswith(n[:-4])), None)
+        wanted = next((n for n in ("monitor-hierarchy-tags.png", "vpn-country.png", "rules-window.png", "settings-window.png") if name.startswith(n[:-4])), None)
         if wanted:
             shutil.copyfile(os.path.join(src, a["exportedFileName"]), os.path.join(out, wanted))
             print("saved", os.path.join(out, wanted))
