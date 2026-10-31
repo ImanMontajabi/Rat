@@ -43,11 +43,14 @@ public struct Connection: Sendable {
     /// The server's country (ISO 3166-1 alpha-2, from the offline GeoIP database), nil inside the local network or
     /// when the database has none. What a rule's `country` matches.
     public var country: String?
+    /// For a socket that goes through a VPN tunnel, where that tunnel's server is (`TunnelServer`); nil for one
+    /// that does not, or when nobody looked. What a rule's `vpnCountry` matches.
+    public var tunnelServer: TunnelServer?
 
     public enum Proto: String, Codable, Sendable { case tcp, udp }
 
     public init(process: ProcessIdentity, executable: String? = nil, host: String? = nil, address: String, port: Int, proto: Proto = .tcp,
-                offVPN: Bool? = nil, country: String? = nil) {
+                offVPN: Bool? = nil, country: String? = nil, tunnelServer: TunnelServer? = nil) {
         self.process = process
         self.executable = executable
         self.host = host
@@ -56,7 +59,16 @@ public struct Connection: Sendable {
         self.proto = proto
         self.offVPN = offVPN
         self.country = country
+        self.tunnelServer = tunnelServer
     }
+}
+
+/// The server a VPN tunnel goes to, as far as this Mac can tell offline: the country the City database gives the
+/// address the VPN client's own outside connection goes to (its carrier). `unknown` when no carrier was found, the
+/// carriers are in different countries, or the database has none of them. A multi-hop VPN shows its entry server.
+public enum TunnelServer: Sendable, Equatable {
+    case country(String)
+    case unknown
 }
 
 /// Which ✗/✓ of the process list made a rule: an app's row, one of its processes, or one connection.
@@ -94,6 +106,9 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
     /// (`Connection.offVPN`), so the app keeps working through the VPN and is cut when it drops. It decides before
     /// every other rule of the app, ✓ included (`RuleEngine.decide`).
     public var requireVPN: Bool
+    /// With `requireVPN`: the VPN's server must be in this country (ISO 3166-1 alpha-2), so a connection through a
+    /// tunnel to a server elsewhere, or to one whose country is not known, is cut too. Nil for any VPN.
+    public var vpnCountry: String?
     public var enabled: Bool
     /// Review marker. Rules created from alerts while "mark new rules as unapproved" is on stay active but
     /// carry a blue dot until approved; imported rules also arrive disabled, so they do nothing until approved.
@@ -107,13 +122,14 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
 
     public init(id: UUID = UUID(), verdict: Verdict, processPath: String? = nil, signingID: String? = nil, teamID: String? = nil,
                 executable: String? = nil, listLevel: ListLevel? = nil, remoteDomain: String? = nil, remoteHost: String? = nil, remoteAddress: String? = nil,
-                ports: ClosedRange<Int>? = nil, proto: Connection.Proto? = nil, country: String? = nil, requireVPN: Bool = false, enabled: Bool = true, approved: Bool = true,
+                ports: ClosedRange<Int>? = nil, proto: Connection.Proto? = nil, country: String? = nil, requireVPN: Bool = false, vpnCountry: String? = nil, enabled: Bool = true, approved: Bool = true,
                 lifetime: Lifetime = .forever, profileID: UUID? = nil, groupID: UUID? = nil,
                 createdAt: Date = Date(), note: String? = nil) {
         self.id = id; self.verdict = verdict; self.processPath = processPath; self.signingID = signingID; self.teamID = teamID
         self.executable = executable; self.listLevel = listLevel
         self.remoteDomain = remoteDomain; self.remoteHost = remoteHost; self.remoteAddress = remoteAddress
-        self.ports = ports; self.proto = proto; self.country = Self.countryCode(country); self.requireVPN = requireVPN; self.enabled = enabled; self.approved = approved
+        self.ports = ports; self.proto = proto; self.country = Self.countryCode(country); self.requireVPN = requireVPN
+        self.vpnCountry = requireVPN ? Self.countryCode(vpnCountry) : nil; self.enabled = enabled; self.approved = approved
         self.lifetime = lifetime; self.profileID = profileID; self.groupID = groupID; self.createdAt = createdAt; self.note = note
     }
 
@@ -128,6 +144,7 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
         try c.encodeIfPresent(ports, forKey: .ports); try c.encodeIfPresent(proto, forKey: .proto)
         try c.encodeIfPresent(country, forKey: .country)
         if requireVPN { try c.encode(true, forKey: .requireVPN) }
+        if requireVPN { try c.encodeIfPresent(vpnCountry, forKey: .vpnCountry) }
         try c.encode(enabled, forKey: .enabled); try c.encode(approved, forKey: .approved); try c.encode(lifetime, forKey: .lifetime)
         try c.encodeIfPresent(profileID, forKey: .profileID); try c.encodeIfPresent(groupID, forKey: .groupID)
         try c.encode(createdAt, forKey: .createdAt); try c.encodeIfPresent(note, forKey: .note)
@@ -136,7 +153,7 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
     // Tolerant decoding so rule files written by older versions (and hand edits) still load.
     enum CodingKeys: String, CodingKey {
         case id, verdict, processPath, signingID, teamID, executable, listLevel, remoteDomain, remoteHost, remoteAddress, ports, proto, country
-        case requireVPN, enabled, approved, lifetime, profileID, groupID, createdAt, note
+        case requireVPN, vpnCountry, enabled, approved, lifetime, profileID, groupID, createdAt, note
     }
 
     public init(from d: Decoder) throws {
@@ -155,6 +172,7 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
         proto = try c.decodeIfPresent(Connection.Proto.self, forKey: .proto)
         country = Self.countryCode(try c.decodeIfPresent(String.self, forKey: .country))
         requireVPN = try c.decodeIfPresent(Bool.self, forKey: .requireVPN) ?? false
+        vpnCountry = requireVPN ? Self.countryCode(try c.decodeIfPresent(String.self, forKey: .vpnCountry)) : nil
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         approved = try c.decodeIfPresent(Bool.self, forKey: .approved) ?? true
         lifetime = try c.decodeIfPresent(Lifetime.self, forKey: .lifetime) ?? .forever
@@ -189,7 +207,7 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
         if let ports { what += ports.lowerBound == ports.upperBound ? ":\(ports.lowerBound)" : ":\(ports.lowerBound)-\(ports.upperBound)" }
         if let proto { what += " (\(proto.rawValue.uppercased()))" }
         if let country { what += " in \(name(country))" }
-        if requireVPN { what += ", unless through a VPN" }
+        if requireVPN { what += ", unless through a VPN" + (vpnCountry.map { " in \(name($0))" } ?? "") }
         return "\(who) → \(what)"
     }
 
@@ -247,7 +265,11 @@ public struct Rule: Codable, Identifiable, Sendable, Equatable {
         }
         if let proto, proto != c.proto { return false }
         // Only what certainly leaves outside a tunnel: a route not known yet counts as through one (see `Unknown`).
-        if requireVPN, c.offVPN != true { return false }
+        // With a VPN country, a tunnel to a server elsewhere, or to one whose country could not be told, is cut too;
+        // a socket nobody placed in a tunnel (`tunnelServer` nil: local, or the route not known) is not.
+        if requireVPN, c.offVPN != true {
+            guard let vpnCountry, let server = c.tunnelServer, server != .country(vpnCountry) else { return false }
+        }
         if unknown.contains(.remote) { return true }
         if let ports, !ports.contains(c.port) { return false }
         if let remoteAddress, remoteAddress != c.address { return false }

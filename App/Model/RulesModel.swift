@@ -212,7 +212,7 @@ final class RulesModel: ObservableObject {
     /// outside a VPN tunnel (`Rule.requireVPN`), and for nothing else.
     private func isVPNOnlyRule(_ r: Rule, _ t: Target) -> Bool {
         r.requireVPN && r.verdict == .deny && r.processPath == t.app && r.signingID == nil && r.teamID == nil
-            && r.remoteDomain == nil && r.remoteHost == nil && r.remoteAddress == nil && r.ports == nil && r.proto == nil
+            && r.remoteDomain == nil && r.remoteHost == nil && r.remoteAddress == nil && r.ports == nil && r.proto == nil && r.country == nil
             && (t.executable.map { exe in r.executable.map { ProgramPath.same($0, exe) } == true } ?? (r.executable == nil))
     }
 
@@ -224,11 +224,24 @@ final class RulesModel: ObservableObject {
     /// A process follows its app's "Only through a VPN".
     func vpnOnlyInherited(_ t: Target) -> Bool { t.level == .process && vpnOnly(Target(app: t.app)) }
 
-    func setVPNOnly(_ on: Bool, for t: Target) {
+    /// The VPN country a row's "Only through a VPN" names (`Rule.vpnCountry`): its own, else (a process) its app's.
+    func vpnCountry(_ t: Target) -> String? {
+        let own = ruleSet.rules.first { isVPNOnlyRule($0, t) && $0.enabled && activeHere($0) }
+        return own.map(\.vpnCountry) ?? (t.level == .process ? vpnCountry(Target(app: t.app)) : nil)
+    }
+
+    /// Names the VPN's country on the row's own "Only through a VPN" (nil for any VPN); nothing without one.
+    func setVPNCountry(_ country: String?, for t: Target) {
+        guard t.endpoint == nil, let i = ruleSet.rules.firstIndex(where: { isVPNOnlyRule($0, t) && $0.enabled && activeHere($0) }) else { return }
+        ruleSet.rules[i].vpnCountry = Rule.countryCode(country)
+    }
+
+    /// `country` names the VPN's country (`Rule.vpnCountry`) for a rule switched on.
+    func setVPNOnly(_ on: Bool, for t: Target, country: String? = nil) {
         guard t.endpoint == nil else { return }
         ruleSet.rules.removeAll { isVPNOnlyRule($0, t) && activeHere($0) }
         guard on else { return }
-        var r = Rule(verdict: .deny, processPath: t.app, executable: t.executable, requireVPN: true)
+        var r = Rule(verdict: .deny, processPath: t.app, executable: t.executable, requireVPN: true, vpnCountry: country)
         r.approved = !ruleSet.markNewRulesAsUnapproved
         r.profileID = ruleSet.activeProfileID
         r.note = "Only through a VPN"

@@ -14,7 +14,7 @@ public struct DaemonRules: Codable, Equatable, Sendable {
     public var version = 1
     /// The enabled rules of the active profile (`RuleEngine.activeRules`), allow rules included: they decide too.
     public var rules: [Rule]
-    /// Rules with a condition helpers before 1.6.0 do not know (`Rule.hasCondition`: `requireVPN`, `country`). Kept apart so such a helper,
+    /// Rules with a condition helpers before 1.6.0 do not know (`Rule.hasCondition`: `requireVPN` with its `vpnCountry`, `country`). Kept apart so such a helper,
     /// still running until the user updates it, never reads them as a deny without the condition: it would cut the
     /// whole app. It skips them; Rat's own pass still cuts what they deny, through `denied-ports.txt`.
     public var conditionalRules: [Rule]
@@ -89,6 +89,11 @@ public final class SocketJudge: @unchecked Sendable {
     public let needsRoute: Bool
     /// A rule names a country (`Rule.country`), so the daemon looks servers up in `DaemonRules.geoDatabase`.
     public let needsCountry: Bool
+    /// A VPN-only rule names the VPN's country (`Rule.vpnCountry`), so the daemon finds each tunnel's server and
+    /// looks it up in the same database.
+    public let needsVPNCountry: Bool
+    /// Either: the daemon opens the database.
+    public var needsGeo: Bool { needsCountry || needsVPNCountry }
 
     public init(_ d: DaemonRules) {
         // The file holds the rules active in Rat's profile and groups already; the daemon has neither.
@@ -98,6 +103,7 @@ public final class SocketJudge: @unchecked Sendable {
         local.set(d.localRanges)
         needsRoute = d.allRules.contains { $0.enabled && $0.requireVPN }
         needsCountry = d.allRules.contains { $0.enabled && $0.country != nil }
+        needsVPNCountry = d.allRules.contains { $0.enabled && $0.requireVPN && $0.vpnCountry != nil }
         watchList = Array(Set(d.allRules.compactMap { r in r.enabled && r.verdict == .deny ? r.processPath.map { Watch(path: $0, executable: r.executable) } : nil })).sorted()
     }
 
@@ -117,8 +123,10 @@ public final class SocketJudge: @unchecked Sendable {
     /// Whether the rules deny a socket. `address` is "" (and `port` 0) for a socket not connected to a server.
     /// `offVPN` is whether it leaves outside a VPN tunnel (`Connection.offVPN`; nil when no rule asks). `country` is
     /// the server's country (`Connection.country`), and `countryKnown` false when there was no database to look in.
+    /// `tunnelServer` is where the tunnel the socket goes through leads (`Connection.tunnelServer`; nil when it goes
+    /// through none, or there was no database to look in).
     public func denies(app: String, executable: String, address: String, port: Int, proto: Connection.Proto, offVPN: Bool? = nil,
-                       country: String? = nil, countryKnown: Bool = false) -> Bool {
+                       country: String? = nil, countryKnown: Bool = false, tunnelServer: TunnelServer? = nil) -> Bool {
         let sig = signatures[app]
         var unknown: Rule.Unknown = sig == nil ? [.signing] : []
         if !countryKnown { unknown.insert(.country) }
@@ -129,7 +137,8 @@ public final class SocketJudge: @unchecked Sendable {
         else { unknown.insert(.host) }
         let c = Connection(process: ProcessIdentity(signingID: sig?.signingID, teamID: sig?.teamID, path: app), executable: executable,
                            host: host, address: connected ? address : "", port: connected ? port : 0, proto: proto, offVPN: offVPN,
-                           country: connected && countryKnown && !isLocal(address) ? country : nil)
+                           country: connected && countryKnown && !isLocal(address) ? country : nil,
+                           tunnelServer: connected && isLocal(address) ? nil : tunnelServer)
         let d = engine.decide(c, unknown: unknown)
         guard d.verdict == .deny, let rule = d.rule else { return false }
         // Rat's pass does not judge connections inside the local network by rules from alerts or the Rules window;

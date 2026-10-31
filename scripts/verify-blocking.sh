@@ -31,10 +31,16 @@
 #     python3 keeps downloading from the denied country; the anchor still holds ports only. With no readable
 #     database the daemon cuts nothing for a country. The database is the one next to the daemon in Rat.app, else
 #     RAT_GEOIP_DB, else the repo's App/Vendor copy.
+#  7. Only through a VPN in one country (#45; `Rule.vpnCountry`): needs a VPN carrying the Internet (skipped
+#     without one). The daemon's own `--tunnels` says where the tunnel leads; with the rule naming that country a
+#     plain curl through the VPN works, naming another country fresh curls through it are blocked, dig keeps
+#     resolving and the anchor holds ports only. A tunnel whose server cannot be placed is reported, and still cut.
 set -u
 [ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 2; }
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-DAEMON="${1:-$(ls -d "$HOME"/Library/Developer/Xcode/DerivedData/Rat-*/Build/Products/Debug/Rat.app/Contents/MacOS/rat-enforcerd 2>/dev/null | head -1)}"
+# The newest build: Xcode's Debug builds or the installed app's (an old Debug build lacks the newest phases' options).
+DAEMON="${1:-$(ls -td "$HOME"/Library/Developer/Xcode/DerivedData/Rat-*/Build/Products/Debug/Rat.app/Contents/MacOS/rat-enforcerd \
+  /Applications/Rat.app/Contents/MacOS/rat-enforcerd 2>/dev/null | head -1)}"
 [ -x "$DAEMON" ] || DAEMON="$ROOT/RatFilter/.build/debug/rat-enforcerd"
 [ -x "$DAEMON" ] || { echo "rat-enforcerd not found; pass its path" >&2; exit 2; }
 
@@ -373,10 +379,36 @@ PY
 fi
 echo '{}' > "$WORK/deny-rules.json"
 
+echo "== phase 7, only through a VPN in one country"
+vpn_country_rules() {  # vpn_country_rules <country>: curl only through a VPN whose server is in it
+  /usr/bin/python3 -I -c 'import json, sys; json.dump({"version": 1, "rules": [], "conditionalRules": [{"verdict": "deny", "processPath": "macOS", "executable": "/usr/bin/curl", "requireVPN": True, "vpnCountry": sys.argv[1]}], "names": {}, "signatures": {}, "localRanges": "", "geoDatabase": sys.argv[2]}, open(sys.argv[3] + ".tmp", "w"))' \
+    "$1" "$GEODB" "$WORK/deny-rules.json" && apply_rules
+}
+FULL=$(/sbin/route -n get 1.1.1.1 2>/dev/null | awk '/interface:/ { print $2 }')
+case "$FULL" in
+  utun*|ipsec*|ppp*|tun*|wg*)
+    LEADS=$("$DAEMON" --tunnels --geoip "$GEODB" 2>/dev/null | awk -v i="$FULL" '$1 == i { print $2; exit }')
+    echo "  the Internet goes through $FULL; its server is in ${LEADS:-?} ($("$DAEMON" --tunnels --geoip "$GEODB" 2>/dev/null | awk -v i="$FULL" '$1 == i { $1 = ""; $2 = ""; print; exit }' | sed 's/^ *//'))"
+    OTHER=IS; [ "$LEADS" = IS ] && OTHER=NZ
+    if [ -n "$LEADS" ] && [ "$LEADS" != - ]; then
+      vpn_country_rules "$LEADS"; sleep 1.5   # the tunnels' clients are scanned off the watch loop once
+      r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' https://example.com)
+      [ "$r" = 200 ] && echo "  ok through the VPN to $LEADS curl works (example.com -> 200)" || { echo "  FAIL curl through the VPN to $LEADS -> $r"; FAIL=1; }
+    else echo "  note: the tunnel's server cannot be placed; a rule naming any country cuts it"; fi
+    vpn_country_rules "$OTHER"; sleep 1.5
+    RVC=$(fresh 10 https://example.com)
+    echo "  rule for a VPN in $OTHER: $RVC/10 fresh curls through $FULL blocked completely"
+    [ "$RVC" -gt 0 ] || { echo "  FAIL no curl through a VPN to another country was blocked"; FAIL=1; }
+    /usr/bin/dig +short +time=2 +tries=1 example.com @1.1.1.1 | grep -q . && echo "  ok DNS (dig @1.1.1.1)" || { echo "  FAIL DNS to 1.1.1.1"; FAIL=1; }
+    /sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -qE '^pass|<' && { echo "  FAIL pass rule or table"; FAIL=1; } || echo "  ok anchor: ports only" ;;
+  *) RVC=; echo "  skip: no VPN carries the Internet (route via ${FULL:-?})" ;;
+esac
+echo '{}' > "$WORK/deny-rules.json"
+
 echo "== deny list and rules emptied: curl must work again"
 : > "$WORK/denied.txt"; sleep 7
 r=$(/usr/bin/curl -s -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' https://example.com)
 [ "$r" = 200 ] && echo "  ok example.com -> 200" || { echo "  FAIL example.com -> $r"; FAIL=1; }
 
-[ "$FAIL" = 0 ] && echo "PASS (fresh-process leak rate: $LEAKS/$TOTAL direct, ${PL:-?}/${PT:-?} through the proxy; rules: process $((10 - ${RP:-0}))/10, connection $((10 - ${RC:-0}))/10, by name $((10 - ${RN:-0}))/10, outside the VPN $([ -n "${RW:-}" ] && echo "$((10 - RW))/10" || echo skipped), country $([ -n "${RK:-}" ] && echo "$((10 - RK))/10" || echo skipped))" || echo "FAIL"
+[ "$FAIL" = 0 ] && echo "PASS (fresh-process leak rate: $LEAKS/$TOTAL direct, ${PL:-?}/${PT:-?} through the proxy; rules: process $((10 - ${RP:-0}))/10, connection $((10 - ${RC:-0}))/10, by name $((10 - ${RN:-0}))/10, outside the VPN $([ -n "${RW:-}" ] && echo "$((10 - RW))/10" || echo skipped), country $([ -n "${RK:-}" ] && echo "$((10 - RK))/10" || echo skipped), VPN country $([ -n "${RVC:-}" ] && echo "$((10 - RVC))/10" || echo skipped))" || echo "FAIL"
 exit "$FAIL"

@@ -339,7 +339,7 @@ struct RulesList: View {
         if let ports = r.ports { what += ports.lowerBound == ports.upperBound ? " : \(ports.lowerBound)" : " : \(ports.lowerBound)-\(ports.upperBound)" }
         if let proto = r.proto { what += " (\(proto.rawValue.uppercased()))" }
         if let c = r.country { what = what == "any server" ? "servers in \(Countries.label(c))" : "\(what) in \(Countries.label(c))" }
-        if r.requireVPN { return "Deny connections to \(what) outside a VPN" }
+        if r.requireVPN { return VPNCountryNote.title(r.vpnCountry) + (what == "any server" ? "" : ": \(what)") }
         return (r.verdict == .deny ? "Deny" : "Allow") + " connections to " + what
     }
 
@@ -414,6 +414,7 @@ struct RuleEditor: View {
     @State private var portText = ""
     @State private var protocolChoice = 0   // 0 any, 1 TCP, 2 UDP
     @State private var countryChoice = ""   // "" any
+    @State private var vpnCountryChoice = ""   // "" any VPN
 
     var body: some View {
         Form {
@@ -443,9 +444,13 @@ struct RuleEditor: View {
             }
             Section("Condition") {
                 Toggle("Only through a VPN", isOn: $rule.requireVPN).accessibilityIdentifier("rule-vpn-only")
+                if rule.requireVPN {
+                    VPNCountryPicker(selection: $vpnCountryChoice).accessibilityIdentifier("rule-vpn-country")
+                }
                 Text(processScope == .any ? "Needs a process: for any process it would cut the VPN client's own connection too."
                      : "Denies only the connections that leave outside a VPN tunnel, before the app's other rules. They are cut within milliseconds of opening, not before: the first packets can still leave.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if rule.requireVPN, !vpnCountryChoice.isEmpty { Text(VPNCountryNote.text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             }
             Section("Where it applies") {
                 Picker("Profile", selection: $rule.profileID) {
@@ -492,6 +497,7 @@ struct RuleEditor: View {
         r.ports = parsedPorts ?? nil
         r.proto = protocolChoice == 1 ? .tcp : protocolChoice == 2 ? .udp : nil
         r.country = countryChoice.isEmpty ? nil : countryChoice
+        r.vpnCountry = r.requireVPN && !vpnCountryChoice.isEmpty ? vpnCountryChoice : nil
         return r
     }
 
@@ -506,6 +512,7 @@ struct RuleEditor: View {
         if let p = rule.ports { portText = p.lowerBound == p.upperBound ? "\(p.lowerBound)" : "\(p.lowerBound)-\(p.upperBound)" }
         protocolChoice = rule.proto == .tcp ? 1 : rule.proto == .udp ? 2 : 0
         countryChoice = rule.country ?? ""
+        vpnCountryChoice = rule.vpnCountry ?? ""
     }
 }
 
