@@ -1,1 +1,0 @@
-Safari web apps made with Add to Dock show as themselves, with the name and icon you gave them, instead of one "Web App" row for all of them. Their WebKit networking process is listed under the web app it works for. A ✗ on a web app blocks that web app only, not your other web apps or Safari; the helper needs Update Helper for this.
