@@ -6,10 +6,18 @@ struct InspectorView: View {
     let selection: MonitorSelection?
     /// The list's search and chips: the Summary counts what they leave.
     var filter = MonitorFilter()
+    /// The place chosen on the map: while there is one, the inspector shows what goes there.
+    var place: Binding<MapPlace?> = .constant(nil)
+    /// Shows one app (from the place's list of apps).
+    var showApp: (AppEntry) -> Void = { _ in }
 
     var body: some View {
         ScrollView {
-            if let s = selection, let app = ledger.apps.first(where: { $0.id == s.appID }) {
+            if let p = place.wrappedValue {
+                DestinationInspector(place: p,
+                                     summary: MapDestinations.summary(p, apps: filter.apps(ledger, settings: .shared), selection: selection, filter: filter),
+                                     showApp: showApp, close: { place.wrappedValue = nil })
+            } else if let s = selection, let app = ledger.apps.first(where: { $0.id == s.appID }) {
                 if let id = s.remote, let r = app.remotes.first(where: { $0.id == id }) {
                     RemoteInspector(app: app, remote: r)
                 } else {

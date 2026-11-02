@@ -459,7 +459,21 @@ struct ProcessRow: View {
 
     /// The ✗/✓ of a process or connection row: its own choice, or the one it follows from its process or app shown
     /// muted. None for a row no rule can name (a local connection), and a lock for services that work for every app.
-    @ViewBuilder private func rowPolicy(_ target: RulesModel.Target?, service: String?, subject: String) -> some View {
+    private func rowPolicy(_ target: RulesModel.Target?, service: String?, subject: String) -> some View {
+        RowPolicy(app: app, target: target, service: service, subject: subject)
+    }
+}
+
+/// The ✗/✓ of a process or connection row: its own choice, or the one it follows (muted). A shared system service
+/// with no rule of its own is locked: denying it would cut every app. Nothing for a row no rule can name.
+struct RowPolicy: View {
+    @EnvironmentObject var ledger: Ledger
+    let app: AppEntry
+    let target: RulesModel.Target?
+    let service: String?
+    let subject: String
+
+    var body: some View {
         if let target {
             let p = ledger.rules.rowPolicy(target)
             if p.own == nil, app.identity.isSystem, let service, SharedServices.note(for: service) != nil {
