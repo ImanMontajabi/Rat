@@ -360,7 +360,8 @@ public final class EnforcerDaemon {
                 if let r = responsible { return r }
                 let r = ProcessGrouping.responsiblePath(of: pid); responsible = .some(r); return r
             }
-            let entry = path.hasPrefix("pid ") ? nil : denied.entry(for: path, responsiblePath: responsiblePath)
+            let webApp = { SafariWebApp.bundle(pid: pid, path: path) }
+            let entry = path.hasPrefix("pid ") ? nil : denied.entry(for: path, responsiblePath: responsiblePath, webApp: webApp)
             verdictCache[pid] = entry ?? ""
             if entry != nil {
                 deniedPIDs.insert(pid)
@@ -368,7 +369,7 @@ public final class EnforcerDaemon {
                 if trace { FileHandle.standardError.write(Data("denied pid \(pid) (\(entry!))\n".utf8)) }
             } else if let judge, !path.hasPrefix("pid ") {
                 // The app as Rat's list groups it, so a rule for the app or for one of its processes matches here too.
-                let app = ProcessGrouping.owner(of: path, responsiblePath: responsiblePath).ruleKey
+                let app = ProcessGrouping.owner(of: path, responsiblePath: responsiblePath, webApp: webApp).ruleKey
                 setWatched(pid, judge.watches(app: app, executable: path) ? Watched(app: app, executable: path) : nil)
             } else {
                 setWatched(pid, nil)

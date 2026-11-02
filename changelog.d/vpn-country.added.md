@@ -1,1 +1,0 @@
-Only through a VPN can name the VPN's country (Only through a VPN in 🇩🇪 Germany): Rat and the helper find each tunnel's server offline from the VPN app's own connection (for WireGuard, the route it keeps to its server) and cut the app's connections through a tunnel that leads elsewhere.

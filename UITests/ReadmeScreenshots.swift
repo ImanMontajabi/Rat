@@ -13,7 +13,8 @@ final class ReadmeScreenshots: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchEnvironment["RAT_DEMO_MAP"] = "1"
-        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        // English formats ("1.1 MB"), whatever this Mac's region is.
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-AppleLocale", "en_US", "-AppleLanguages", "(en)"]
         app.launch()
         XCTAssertTrue(el("app-row-Google Chrome").waitForExistence(timeout: 20))
     }
@@ -46,6 +47,34 @@ final class ReadmeScreenshots: XCTestCase {
         XCTAssertTrue(el("remote-row-demo3.example.com").waitForExistence(timeout: 5))
         XCTAssertTrue(el("summary-filtered").waitForExistence(timeout: 5))
         save(app.windows["Network Monitor"], "monitor-hierarchy-tags.png")
+    }
+
+    /// Telegram allowed only through a VPN in the Netherlands: the inspector's switch, its country picker and where the
+    /// demo's Windscribe tunnel leads now.
+    func testVPNCountry() throws {
+        el("app-row-Telegram").click()
+        let vpn = el("inspector-vpn-only")
+        XCTAssertTrue(vpn.waitForExistence(timeout: 5))
+        vpn.click()
+        let picker = el("inspector-vpn-country")
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        picker.click()
+        let netherlands = app.menuItems.matching(NSPredicate(format: "title BEGINSWITH %@", "🇳🇱")).firstMatch
+        XCTAssertTrue(netherlands.waitForExistence(timeout: 5))
+        netherlands.click()
+        XCTAssertTrue(el("inspector-vpn-servers").waitForExistence(timeout: 5))
+        save(app.windows["Network Monitor"], "vpn-country.png")
+    }
+
+    /// A place chosen on the map: the Paris pin, its lines highlighted, and the inspector's apps and connections there,
+    /// each with its own ✗/✓.
+    func testMapPlace() throws {
+        let paris = el("map-place-Paris")
+        XCTAssertTrue(paris.waitForExistence(timeout: 10))
+        paris.click()
+        XCTAssertTrue(el("destination-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(el("destination-remote-video.example.net").waitForExistence(timeout: 5))
+        save(app.windows["Network Monitor"], "map-place.png")
     }
 
     func testRulesWindow() throws {

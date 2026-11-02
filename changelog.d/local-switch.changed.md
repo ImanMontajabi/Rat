@@ -1,1 +1,0 @@
-Local connections have a labeled Local switch beside the search field: turn it off to hide this Mac's own, LAN and Bonjour traffic in the list, the map and the Summary. It replaces the small house icon inside the search field, and keeps its setting.

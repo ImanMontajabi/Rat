@@ -15,13 +15,15 @@ struct AppIdentity: Hashable {
     var ruleKey: String { bundlePath ?? id }
 
     /// The grouping itself is `ProcessGrouping.owner`, which the root daemon uses too, so both name the same app.
+    /// A Safari web app (Add to Dock) is its own app, named by its bundle in ~/Applications (`SafariWebApp`).
     static func resolve(processPath path: String, pid: Int32? = nil) -> AppIdentity {
-        switch ProcessGrouping.owner(of: path, responsiblePath: { pid.flatMap(ProcessGrouping.responsiblePath(of:)) }) {
+        switch ProcessGrouping.owner(of: path, responsiblePath: { pid.flatMap(ProcessGrouping.responsiblePath(of:)) },
+                                     webApp: { pid.flatMap { SafariWebApp.bundle(pid: $0, path: path) } }) {
         case .app(let bundle, let isExtension):
             // "Steam.AppBundle" holds Steam's client and helpers; other bundles show the name Finder shows.
             let name = bundle.hasSuffix(".AppBundle")
                 ? ((bundle as NSString).lastPathComponent as NSString).deletingPathExtension
-                : FileManager.default.displayName(atPath: bundle).replacingOccurrences(of: ".app", with: "")
+                : (mayBeWebApp(path, bundle) ? webAppName(bundle) : nil) ?? FileManager.default.displayName(atPath: bundle).replacingOccurrences(of: ".app", with: "")
             // App extensions (.appex) are listed separately from their host app, like Little Snitch's "EXT" rows.
             if isExtension { return AppIdentity(id: bundle + "#ext", name: name, bundlePath: bundle, isSystem: false, isExtension: true) }
             return AppIdentity(id: bundle, name: name, bundlePath: bundle, isSystem: false)
@@ -32,6 +34,21 @@ struct AppIdentity: Hashable {
         }
     }
 
+    /// A Safari web app's name as its Info.plist gives it (`CFBundleDisplayName`, else `CFBundleName`): the name the
+    /// user chose in Add to Dock, which the bundle's file name may shorten or number. Nil for other bundles.
+    /// Only the program that runs web apps, a service working for one, or the bundle itself (a saved app, a rule's
+    /// path) can stand for a web app; other processes never read an Info.plist here.
+    static func mayBeWebApp(_ path: String, _ bundle: String) -> Bool {
+        path == bundle || SafariWebApp.isHost(path) || ProcessGrouping.actsForOthers(path)
+    }
+
+    static func webAppName(_ bundle: String) -> String? {
+        guard let b = Bundle(path: bundle), b.bundleIdentifier?.hasPrefix(SafariWebApp.identifierPrefix) == true else { return nil }
+        let name = (b.localizedInfoDictionary?["CFBundleDisplayName"] ?? b.infoDictionary?["CFBundleDisplayName"]
+                    ?? b.localizedInfoDictionary?["CFBundleName"] ?? b.infoDictionary?["CFBundleName"]) as? String
+        return name.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
     @MainActor static var mainProcessCache: [String: String?] = [:]
 
     /// The executable the app runs as ("Google Chrome"). A connection held by another process (a helper) is shown
@@ -39,7 +56,9 @@ struct AppIdentity: Hashable {
     @MainActor var mainProcessName: String? {
         if isSystem { return nil }
         if let c = Self.mainProcessCache[id] { return c }
-        let name = bundlePath.map { Bundle(path: $0)?.executableURL?.lastPathComponent } ?? (id as NSString).lastPathComponent
+        // A Safari web app's bundle has no program of its own: Safari's "Web App" runs it.
+        let name: String? = bundlePath.map { b -> String? in SafariWebApp.isWebAppBundle(b) ? "Web App" : Bundle(path: b)?.executableURL?.lastPathComponent }
+            ?? (id as NSString).lastPathComponent
         Self.mainProcessCache[id] = .some(name)
         return name
     }
