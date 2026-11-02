@@ -1,1 +1,0 @@
-The helper deletes 1.0.3's leftover address list before its first pf check, so `verify-blocking.sh`'s start-up check no longer fails on a cold start; phase 5 skips the cut outside the tunnel when something else (a VPN's kill switch) already blocks it.

@@ -1,0 +1,1 @@
+The READMEs (English and Persian) open with what is new in 1.6 and show Only through a VPN in a country in a screenshot; the Persian page gives Only through a VPN and country rules sections of their own.

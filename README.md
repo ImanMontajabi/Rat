@@ -21,19 +21,21 @@ Rat is a network monitor and application firewall for macOS, modelled on Little 
 
 > **Honest limits.** Little Snitch intercepts each connection *before* it is made, using Apple's Network Extension entitlement, which needs a paid developer account. Rat has none, so it is **reactive**: it notices a connection after it starts, and cuts a denied app's connections by their local ports. A brand-new process can get its first packets out before the cut. The app is ad-hoc signed and not notarized. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (sections 7, 8 and 10).
 
-## New in 1.6
+## New in 1.7
 
-- **[Only through a VPN](#only-through-a-vpn):** an app, or one of its processes, keeps working only through a VPN tunnel. Its connections outside the tunnel are cut within milliseconds.
-- **[A VPN in one country](#only-through-a-vpn):** *Only through a VPN in 🇩🇪 Germany* also cuts its connections through a VPN that leads elsewhere. Rat finds the VPN's server offline, WireGuard included.
-- **[Rules for a country](#rules-for-a-country):** deny or allow the servers in one country, picked by its flag.
-- **A labeled Local switch** beside the search field hides LAN and Bonjour traffic. Traffic on the map moves as laser tracers, and the inspector lists a row's rules without repeating its ✗/✓.
+- **[A place on the map](#one-monitor-three-synchronized-panes):** click a city's pin or a line to it, and the inspector lists the apps and every connection that go there, with the data and rate now and each connection's own ✗/✓. The map's own + / − buttons zoom without letting go of the place.
+- **[Safari web apps](#process-tree-three-levels-deep)** made with Add to Dock show by the name and icon you gave them, each with its own WebKit networking process. A ✗ on one cuts that web app only, not your other web apps or Safari (after Update Helper in Settings > Security).
+- **An honest total rate:** the menu bar, the session totals and the chart count the traffic your network line carries, once. Loopback and local proxies no longer count, and VPN traffic no longer counts twice.
+- **View Options** keeps its Group By and Sort By submenus open while traffic updates the list.
+
+1.6 added [Only through a VPN](#only-through-a-vpn) (optionally a VPN in one country), [rules for a country](#rules-for-a-country) and the Local switch.
 
 Every release's notes are in [CHANGELOG.md](CHANGELOG.md) and on the [releases page](https://github.com/ImanMontajabi/Rat/releases).
 
 ## What makes Rat different
 
 ### Process tree, three levels deep
-Expand an app to see its direct connections and its helper and child processes, then expand a process to see its connections. Examples are `com.apple.WebKit.Networking` under Safari, `Google Chrome Helper` under Chrome, `steam_osx` under Steam, and services such as `mDNSResponder` and `nsurlsessiond` under macOS (marked when they work for other apps). Every process and every connection has its own traffic counters and its own ✗/✓: deny or allow the whole app, one of its processes, or one connection (that process, server, port and protocol). The narrowest choice decides, and a row that has none shows the one it follows, muted. For a command-line tool, the inspector shows which app started it (*Started by Warp*), but its rules stay its own.
+Expand an app to see its direct connections and its helper and child processes, then expand a process to see its connections. Examples are `com.apple.WebKit.Networking` under Safari, a Safari web app from Add to Dock under its own name and icon with its own `com.apple.WebKit.Networking`, `Google Chrome Helper` under Chrome, `steam_osx` under Steam, and services such as `mDNSResponder` and `nsurlsessiond` under macOS (marked when they work for other apps). Every process and every connection has its own traffic counters and its own ✗/✓: deny or allow the whole app, one of its processes, or one connection (that process, server, port and protocol). The narrowest choice decides, and a row that has none shows the one it follows, muted. For a command-line tool, the inspector shows which app started it (*Started by Warp*), but its rules stay its own.
 
 ### The real destination behind local proxies and SSH tunnels
 With `http_proxy`, `https_proxy`, `ALL_PROXY`, an `ssh -D` SOCKS tunnel, or a local v2ray/Xray/Clash/sing-box proxy, socket-based monitors usually see only `127.0.0.1:<port>` and the proxy's one connection to its server. Rat shows **both**:
@@ -67,9 +69,12 @@ Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
 
 ### One monitor, three synchronized panes
 - **Left:** the app list with sparklines, session totals and a 5m / 1h / 1d / 1w traffic chart.
-- **Middle:** the world map, drawing only what the list shows. Busy connections show their traffic moving, purple for sent and blue for received, only while the window is visible and Reduce Motion is off.
-- **Right:** the inspector for the selected app, process or connection, or a Summary of top processes, domains, countries and networks that follows the search and filters.
+- **Middle:** the world map, drawing only what the list shows. Busy connections show their traffic moving, purple for sent and blue for received, only while the window is visible and Reduce Motion is off. Click a city's pin or a line to it to see what goes there.
+- **Right:** the inspector for the selected app, process or connection, or a Summary of top processes, domains, countries and networks that follows the search and filters. For a place chosen on the map it lists the apps and every connection that go there, with the data and rate now, and each connection's ✗/✓ to deny or allow it right there.
 - **Local switch:** the Local switch beside the search field hides local-network traffic (the LAN, multicast and Bonjour) in the list, the map and the Summary when turned off, and Rat remembers it.
+
+![A place on the map: Paris with its two connections from Google Chrome and Telegram](docs/screenshots/map-place.png)
+<sub>Demo data. Paris is chosen on the map: its pin is marked and only the lines that go there stay lit. The inspector shows Paris with its flag, "2 connections from 2 apps", the data sent and received and the rate now, then each app and each connection with its own ✗/✓.</sub>
 
 ### Everything else
 - **Connection alerts:** **Silent Allow** is the default, so a fresh install never nags. **Alert Mode** shows a floating panel for unknown connections, with a scope (app, domain, host, port) and a lifetime (once, until quit, forever).

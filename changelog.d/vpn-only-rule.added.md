@@ -1,1 +1,0 @@
-**Only through a VPN** (#45): a switch in the inspector for an app or one of its processes, and a condition in the Rules window. Every connection the app makes outside a VPN tunnel is cut by the helper within milliseconds, whatever ✓ it has; Rat cuts after a connection opens, so its first packets can still leave (update the helper in Settings > Security for the fast cut).

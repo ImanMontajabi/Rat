@@ -257,6 +257,8 @@ final class RatUITests: XCTestCase {
         el("app-row-Telegram").click()
         let vpn = el("inspector-vpn-only")
         XCTAssertTrue(vpn.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["demo"].exists, "the demo's Process section shows a fixed account name")
+        XCTAssertFalse(app.staticTexts[NSUserName()].exists, "never this Mac's")
         XCTAssertFalse(el("inspector-vpn-country").exists, "no picker while the switch is off")
         vpn.click()
         XCTAssertTrue(waitSwitch(vpn, on: true))
@@ -505,6 +507,106 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(waitValue(map, "London"), "a city: only the lines to it: \(map.value ?? "nil")")
         search("")
         XCTAssertTrue((map.value as? String ?? "").contains("Madrid"))
+    }
+
+    /// A place on the map is chosen by its pin or by a line to it: the inspector lists the apps and connections that
+    /// go there, with the connections' ✗/✓; Escape, a click on empty map or an app in the list lets go of it.
+    func testMapPlaceShowsItsAppsAndConnections() {
+        let paris = el("map-place-Paris")
+        XCTAssertTrue(paris.waitForExistence(timeout: 10), "the pins are buttons")
+        paris.click()
+        let title = el("destination-title")
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "the place's inspector")
+        XCTAssertTrue(waitValue(paris, "selected"), "the pin shows it is chosen: \(paris.value ?? "nil")")
+        XCTAssertTrue("\(title.label) \(title.value ?? "")".contains("Paris"), "\(title.label)")
+        XCTAssertTrue(waitText(el("destination-counts"), "2 connections from 2 apps"))
+        XCTAssertTrue(el("destination-app-Google Chrome").exists); XCTAssertTrue(el("destination-app-Telegram").exists)
+        XCTAssertTrue(el("destination-remote-video.example.net").exists); XCTAssertTrue(el("destination-remote-demo3.example.com").exists)
+        let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        shot.name = "place-Paris"; shot.lifetime = .keepAlways
+        add(shot)
+
+        // The connection's ✗ works from here, and clicking it again clears it.
+        let deny = el("destination-policy-video.example.net").buttons["policy-deny"]
+        XCTAssertEqual(deny.value as? String, "off")
+        deny.click()
+        XCTAssertTrue(waitValue(deny, "on"), "\(deny.value ?? "nil")")
+        deny.click()
+        XCTAssertTrue(waitValue(deny, "off"))
+
+        // The zoom buttons zoom (Paris and Frankfurt move apart, then together) and keep the place.
+        func gap() -> CGFloat { let a = paris.frame, b = el("map-place-Frankfurt").frame; return hypot(a.midX - b.midX, a.midY - b.midY) }
+        let before = gap()
+        el("map-zoom-in").click()
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate { _, _ in gap() > before * 1.5 }, evaluatedWith: nil)], timeout: 5) == .completed,
+                      "zoomed in: \(before) → \(gap())")
+        XCTAssertTrue(title.exists, "zooming keeps the place")
+        el("map-zoom-out").click()
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate { _, _ in gap() < before * 1.3 }, evaluatedWith: nil)], timeout: 5) == .completed,
+                      "zoomed out: \(before) → \(gap())")
+        XCTAssertTrue(title.exists, "zooming keeps the place")
+        XCTAssertTrue(waitValue(paris, "selected"))
+
+        // Escape lets go of the place: the Summary is back.
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitGone(title), "Escape closes the place")
+        XCTAssertTrue(el("summary-counts").waitForExistence(timeout: 5))
+        XCTAssertTrue(waitValue(paris, ""))
+
+        // A click on the line to Stockholm chooses Stockholm; Firefox passes there through its SOCKS proxy.
+        let line = el("map-route-Stockholm")
+        XCTAssertTrue(line.waitForExistence(timeout: 5))
+        line.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "a line chooses the place it ends at")
+        XCTAssertTrue("\(title.label) \(title.value ?? "")".contains("Stockholm"), "\(title.label)")
+        XCTAssertTrue(el("destination-app-Firefox").exists)
+
+        // A click on empty map lets go of it.
+        el("map-place-London").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: -120, dy: 40)).click()   // west of London: open sea, no line
+        XCTAssertTrue(waitGone(title), "empty map clears the place")
+
+        // An app in the place's list shows that app.
+        paris.click()
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        el("destination-app-Telegram").click()
+        XCTAssertTrue(waitGone(title))
+        XCTAssertTrue(inspectorTitle().contains("Telegram"), inspectorTitle())
+    }
+
+    /// The View Options submenus stay open while the monitor redraws on every pass (here demo ticks, as live traffic
+    /// does every 1.5 s), and their choices work.
+    func testViewOptionsSubmenusStayOpenWhileTrafficUpdates() {
+        app.terminate()
+        app.launchEnvironment["RAT_DEMO_TICK"] = "1"
+        app.launch()
+        XCTAssertTrue(el("app-row-Google Chrome").waitForExistence(timeout: 20))
+        let passes = el("monitor-passes")
+        func count() -> Int { Int(passes.value as? String ?? "") ?? 0 }
+        for (menu, entry, other) in [("Group By", "Domain", "Country"), ("Sort By", "Name", "Traffic")] {
+            el("view-options").click()
+            let opener = app.menuItems.matching(NSPredicate(format: "title == %@", menu)).firstMatch
+            XCTAssertTrue(opener.waitForExistence(timeout: 3), menu)
+            opener.hover()
+            let item = app.menuItems.matching(NSPredicate(format: "title == %@", entry)).firstMatch
+            let second = app.menuItems.matching(NSPredicate(format: "title == %@", other)).firstMatch
+            XCTAssertTrue(item.waitForExistence(timeout: 3), "\(menu) opens")
+            let start = count()
+            var checks = 0
+            // At least three passes with the pointer moving inside the submenu.
+            while count() < start + 3 && checks < 20 {
+                (checks % 2 == 0 ? second : item).hover()
+                XCTAssertTrue(item.exists && item.isHittable, "\(menu) still open after \(count() - start) passes")
+                checks += 1
+            }
+            XCTAssertGreaterThanOrEqual(count(), start + 3, "the monitor redrew while \(menu) was open")
+            item.click()
+            // The choice works: grouped by domain, the apps sit inside collapsed groups.
+            if menu == "Group By" { XCTAssertTrue(waitGone(el("app-row-Google Chrome")), "grouped by domain") }
+        }
+        el("view-options").click()
+        app.menuItems.matching(NSPredicate(format: "title == %@", "Group By")).firstMatch.hover()
+        app.menuItems.matching(NSPredicate(format: "title == %@", "Process")).firstMatch.click()
+        XCTAssertTrue(el("app-row-Google Chrome").waitForExistence(timeout: 5), "back to apps")
     }
 
     /// The Summary counts what the list shows, and says so while a filter is on.

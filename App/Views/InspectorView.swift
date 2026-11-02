@@ -6,10 +6,18 @@ struct InspectorView: View {
     let selection: MonitorSelection?
     /// The list's search and chips: the Summary counts what they leave.
     var filter = MonitorFilter()
+    /// The place chosen on the map: while there is one, the inspector shows what goes there.
+    var place: Binding<MapPlace?> = .constant(nil)
+    /// Shows one app (from the place's list of apps).
+    var showApp: (AppEntry) -> Void = { _ in }
 
     var body: some View {
         ScrollView {
-            if let s = selection, let app = ledger.apps.first(where: { $0.id == s.appID }) {
+            if let p = place.wrappedValue {
+                DestinationInspector(place: p,
+                                     summary: MapDestinations.summary(p, apps: filter.apps(ledger, settings: .shared), selection: selection, filter: filter),
+                                     showApp: showApp, close: { place.wrappedValue = nil })
+            } else if let s = selection, let app = ledger.apps.first(where: { $0.id == s.appID }) {
                 if let id = s.remote, let r = app.remotes.first(where: { $0.id == id }) {
                     RemoteInspector(app: app, remote: r)
                 } else {
@@ -125,7 +133,7 @@ struct ProcessInspector: View {
                 } else {
                     kv("Path", app.identity.bundlePath ?? app.identity.id)
                     kv("Code ID", [team, ident].compactMap { $0 }.joined(separator: "/").nilIfEmpty ?? "unsigned")
-                    kv("User", NSUserName())
+                    kv("User", Preferences.userName())
                     kv("PIDs", app.pids.sorted().map(String.init).joined(separator: ", "))
                     let others = app.processes.keys.filter { $0 != app.mainProcess }.sorted()
                     if !others.isEmpty, app.identity.bundlePath != nil { kv("Helpers", others.joined(separator: ", ")) }
@@ -186,7 +194,8 @@ struct ProcessInspector: View {
                         }.padding(.leading, 6).padding(.bottom, 4)
                     }
                 } else {
-                    if let process, let note = SharedServices.note(for: process) {
+                    // Under an app (Safari, a Safari web app) its WebKit.Networking works for that app, which is named.
+                    if let process, app.identity.isSystem, let note = SharedServices.note(for: process) {
                         Text("Works for other apps: \(note)").font(.caption).foregroundStyle(.secondary).padding(.leading, 6).fixedSize(horizontal: false, vertical: true)
                     }
                     ForEach(remotes.prefix(50)) { r in

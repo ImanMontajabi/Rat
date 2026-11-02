@@ -115,22 +115,8 @@ struct SidebarView: View {
     private var toolbar: some View {
         HStack(spacing: 16) {
             Spacer()
-            Menu {
-                Menu {
-                    Picker("Group By", selection: $settings.groupBy) { ForEach(AppSettings.GroupBy.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.inline)
-                } label: { Label("Group By", systemImage: "list.bullet.indent") }
-                Menu {
-                    Picker("Sort By", selection: $settings.sortKey) { ForEach(AppSettings.SortKey.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.inline)
-                } label: { Label("Sort By", systemImage: "arrow.up.arrow.down") }
-                Divider()
-                Toggle(isOn: $settings.includeLocalNetwork) { Label("Show Local Network", systemImage: "desktopcomputer") }
-                Toggle(isOn: $settings.includeNetworkExtensions) { Label("Show Network Extensions", systemImage: "puzzlepiece.extension") }
-                Toggle(isOn: $settings.includeOtherUsers) { Label("Show Connections of Other Users", systemImage: "person") }
-                Divider()
-                Toggle(isOn: $settings.floatOnTop) { Label("Float on Top", systemImage: "macwindow.on.rectangle") }
-            } label: { Image(systemName: "slider.horizontal.3") }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .help("View options")
+            // AppKit's menu: this pane redraws on every pass, and a SwiftUI menu was rebuilt under an open submenu.
+            ViewOptionsMenu().fixedSize()
             Button { showChart.toggle() } label: { Image(systemName: "chart.bar") }
                 .help(showChart ? "Hide Traffic Chart" : "Show Traffic Chart")
             Button { showInspector.toggle() } label: { Image(systemName: "info.circle") }
@@ -209,6 +195,9 @@ struct SidebarView: View {
                 Spacer()
                 Text("Last \(range.title)").font(.caption).foregroundStyle(.secondary)
             }
+            // How many passes the window has seen, for the UI tests (a menu must stay open across them).
+            Text("Passes").font(.system(size: 1)).foregroundStyle(.clear).allowsHitTesting(false).frame(height: 1)
+                .accessibilityValue("\(ledger.passes)").accessibilityIdentifier("monitor-passes")
         }
         .padding(10)
     }
@@ -470,7 +459,21 @@ struct ProcessRow: View {
 
     /// The ✗/✓ of a process or connection row: its own choice, or the one it follows from its process or app shown
     /// muted. None for a row no rule can name (a local connection), and a lock for services that work for every app.
-    @ViewBuilder private func rowPolicy(_ target: RulesModel.Target?, service: String?, subject: String) -> some View {
+    private func rowPolicy(_ target: RulesModel.Target?, service: String?, subject: String) -> some View {
+        RowPolicy(app: app, target: target, service: service, subject: subject)
+    }
+}
+
+/// The ✗/✓ of a process or connection row: its own choice, or the one it follows (muted). A shared system service
+/// with no rule of its own is locked: denying it would cut every app. Nothing for a row no rule can name.
+struct RowPolicy: View {
+    @EnvironmentObject var ledger: Ledger
+    let app: AppEntry
+    let target: RulesModel.Target?
+    let service: String?
+    let subject: String
+
+    var body: some View {
         if let target {
             let p = ledger.rules.rowPolicy(target)
             if p.own == nil, app.identity.isSystem, let service, SharedServices.note(for: service) != nil {
@@ -484,6 +487,95 @@ struct ProcessRow: View {
             Color.clear.frame(width: 44, height: 1)
         }
     }
+}
+
+/// The View Options button and its menu (group, sort, the three Show options, Float on Top), in AppKit. A SwiftUI
+/// `Menu` here is rebuilt by every pass that redraws the sidebar (every 1.5 s), even as a view of its own: an open
+/// Group By or Sort By submenu then lost the item under the pointer, and a click on it did nothing. This `NSMenu` is
+/// built once and owned by AppKit while it is open; its checkmarks are read from `AppSettings` when it opens.
+struct ViewOptionsMenu: NSViewRepresentable {
+    func makeCoordinator() -> ViewOptionsMenuController { ViewOptionsMenuController() }
+
+    func makeNSView(context: Context) -> NSButton {
+        let b = NSButton(image: NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "View Options") ?? NSImage(),
+                         target: context.coordinator, action: #selector(ViewOptionsMenuController.show(_:)))
+        b.isBordered = false
+        b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+        b.contentTintColor = .labelColor
+        b.toolTip = "View options"
+        b.setAccessibilityLabel("View Options")
+        b.setAccessibilityIdentifier("view-options")
+        b.setContentHuggingPriority(.required, for: .horizontal)
+        return b
+    }
+
+    func updateNSView(_ view: NSButton, context: Context) {}
+}
+
+@MainActor
+final class ViewOptionsMenuController: NSObject, NSMenuDelegate {
+    private var settings: AppSettings { .shared }
+    private(set) lazy var menu: NSMenu = build()
+
+    @objc func show(_ sender: NSButton) {
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + 4), in: sender)
+    }
+
+    private func build() -> NSMenu {
+        let m = NSMenu()
+        m.delegate = self
+        m.addItem(submenu("Group By", symbol: "list.bullet.indent", AppSettings.GroupBy.allCases.map { ($0.rawValue, #selector(pickGroup(_:))) }))
+        m.addItem(submenu("Sort By", symbol: "arrow.up.arrow.down", AppSettings.SortKey.allCases.map { ($0.rawValue, #selector(pickSort(_:))) }))
+        m.addItem(.separator())
+        m.addItem(item("Show Local Network", symbol: "desktopcomputer", #selector(toggleLocal)))
+        m.addItem(item("Show Network Extensions", symbol: "puzzlepiece.extension", #selector(toggleExtensions)))
+        m.addItem(item("Show Connections of Other Users", symbol: "person", #selector(toggleOtherUsers)))
+        m.addItem(.separator())
+        m.addItem(item("Float on Top", symbol: "macwindow.on.rectangle", #selector(toggleFloat)))
+        refresh(m)
+        return m
+    }
+
+    private func item(_ title: String, symbol: String? = nil, _ action: Selector) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        i.target = self
+        if let symbol { i.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
+        return i
+    }
+
+    private func submenu(_ title: String, symbol: String, _ choices: [(String, Selector)]) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        i.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        let sub = NSMenu(title: title)
+        sub.delegate = self
+        for (name, action) in choices { sub.addItem(item(name, action)) }
+        i.submenu = sub
+        return i
+    }
+
+    /// The checkmarks, from the settings: read each time a menu opens, never while it is open.
+    func menuNeedsUpdate(_ menu: NSMenu) { refresh(self.menu) }
+
+    func refresh(_ m: NSMenu) {
+        for i in m.items {
+            switch i.title {
+            case "Group By": i.submenu?.items.forEach { $0.state = $0.title == settings.groupBy.rawValue ? .on : .off }
+            case "Sort By": i.submenu?.items.forEach { $0.state = $0.title == settings.sortKey.rawValue ? .on : .off }
+            case "Show Local Network": i.state = settings.includeLocalNetwork ? .on : .off
+            case "Show Network Extensions": i.state = settings.includeNetworkExtensions ? .on : .off
+            case "Show Connections of Other Users": i.state = settings.includeOtherUsers ? .on : .off
+            case "Float on Top": i.state = settings.floatOnTop ? .on : .off
+            default: break
+            }
+        }
+    }
+
+    @objc func pickGroup(_ sender: NSMenuItem) { if let g = AppSettings.GroupBy(rawValue: sender.title) { settings.groupBy = g } }
+    @objc func pickSort(_ sender: NSMenuItem) { if let k = AppSettings.SortKey(rawValue: sender.title) { settings.sortKey = k } }
+    @objc func toggleLocal() { settings.includeLocalNetwork.toggle() }
+    @objc func toggleExtensions() { settings.includeNetworkExtensions.toggle() }
+    @objc func toggleOtherUsers() { settings.includeOtherUsers.toggle() }
+    @objc func toggleFloat() { settings.floatOnTop.toggle() }
 }
 
 /// The chevron that opens a row, as a button so it is reachable by keyboard and UI tests.
