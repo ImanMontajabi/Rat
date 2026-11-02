@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import Combine
 
 struct MapPane: View {
     @EnvironmentObject var ledger: Ledger
@@ -88,6 +89,10 @@ struct MapPane: View {
     }
 
     @StateObject private var window = WindowVisibility()
+    /// The zoom buttons' requests to the map.
+    @StateObject private var zoom = MapZoom()
+    /// The map's size, to keep clicks on MapKit's logo and Legal link from letting go of the place.
+    @State private var mapSize = CGSize.zero
     /// Not observed here: a pan moves the pulses, it does not rebuild the map.
     @State private var camera = MapCameraTicks()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -101,7 +106,7 @@ struct MapPane: View {
             MapReader { proxy in
                 ZStack {
                     // Redrawn only when a pin or a line changes, not on every pass (MapKit draws on each update).
-                    MapLayer(nodes: g.nodes, arcs: g.arcs, me: ledger.myLocation, fit: fit, camera: camera).equatable()
+                    MapLayer(nodes: g.nodes, arcs: g.arcs, me: ledger.myLocation, fit: fit, camera: camera, zoom: zoom).equatable()
                     FlowOverlay(camera: camera,
                                 lines: g.arcs.filter { $0.flow != .idle }.map { FlowOverlay.Line(id: $0.id, coords: $0.coords, flow: $0.flow, fast: max($0.rateIn, $0.rateOut) >= MapFlows.fastRate) },
                                 proxy: proxy, paused: !animating)
@@ -113,10 +118,18 @@ struct MapPane: View {
                 .simultaneousGesture(SpatialTapGesture(coordinateSpace: .named(FlowOverlay.space)).onEnded { tap in
                     let pins = g.nodes.compactMap { n in proxy.convert(n.point.coordinate, to: .named(FlowOverlay.space)).map { (key: n.id, at: $0) } }
                     let lines = g.arcs.map { a in (key: a.place, points: a.coords.compactMap { proxy.convert($0, to: .named(FlowOverlay.space)) }) }
-                    choose(MapDestinations.hit(tap.location, pins: pins, lines: lines), in: g.nodes)
+                    let key = MapDestinations.hit(tap.location, pins: pins, lines: lines)
+                    if key == nil, MapDestinations.onAttribution(tap.location, in: mapSize) { return }
+                    choose(key, in: g.nodes)
                 })
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { mapSize = $0 }
             }
             .clipped()
+            // Beside the map, not in it: a click on them never reaches the map's click, so it keeps the chosen place
+            // (MapKit's own zoom stepper sits inside the map, where every click also lands on the map).
+            MapZoomButtons(zoom: zoom)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 10).padding(.bottom, 26)
 
             if !ledger.geo.available {
                 Text("Offline GeoIP database not found, so server locations are unavailable.")
@@ -170,7 +183,11 @@ struct MapLayer: View, Equatable {
     let fit: MKCoordinateRegion
     /// Told about every camera move (not compared).
     let camera: MapCameraTicks
+    /// The zoom buttons (not compared): each request scales the region the map shows now.
+    var zoom = MapZoom()
     @State private var position: MapCameraPosition = .region(MapPane.region(fitting: []))
+    /// The region shown, once the camera stops (what the zoom buttons scale).
+    @State private var shown: MKCoordinateRegion?
 
     static func == (a: MapLayer, b: MapLayer) -> Bool {
         a.me == b.me && sameRegion(a.fit, b.fit)
@@ -217,10 +234,12 @@ struct MapLayer: View, Equatable {
             }
         }
         .onMapCameraChange(frequency: .continuous) { camera.version &+= 1 }
+        .onMapCameraChange(frequency: .onEnd) { shown = $0.region }
+        .onReceive(zoom.requests) { factor in withAnimation { position = .region(MapZoom.scaled(shown ?? fit, by: factor)) } }
         .onChange(of: fitKey) { _, _ in withAnimation { position = .region(fit) } }
         .onAppear { position = .region(fit) }
         .mapStyle(.standard(elevation: .realistic, emphasis: .muted, pointsOfInterest: .excludingAll))
-        .mapControls { MapZoomStepper() }
+        .mapControls { }   // zoom: `MapZoomButtons`, outside the map
     }
 }
 
@@ -266,5 +285,43 @@ struct MapPlacesOverlay: View {
         func city(_ key: Substring) -> String { nodes.first { $0.id == key }?.point.city ?? String(key.split(separator: "|").first ?? key) }
         let from = a.id.split(separator: ">", maxSplits: 1).first ?? ""
         return from == "me" ? city(Substring(a.place)) : city(from) + separator + city(Substring(a.place))
+    }
+}
+
+/// Zoom requests from `MapZoomButtons` to `MapLayer`.
+final class MapZoom: ObservableObject {
+    let requests = PassthroughSubject<Double, Never>()
+    /// Shows half the span (`factor` 0.5: closer) or twice it (2: farther).
+    func zoom(by factor: Double) { requests.send(factor) }
+
+    /// The region around the same center with its span scaled, kept between a street and the whole world.
+    static func scaled(_ r: MKCoordinateRegion, by factor: Double) -> MKCoordinateRegion {
+        MKCoordinateRegion(center: r.center, span: MKCoordinateSpan(latitudeDelta: min(max(r.span.latitudeDelta * factor, 0.01), 170),
+                                                                    longitudeDelta: min(max(r.span.longitudeDelta * factor, 0.01), 360)))
+    }
+}
+
+/// + and − for the map, like MapKit's zoom stepper.
+struct MapZoomButtons: View {
+    let zoom: MapZoom
+
+    var body: some View {
+        VStack(spacing: 0) {
+            button("plus", factor: 0.5, label: "Zoom In", id: "map-zoom-in")
+            Divider().frame(width: 18)
+            button("minus", factor: 2, label: "Zoom Out", id: "map-zoom-out")
+        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+    }
+
+    private func button(_ symbol: String, factor: Double, label: String, id: String) -> some View {
+        Button { zoom.zoom(by: factor) } label: {
+            Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).frame(width: 28, height: 26).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(id)
     }
 }

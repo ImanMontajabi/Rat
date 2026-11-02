@@ -1,5 +1,6 @@
 import XCTest
 import CoreGraphics
+import MapKit
 @testable import Rat
 
 /// A place chosen on the map (its pin or a line to it): what goes there, what the map highlights, and which click
@@ -81,6 +82,21 @@ final class MapDestinationTests: XCTestCase {
         XCTAssertTrue(scoped.arcs.allSatisfy(\.highlighted))
         XCTAssertEqual(MapPlacesOverlay.routeName(try XCTUnwrap(g.arcs.first { $0.id == "Stockholm|Sweden>Madrid|Spain" }), nodes: g.nodes, separator: "-"), "Stockholm-Madrid")
         XCTAssertEqual(MapPlacesOverlay.routeName(try XCTUnwrap(g.arcs.first { $0.id == "me>Paris|France" }), nodes: g.nodes, separator: "-"), "Paris")
+    }
+
+    /// The zoom buttons halve or double the span around the same center, between a street and the whole world; a
+    /// click on MapKit's logo and Legal link is not a click on empty map.
+    func testZoomScalesTheRegionAndTheAttributionCornerIsNotEmptyMap() {
+        let r = MKCoordinateRegion(center: .init(latitude: 50, longitude: 10), span: .init(latitudeDelta: 40, longitudeDelta: 60))
+        let closer = MapZoom.scaled(r, by: 0.5), farther = MapZoom.scaled(r, by: 2)
+        XCTAssertEqual(closer.span.latitudeDelta, 20); XCTAssertEqual(closer.span.longitudeDelta, 30)
+        XCTAssertEqual(closer.center.latitude, 50); XCTAssertEqual(farther.span.longitudeDelta, 120)
+        XCTAssertEqual(MapZoom.scaled(MapZoom.scaled(r, by: 8), by: 8).span.latitudeDelta, 170, "never past the whole world")
+        XCTAssertEqual(MapZoom.scaled(MKCoordinateRegion(center: r.center, span: .init(latitudeDelta: 0.015, longitudeDelta: 0.015)), by: 0.5).span.latitudeDelta, 0.01)
+        let size = CGSize(width: 800, height: 600)
+        XCTAssertTrue(MapDestinations.onAttribution(CGPoint(x: 40, y: 590), in: size))
+        XCTAssertFalse(MapDestinations.onAttribution(CGPoint(x: 40, y: 500), in: size))
+        XCTAssertFalse(MapDestinations.onAttribution(CGPoint(x: 400, y: 590), in: size))
     }
 
     /// A click on a pin chooses it; near a line, the place the line ends at; elsewhere, nothing.

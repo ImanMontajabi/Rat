@@ -99,6 +99,12 @@ enum MapDestinations {
         return best?.0
     }
 
+    /// MapKit's logo and Legal link, in the map's bottom-left corner: a click there is not a click on empty map.
+    static let attribution = CGSize(width: 130, height: 30)
+    static func onAttribution(_ p: CGPoint, in size: CGSize) -> Bool {
+        p.x <= attribution.width && p.y >= size.height - attribution.height
+    }
+
     /// The distance from `p` to the segment `a`–`b`.
     static func segmentDistance(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
         let dx = b.x - a.x, dy = b.y - a.y

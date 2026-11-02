@@ -534,6 +534,19 @@ final class RatUITests: XCTestCase {
         deny.click()
         XCTAssertTrue(waitValue(deny, "off"))
 
+        // The zoom buttons zoom (Paris and Frankfurt move apart, then together) and keep the place.
+        func gap() -> CGFloat { let a = paris.frame, b = el("map-place-Frankfurt").frame; return hypot(a.midX - b.midX, a.midY - b.midY) }
+        let before = gap()
+        el("map-zoom-in").click()
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate { _, _ in gap() > before * 1.5 }, evaluatedWith: nil)], timeout: 5) == .completed,
+                      "zoomed in: \(before) → \(gap())")
+        XCTAssertTrue(title.exists, "zooming keeps the place")
+        el("map-zoom-out").click()
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate { _, _ in gap() < before * 1.3 }, evaluatedWith: nil)], timeout: 5) == .completed,
+                      "zoomed out: \(before) → \(gap())")
+        XCTAssertTrue(title.exists, "zooming keeps the place")
+        XCTAssertTrue(waitValue(paris, "selected"))
+
         // Escape lets go of the place: the Summary is back.
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(waitGone(title), "Escape closes the place")
