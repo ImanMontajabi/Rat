@@ -216,6 +216,12 @@ struct ChartLayout {
     var labelFormat: Date.FormatStyle
 }
 
+/// The network interfaces' counters, read with nettop's, and which interfaces lead to the Internet (`InternetTraffic`).
+struct LinkSample: Sendable {
+    var counters: [InterfaceCounter]
+    var internet: Set<String>
+}
+
 struct TrafficPoint: Identifiable {
     let date: Date
     let rx: Double
@@ -268,6 +274,9 @@ final class Ledger: ObservableObject {
     var streams = StreamDetector()
     /// Each row's byte counters on the last pass (app id and row id), for its rate.
     private var rowBytes: [String: (in: UInt64, out: UInt64)] = [:]
+    /// The Mac's own traffic, from the interfaces that lead to the Internet: the header's rate, the session's totals and
+    /// the chart. A sum over processes would count a byte through loopback, a local proxy or a VPN twice.
+    private var internetTraffic = InternetTraffic()
     let routes = RouteMarker()
     /// Where each VPN tunnel leads, by interface (#45): the country of the server its client carries it to, from the
     /// helper's view when it publishes one (it sees VPN clients running as root, and their local relays), else from
@@ -349,7 +358,7 @@ final class Ledger: ObservableObject {
     private func loop() async {
         while running && !demo {
             let useSnapshot = enforcer.systemSnapshotText()
-            let (conns, traffic) = await Task.detached(priority: .utility) { () -> ([ObservedConnection], TrafficSampler.Sample) in
+            let (conns, traffic, link, sampled) = await Task.detached(priority: .utility) { () -> ([ObservedConnection], TrafficSampler.Sample, LinkSample, Date) in
                 var c = ConnectionSampler.sample()
                 if let text = useSnapshot {
                     // Root helper snapshot: adds processes this app cannot inspect (other users, system daemons).
@@ -365,10 +374,15 @@ final class Ledger: ObservableObject {
                         c.append(x)
                     }
                 }
-                return (c, TrafficSampler.sampleWithFlows())
+                let traffic = TrafficSampler.sampleWithFlows()
+                // Read beside nettop's counters, and timed here: the pass's rates divide by the time between two
+                // samples, not by when the main actor got to them.
+                let link = LinkSample(counters: InternetTraffic.counters(),
+                                      internet: InternetTraffic.internetInterfaces(defaultRoutes: InternetTraffic.defaultRouteInterfaces()))
+                return (c, traffic, link, Date())
             }.value
             systemWide = useSnapshot != nil
-            await ingest(conns, traffic.processes, flows: traffic.flows)
+            await ingest(conns, traffic.processes, flows: traffic.flows, link: link, now: sampled)
             rules.refreshNetwork()
             refreshEnforcement()
             alerts.revalidate()
@@ -395,11 +409,13 @@ final class Ledger: ObservableObject {
         return s
     }
 
-    /// `now` is the pass's time (tests give their own, so rates do not depend on how fast the machine runs).
-    func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter], flows: [FlowCounter] = [], now: Date = Date()) async {
+    /// `now` is when the counters were read (tests give their own, so rates do not depend on how fast the machine runs).
+    /// `link` is the interfaces' counters read with them, for the Mac's total traffic (none: the total stays 0).
+    func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter], flows: [FlowCounter] = [], link: LinkSample? = nil, now: Date = Date()) async {
         // Which connections a peer started: their local port is a listener's.
         let conns = SocketDirection.mark(conns)
-        let dt = max(now.timeIntervalSince(lastTick), 0.2)
+        // The time between this sample and the last; the floor only keeps a pass run right after another finite.
+        let dt = max(now.timeIntervalSince(lastTick), 0.05)
         lastTick = now
         let warmedUp = now.timeIntervalSince(startedAt) > 12   // don't alert for sockets that already existed at launch
 
@@ -434,13 +450,12 @@ final class Ledger: ObservableObject {
         }
         let resolveProxied = AppSettings.shared.resolveProxiedHosts
 
+        // Each app's rate counts every socket it holds (its rows show what it moved); the Mac's total counts the lines.
         var rxByApp: [String: Double] = [:], txByApp: [String: Double] = [:]
-        var totalRx = 0.0, totalTx = 0.0
         for t in traffic {
             defer { previous[t.pid] = t }
             guard let p = previous[t.pid], t.bytesIn >= p.bytesIn, t.bytesOut >= p.bytesOut else { continue }
             let dIn = Double(t.bytesIn - p.bytesIn), dOut = Double(t.bytesOut - p.bytesOut)
-            totalRx += dIn; totalTx += dOut
             let ident: AppIdentity
             if let i = identityByPid[t.pid] { ident = i } else {
                 let path = ConnectionSampler.path(of: t.pid)
@@ -457,8 +472,12 @@ final class Ledger: ObservableObject {
                 table[ident.id]!.processes[name]?.totalIn += UInt64(dIn); table[ident.id]!.processes[name]?.totalOut += UInt64(dOut)
             }
         }
-        sessionIn += UInt64(totalRx); sessionOut += UInt64(totalTx)
+        let total = link.map { internetTraffic.update($0.counters, internet: $0.internet) } ?? (0, 0)
+        let totalRx = Double(total.bytesIn), totalTx = Double(total.bytesOut)
+        sessionIn += total.bytesIn; sessionOut += total.bytesOut
         rateIn = totalRx / dt; rateOut = totalTx / dt
+        // `log stream --level debug --predicate 'subsystem == "com.imanmontajabi.Rat" AND category == "ledger"'` shows it live.
+        logger.debug("total \(Int(self.rateIn), privacy: .public) B/s in, \(Int(self.rateOut), privacy: .public) B/s out over \(dt, format: .fixed(precision: 3), privacy: .public) s on \(link?.internet.sorted().joined(separator: ",") ?? "-", privacy: .public)")
         history.append(TrafficPoint(date: now, rx: totalRx, tx: totalTx))
         if history.count > 2400 { history.removeFirst(history.count - 2400) }
         let minute = Date(timeIntervalSince1970: (now.timeIntervalSince1970 / 60).rounded(.down) * 60)
