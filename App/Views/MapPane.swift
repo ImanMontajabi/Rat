@@ -6,6 +6,8 @@ struct MapPane: View {
     let selection: MonitorSelection?
     /// The list's search and filters: only the apps and connections they leave are drawn.
     var filter = MonitorFilter()
+    /// The place chosen on the map (a pin, or a line to it): its lines and pin are drawn highlighted, the rest dimmed.
+    var place: Binding<MapPlace?> = .constant(nil)
 
     /// The visible region: every pin with some margin, never tighter than a regional view (15 degrees), so a lone
     /// "This Mac" pin does not zoom into streets or open water.
@@ -22,40 +24,56 @@ struct MapPane: View {
 
     private var visibleApps: [AppEntry] { filter.apps(ledger, settings: .shared).filter { selection == nil || $0.id == selection?.appID } }
 
-    private static func key(_ g: GeoPoint) -> String { "\(g.city)|\(g.country)" }
+    private static func key(_ g: GeoPoint) -> String { MapDestinations.key(g) }
 
     /// A line on the map, and the traffic of the connections it stands for on the last pass.
     struct Arc: Identifiable {
         let id: String
         let coords: [CLLocationCoordinate2D]
-        let highlighted: Bool
+        var highlighted: Bool
         let proxied: Bool
+        /// The place the line ends at: a click on the line chooses it.
+        var place = ""
         var rateIn = 0.0
         var rateOut = 0.0
         var flow: FlowDirection { FlowDirection(rateIn: rateIn, rateOut: rateOut) }
     }
-    struct Node: Identifiable { let id: String; let point: GeoPoint; let highlighted: Bool; var proxy: Bool }
+    struct Node: Identifiable {
+        let id: String
+        let point: GeoPoint
+        var highlighted: Bool
+        var proxy: Bool
+        /// The place chosen on the map.
+        var selected = false
+    }
 
     /// Pins and lines. A connection through a local proxy is drawn in two hops, This Mac → proxy server → real
     /// destination (the second hop dashed); when the proxy's server is unknown, one dashed line to the destination.
     /// A line's traffic is the sum of its connections' (both hops of a proxied one carry it).
-    static func graph(apps: [AppEntry], selection: MonitorSelection?, filter: MonitorFilter, me: GeoPoint?) -> (nodes: [Node], arcs: [Arc]) {
+    /// With a place chosen, only the lines of connections that go there (both hops of one through a proxy) and their
+    /// pins are highlighted.
+    static func graph(apps: [AppEntry], selection: MonitorSelection?, filter: MonitorFilter, me: GeoPoint?, place: String? = nil) -> (nodes: [Node], arcs: [Arc]) {
         var nodes: [String: Node] = [:], order: [String] = []
         var arcs: [String: Arc] = [:], arcOrder: [String] = []
-        let highlighted = selection != nil
+        var highlighted = selection != nil
         func add(_ g: GeoPoint, proxy: Bool) {
             let k = key(g)
-            if nodes[k] == nil { nodes[k] = Node(id: k, point: g, highlighted: highlighted, proxy: proxy); order.append(k) }
-            else if proxy { nodes[k]!.proxy = true }
+            if nodes[k] == nil { nodes[k] = Node(id: k, point: g, highlighted: highlighted, proxy: proxy, selected: k == place); order.append(k) }
+            else {
+                if proxy { nodes[k]!.proxy = true }
+                if highlighted { nodes[k]!.highlighted = true }
+            }
         }
         func arc(from a: CLLocationCoordinate2D, _ aKey: String, to b: GeoPoint, proxied: Bool, _ r: RemoteHost) {
             let id = "\(aKey)>\(key(b))"
             guard aKey != key(b) else { return }
-            if arcs[id] == nil { arcs[id] = Arc(id: id, coords: curve(from: a, to: b.coordinate), highlighted: highlighted, proxied: proxied); arcOrder.append(id) }
+            if arcs[id] == nil { arcs[id] = Arc(id: id, coords: curve(from: a, to: b.coordinate), highlighted: highlighted, proxied: proxied, place: key(b)); arcOrder.append(id) }
+            else if highlighted { arcs[id]!.highlighted = true }
             arcs[id]!.rateIn += r.rateIn; arcs[id]!.rateOut += r.rateOut
         }
         for a in apps {
             for r in a.remotes(for: selection) where filter.matches(r, of: a) {
+                if let place { highlighted = r.geo.map(key) == place || r.via?.serverGeo.map(key) == place }
                 if let server = r.via?.serverGeo {
                     add(server, proxy: true)
                     if let me { arc(from: me.coordinate, "me", to: server, proxied: false, r) }
@@ -75,7 +93,7 @@ struct MapPane: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let g = Self.graph(apps: visibleApps, selection: selection, filter: filter, me: ledger.myLocation)
+        let g = Self.graph(apps: visibleApps, selection: selection, filter: filter, me: ledger.myLocation, place: place.wrappedValue?.key)
         let fit = Self.region(fitting: g.nodes.map(\.point.coordinate) + (ledger.myLocation.map { [$0.coordinate] } ?? []))
         let flows = g.arcs.map(\.flow)
         let animating = MapFlows.animates(visible: window.visible, reduceMotion: reduceMotion, flows: flows)
@@ -87,8 +105,16 @@ struct MapPane: View {
                     FlowOverlay(camera: camera,
                                 lines: g.arcs.filter { $0.flow != .idle }.map { FlowOverlay.Line(id: $0.id, coords: $0.coords, flow: $0.flow, fast: max($0.rateIn, $0.rateOut) >= MapFlows.fastRate) },
                                 proxy: proxy, paused: !animating)
+                    MapPlacesOverlay(camera: camera, nodes: g.nodes, arcs: g.arcs, proxy: proxy) { choose($0, in: g.nodes) }
                 }
                 .coordinateSpace(.named(FlowOverlay.space))
+                // A click on a line chooses the place it ends at; one on empty map clears the choice. (A pin is a
+                // button of `MapPlacesOverlay`; the same click lands here too and finds the same pin.)
+                .simultaneousGesture(SpatialTapGesture(coordinateSpace: .named(FlowOverlay.space)).onEnded { tap in
+                    let pins = g.nodes.compactMap { n in proxy.convert(n.point.coordinate, to: .named(FlowOverlay.space)).map { (key: n.id, at: $0) } }
+                    let lines = g.arcs.map { a in (key: a.place, points: a.coords.compactMap { proxy.convert($0, to: .named(FlowOverlay.space)) }) }
+                    choose(MapDestinations.hit(tap.location, pins: pins, lines: lines), in: g.nodes)
+                })
             }
             .clipped()
 
@@ -111,6 +137,11 @@ struct MapPane: View {
                 .accessibilityIdentifier("map-flows")
         }
         .background(WindowVisibilityReader(visibility: window))
+    }
+
+    private func choose(_ key: String?, in nodes: [Node]) {
+        let chosen = key.flatMap { k in nodes.first { $0.id == k } }.map { MapPlace($0.point) }
+        if place.wrappedValue != chosen { place.wrappedValue = chosen }
     }
 
     /// "Madrid, Proxy · Stockholm": the places drawn, sorted; "No servers" when the filter leaves none.
@@ -143,7 +174,7 @@ struct MapLayer: View, Equatable {
 
     static func == (a: MapLayer, b: MapLayer) -> Bool {
         a.me == b.me && sameRegion(a.fit, b.fit)
-            && a.nodes.map { "\($0.id)|\($0.highlighted)|\($0.proxy)" } == b.nodes.map { "\($0.id)|\($0.highlighted)|\($0.proxy)" }
+            && a.nodes.map { "\($0.id)|\($0.highlighted)|\($0.proxy)|\($0.selected)" } == b.nodes.map { "\($0.id)|\($0.highlighted)|\($0.proxy)|\($0.selected)" }
             && a.arcs.map { "\($0.id)|\($0.highlighted)|\($0.proxied)" } == b.arcs.map { "\($0.id)|\($0.highlighted)|\($0.proxied)" }
     }
 
@@ -169,10 +200,12 @@ struct MapLayer: View, Equatable {
                         Image(systemName: "arrow.triangle.branch").font(.system(size: 9, weight: .bold)).foregroundStyle(.orange)
                             .frame(width: 18, height: 18)
                             .background(RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.9)))
-                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(n.highlighted ? Color.orange : .gray, lineWidth: 2))
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(n.highlighted ? Color.orange : .gray, lineWidth: n.selected ? 3 : 2))
+                            .scaleEffect(n.selected ? 1.3 : 1)
                     } else {
-                        Circle().fill(.white.opacity(0.85)).frame(width: 14, height: 14)
-                            .overlay(Circle().stroke(n.highlighted ? Color.blue : .gray, lineWidth: 2))
+                        Circle().fill(n.selected ? Color.blue.opacity(0.9) : .white.opacity(0.85)).frame(width: n.selected ? 18 : 14, height: n.selected ? 18 : 14)
+                            .overlay(Circle().stroke(n.selected ? Color.white : n.highlighted ? Color.blue : .gray, lineWidth: n.selected ? 3 : 2))
+                            .shadow(color: n.selected ? .blue.opacity(0.8) : .clear, radius: 6)
                     }
                 }
             }
@@ -188,5 +221,50 @@ struct MapLayer: View, Equatable {
         .onAppear { position = .region(fit) }
         .mapStyle(.standard(elevation: .realistic, emphasis: .muted, pointsOfInterest: .excludingAll))
         .mapControls { MapZoomStepper() }
+    }
+}
+
+/// The map's places as buttons over their pins, and a marker in the middle of each line, following the camera like
+/// the pulses. A pin is clicked here (MapKit's annotations are not buttons, and lines take no clicks at all); the
+/// line markers only give VoiceOver and the UI tests where a line runs (`map-route-<city>`).
+struct MapPlacesOverlay: View {
+    @ObservedObject var camera: MapCameraTicks
+    let nodes: [MapPane.Node]
+    let arcs: [MapPane.Arc]
+    let proxy: MapProxy
+    let choose: (String) -> Void
+
+    var body: some View {
+        let _ = camera.version
+        ZStack(alignment: .topLeading) {
+            Color.clear.allowsHitTesting(false)
+            ForEach(nodes) { n in
+                if let at = proxy.convert(n.point.coordinate, to: .named(FlowOverlay.space)) {
+                    Button { choose(n.id) } label: { Color.clear.frame(width: 24, height: 24).contentShape(Circle()) }
+                        .buttonStyle(.plain)
+                        .position(at)
+                        .help(n.proxy ? "Proxy · \(n.point.place)" : n.point.place)
+                        .accessibilityLabel(n.proxy ? "Proxy · \(n.point.place)" : n.point.place)
+                        .accessibilityValue(n.selected ? "selected" : "")
+                        .accessibilityIdentifier("map-place-\(n.point.city)")
+                }
+            }
+            ForEach(arcs) { a in
+                if let mid = a.coords.isEmpty ? nil : proxy.convert(a.coords[a.coords.count / 2], to: .named(FlowOverlay.space)) {
+                    Color.clear.frame(width: 2, height: 2).position(mid).allowsHitTesting(false)
+                        .accessibilityElement()
+                        .accessibilityLabel(Self.routeName(a, nodes: nodes, separator: " → "))
+                        .accessibilityIdentifier("map-route-" + Self.routeName(a, nodes: nodes, separator: "-"))
+                }
+            }
+        }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { _ in camera.resized() }
+    }
+
+    /// "Toronto" for a line from This Mac, "Stockholm-Madrid" for a proxy's second hop.
+    static func routeName(_ a: MapPane.Arc, nodes: [MapPane.Node], separator: String) -> String {
+        func city(_ key: Substring) -> String { nodes.first { $0.id == key }?.point.city ?? String(key.split(separator: "|").first ?? key) }
+        let from = a.id.split(separator: ">", maxSplits: 1).first ?? ""
+        return from == "me" ? city(Substring(a.place)) : city(from) + separator + city(Substring(a.place))
     }
 }

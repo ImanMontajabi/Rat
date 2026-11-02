@@ -5,6 +5,8 @@ struct MonitorWindow: View {
     @EnvironmentObject var ledger: Ledger
     @ObservedObject private var settings = AppSettings.shared
     @State private var selection: MonitorSelection?
+    /// The place chosen on the map (a pin or a line): the inspector shows what goes there.
+    @State private var place: MapPlace?
     @State private var showInspector = true
     @State private var showChart = true
     @State private var filter = MonitorFilter(hideLocal: AppSettings.shared.hideLocal)
@@ -13,9 +15,10 @@ struct MonitorWindow: View {
         HStack(spacing: 0) {
             SidebarView(selection: $selection, showChart: $showChart, showInspector: $showInspector, filter: $filter)
                 .frame(width: 400)
-            MapPane(selection: selection, filter: filter)
+            MapPane(selection: selection, filter: filter, place: $place)
             if showInspector {
-                InspectorView(selection: selection, filter: filter)
+                InspectorView(selection: selection, filter: filter, place: $place,
+                              showApp: { app in place = nil; selection = MonitorSelection(appID: app.id) })
                     .frame(width: 330)
                     .background(.ultraThinMaterial)
                     .transition(.move(edge: .trailing))
@@ -27,6 +30,9 @@ struct MonitorWindow: View {
         .modifier(OpenWindowBridge())
         .background(WindowLevelSetter(floating: settings.floatOnTop))
         .onChange(of: filter.hideLocal) { _, on in settings.hideLocal = on }
+        // Choosing a row in the list shows that row; choosing a place shows the inspector.
+        .onChange(of: selection) { _, _ in place = nil }
+        .onChange(of: place) { _, p in if p != nil { showInspector = true } }
     }
 }
 
