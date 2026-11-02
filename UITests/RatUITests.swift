@@ -509,6 +509,42 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue((map.value as? String ?? "").contains("Madrid"))
     }
 
+    /// The View Options submenus stay open while the monitor redraws on every pass (here demo ticks, as live traffic
+    /// does every 1.5 s), and their choices work.
+    func testViewOptionsSubmenusStayOpenWhileTrafficUpdates() {
+        app.terminate()
+        app.launchEnvironment["RAT_DEMO_TICK"] = "1"
+        app.launch()
+        XCTAssertTrue(el("app-row-Google Chrome").waitForExistence(timeout: 20))
+        let passes = el("monitor-passes")
+        func count() -> Int { Int(passes.value as? String ?? "") ?? 0 }
+        for (menu, entry, other) in [("Group By", "Domain", "Country"), ("Sort By", "Name", "Traffic")] {
+            el("view-options").click()
+            let opener = app.menuItems.matching(NSPredicate(format: "title == %@", menu)).firstMatch
+            XCTAssertTrue(opener.waitForExistence(timeout: 3), menu)
+            opener.hover()
+            let item = app.menuItems.matching(NSPredicate(format: "title == %@", entry)).firstMatch
+            let second = app.menuItems.matching(NSPredicate(format: "title == %@", other)).firstMatch
+            XCTAssertTrue(item.waitForExistence(timeout: 3), "\(menu) opens")
+            let start = count()
+            var checks = 0
+            // At least three passes with the pointer moving inside the submenu.
+            while count() < start + 3 && checks < 20 {
+                (checks % 2 == 0 ? second : item).hover()
+                XCTAssertTrue(item.exists && item.isHittable, "\(menu) still open after \(count() - start) passes")
+                checks += 1
+            }
+            XCTAssertGreaterThanOrEqual(count(), start + 3, "the monitor redrew while \(menu) was open")
+            item.click()
+            // The choice works: grouped by domain, the apps sit inside collapsed groups.
+            if menu == "Group By" { XCTAssertTrue(waitGone(el("app-row-Google Chrome")), "grouped by domain") }
+        }
+        el("view-options").click()
+        app.menuItems.matching(NSPredicate(format: "title == %@", "Group By")).firstMatch.hover()
+        app.menuItems.matching(NSPredicate(format: "title == %@", "Process")).firstMatch.click()
+        XCTAssertTrue(el("app-row-Google Chrome").waitForExistence(timeout: 5), "back to apps")
+    }
+
     /// The Summary counts what the list shows, and says so while a filter is on.
     func testSummaryFollowsTheFilter() {
         let counts = el("summary-counts")
