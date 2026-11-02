@@ -66,6 +66,17 @@ final class ReadmeScreenshots: XCTestCase {
         save(app.windows["Network Monitor"], "vpn-country.png")
     }
 
+    /// A place chosen on the map: the Paris pin, its lines highlighted, and the inspector's apps and connections there,
+    /// each with its own ✗/✓.
+    func testMapPlace() throws {
+        let paris = el("map-place-Paris")
+        XCTAssertTrue(paris.waitForExistence(timeout: 10))
+        paris.click()
+        XCTAssertTrue(el("destination-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(el("destination-remote-video.example.net").waitForExistence(timeout: 5))
+        save(app.windows["Network Monitor"], "map-place.png")
+    }
+
     func testRulesWindow() throws {
         app.typeKey("r", modifierFlags: [.command, .shift])
         let rules = app.windows["Rules"]
