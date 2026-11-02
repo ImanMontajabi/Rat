@@ -24,13 +24,15 @@ public struct DeniedApps: Equatable {
     public var isEmpty: Bool { paths.isEmpty }
 
     /// A process belongs to a denied app when its own path, or the path of the app it works for, is inside an entry.
-    public func matches(path: String, responsiblePath: () -> String?) -> Bool {
-        entry(for: path, responsiblePath: responsiblePath) != nil
+    public func matches(path: String, responsiblePath: () -> String?, webApp: () -> String? = { nil }) -> Bool {
+        entry(for: path, responsiblePath: responsiblePath, webApp: webApp) != nil
     }
 
-    /// The entry a process belongs to, if any.
-    public func entry(for path: String, responsiblePath: () -> String?) -> String? {
+    /// The entry a process belongs to, if any. The program that runs Safari's web apps belongs to the web app it
+    /// runs (`webApp`), as in Rat's list, never to the program's own path.
+    public func entry(for path: String, responsiblePath: () -> String?, webApp: () -> String? = { nil }) -> String? {
         func inside(_ p: String) -> String? { paths.first { ProgramPath.inside(p, $0) } }
+        if SafariWebApp.isHost(path), let bundle = webApp() { return inside(bundle) }
         if let e = inside(path) { return e }
         if let app = ProcessGrouping.companionApp(of: path), let e = inside(app) { return e }
         if ProcessGrouping.actsForOthers(path), let r = responsiblePath() { return inside(r) }

@@ -59,8 +59,10 @@ public enum ProcessGrouping {
     static let systemPrefixes = ["/System/", "/usr/", "/sbin/", "/bin/", "/Library/Apple/", "/private/var/db/"]
 
     /// Which app a process belongs to, the same for the app's list and the root daemon. `responsiblePath` is asked
-    /// only for a system service that works for others.
-    public static func owner(of path: String, responsiblePath: () -> String?) -> Owner {
+    /// only for a system service that works for others, `webApp` (`SafariWebApp.bundle(pid:)`) only for the program
+    /// that runs Safari's web apps: each web app is an app of its own, named by its bundle in ~/Applications.
+    public static func owner(of path: String, responsiblePath: () -> String?, webApp: () -> String? = { nil }) -> Owner {
+        if SafariWebApp.isHost(path), let bundle = webApp() { return .app(bundle: bundle, isExtension: false) }
         // System services that work for an app (Safari's WebKit networking process) belong to that app.
         if actsForOthers(path), let owner = responsiblePath(), let bundle = bundleRoot(of: owner) {
             return .app(bundle: bundle, isExtension: owner.contains(".appex/"))
@@ -114,11 +116,14 @@ public enum ProcessGrouping {
         return nil
     }
 
-    /// Path of the application a system helper works for, if it differs from the helper itself.
+    /// Path of the application a system helper works for, if it differs from the helper itself. For a Safari web
+    /// app's helpers (WebKit.Networking) it is the web app's bundle, not the program that runs every web app.
     public static func responsiblePath(of pid: pid_t) -> String? {
         let r = responsiblePID(of: pid)
         guard r != pid else { return nil }
         let p = ConnectionSampler.path(of: r)
-        return p.hasPrefix("pid ") ? nil : p
+        if p.hasPrefix("pid ") { return nil }
+        if SafariWebApp.isHost(p), let bundle = ProcessArguments.arguments(pid: r).flatMap(SafariWebApp.bundle(arguments:)) { return bundle }
+        return p
     }
 }

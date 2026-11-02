@@ -194,7 +194,8 @@ struct ProcessInspector: View {
                         }.padding(.leading, 6).padding(.bottom, 4)
                     }
                 } else {
-                    if let process, let note = SharedServices.note(for: process) {
+                    // Under an app (Safari, a Safari web app) its WebKit.Networking works for that app, which is named.
+                    if let process, app.identity.isSystem, let note = SharedServices.note(for: process) {
                         Text("Works for other apps: \(note)").font(.caption).foregroundStyle(.secondary).padding(.leading, 6).fixedSize(horizontal: false, vertical: true)
                     }
                     ForEach(remotes.prefix(50)) { r in

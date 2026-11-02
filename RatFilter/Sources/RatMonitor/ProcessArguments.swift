@@ -31,8 +31,23 @@ public struct ProcessArguments: Equatable, Sendable {
         return parse(Array(buf.prefix(size)))
     }
 
+    /// Another process's argument vector alone (same user, or root); its environment is not returned.
+    public static func arguments(pid: pid_t) -> [String]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0 else { return nil }
+        return split(Array(buf.prefix(size)))?.argv
+    }
+
     /// `KERN_PROCARGS2` layout: argc (int32), the executable path, padding NULs, argv[0..argc), then environment.
     public static func parse(_ b: [UInt8]) -> ProcessArguments? {
+        guard let (argv, env) = split(b) else { return nil }
+        return from(arguments: argv, environment: env)
+    }
+
+    static func split(_ b: [UInt8]) -> (argv: [String], env: [String])? {
         guard b.count > 4 else { return nil }
         let argc = Int(b[0]) | Int(b[1]) << 8 | Int(b[2]) << 16 | Int(b[3]) << 24
         var i = 4
@@ -47,8 +62,7 @@ public struct ProcessArguments: Equatable, Sendable {
             if strings.count >= argc + 512 { break }
         }
         guard strings.count >= argc else { return nil }
-        let argv = Array(strings.prefix(argc)), env = strings.dropFirst(argc)
-        return from(arguments: argv, environment: Array(env))
+        return (Array(strings.prefix(argc)), Array(strings.dropFirst(argc)))
     }
 
     public static func from(arguments argv: [String], environment env: [String]) -> ProcessArguments {
