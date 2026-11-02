@@ -242,6 +242,8 @@ final class Ledger: ObservableObject {
     @Published var unconfirmedCount = 0
     @Published var incomingCount = 0
     @Published var systemWide = false
+    /// Sampling passes so far (demo ticks too): what redraws the monitor every 1.5 s.
+    @Published private(set) var passes = 0
 
     let rules: RulesModel
     let enforcer: Enforcer
@@ -332,6 +334,19 @@ final class Ledger: ObservableObject {
         startedAt = Date()
         logger.notice("ledger started")
         Task { await loop() }
+        #if DEBUG
+        // Demo data never samples; `RAT_DEMO_TICK=1` (UI tests) republishes it every pass, as live traffic would.
+        if demo, ProcessInfo.processInfo.environment["RAT_DEMO_TICK"] == "1" {
+            Task { [weak self] in
+                while let self, self.running {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    self.apps = Array(self.table.values)
+                    self.passes += 1
+                    self.onTick?()
+                }
+            }
+        }
+        #endif
     }
 
     func save() {
@@ -627,6 +642,7 @@ final class Ledger: ObservableObject {
         processNames = processNames.filter { alive.contains($0.key) }
         launchers = launchers.filter { alive.contains($0.key) }
         apps = Array(table.values)
+        passes += 1
     }
 
     private var uidCache: [Int32: uid_t] = [:]
