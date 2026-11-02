@@ -1,0 +1,1 @@
+Rat has a new app icon: a rat in sunglasses at a retro computer reading RAT_, in front of a striped sunset. It replaces the old icon, whose license did not fit Rat's; the README and the disk image use it too.
