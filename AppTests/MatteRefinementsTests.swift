@@ -101,6 +101,21 @@ final class MatteRefinementsTests: XCTestCase {
         XCTAssertEqual(overPin.map(\.key), ["Lyon"], "Paris's label would cover Lyon's pin just below it, so only Lyon's is shown")
     }
 
+    func testMapLabelsStayInsideTheMap() {
+        let size = CGSize(width: 100, height: 18), map = CGRect(x: 0, y: 0, width: 600, height: 400)
+        func item(_ id: String, _ x: CGFloat, _ y: CGFloat) -> MapLabels.Item {
+            MapLabels.Item(id: id, text: id, anchor: CGPoint(x: x, y: y), pinRadius: 8, priority: 0)
+        }
+        let labels = MapLabels.layout([item("San Francisco", 10, 200), item("Tokyo", 595, 100), item("Sydney", 300, 392), item("Off", -30, 200)],
+                                      bounds: map, measure: { _ in size })
+        let byKey = Dictionary(uniqueKeysWithValues: labels.map { ($0.key, $0.frame) })
+        XCTAssertEqual(byKey["San Francisco"]?.minX, 4, "slides right, inside the left edge")
+        XCTAssertEqual(byKey["Tokyo"]?.maxX, 596, "slides left, inside the right edge")
+        XCTAssertLessThan(byKey["Sydney"]?.maxY ?? .infinity, 392 - 8, "above its pin at the bottom edge")
+        XCTAssertNil(byKey["Off"], "a pin off the map has no label")
+        XCTAssertTrue(labels.allSatisfy { map.insetBy(dx: 4, dy: 4).contains($0.frame) })
+    }
+
     // MARK: icons
 
     func testRowsWithoutAnIconGetATile() {

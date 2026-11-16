@@ -338,9 +338,10 @@ struct MapLabelsLayer: View {
 
     var body: some View {
         let _ = camera.version
+        GeometryReader { geo in
         ZStack(alignment: .topLeading) {
             Color.clear
-            ForEach(MapLabels.layout(labelItems())) { l in
+            ForEach(MapLabels.layout(labelItems(), bounds: CGRect(origin: .zero, size: geo.size))) { l in
                 Text(l.text).font(MapLabels.font).foregroundStyle(Palette.text)
                     .padding(.horizontal, MapLabels.padding.width).padding(.vertical, MapLabels.padding.height)
                     .background(Color.ratBase.opacity(0.85), in: Capsule())
@@ -348,6 +349,7 @@ struct MapLabelsLayer: View {
                     .fixedSize()
                     .position(x: l.frame.midX, y: l.frame.midY)
             }
+        }
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -403,14 +405,23 @@ enum MapLabels {
         return CGSize(width: ceil(t.width) + padding.width * 2, height: ceil(t.height) + padding.height * 2)
     }
 
-    /// The labels that fit, each centred under its pin. `measure` is the pill's size for a text.
-    static func layout(_ items: [Item], measure: (String) -> CGSize = size) -> [Label] {
+    /// The labels that fit, each centred under its pin. `measure` is the pill's size for a text. Within `bounds`
+    /// (the map), a label slides sideways to stay inside, goes above its pin at the bottom edge, and a pin off the
+    /// map has none: no pill is ever cut by the map's edge.
+    static func layout(_ items: [Item], bounds: CGRect? = nil, measure: (String) -> CGSize = size) -> [Label] {
         let pins = items.map { CGRect(x: $0.anchor.x - $0.pinRadius, y: $0.anchor.y - $0.pinRadius, width: $0.pinRadius * 2, height: $0.pinRadius * 2) }
         var placed: [Label] = []
         let order = items.indices.sorted { (items[$0].priority, -$0) > (items[$1].priority, -$1) }
+        let edge: CGFloat = 4
         for i in order {
             let it = items[i], s = measure(it.text)
-            let frame = CGRect(x: it.anchor.x - s.width / 2, y: it.anchor.y + it.pinRadius + spacing, width: s.width, height: s.height)
+            var frame = CGRect(x: it.anchor.x - s.width / 2, y: it.anchor.y + it.pinRadius + spacing, width: s.width, height: s.height)
+            if let b = bounds {
+                guard b.contains(it.anchor) else { continue }
+                if frame.maxY > b.maxY - edge { frame.origin.y = it.anchor.y - it.pinRadius - spacing - s.height }
+                frame.origin.x = min(max(frame.minX, b.minX + edge), b.maxX - edge - s.width)
+                guard frame.minY >= b.minY + edge, frame.width <= b.width - 2 * edge else { continue }
+            }
             let hitsLabel = placed.contains { $0.frame.insetBy(dx: -2, dy: -1).intersects(frame) }
             let hitsPin = pins.indices.contains { $0 != i && pins[$0].intersects(frame) }
             if !hitsLabel && !hitsPin { placed.append(Label(key: it.id, text: it.text, frame: frame, selected: it.selected)) }

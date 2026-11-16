@@ -615,20 +615,16 @@ struct TrafficChart: View {
 
     /// One bucket: a capsule up for what was sent, one down for what was received (heights from
     /// `ChartLayout.level`), and a small dot on the baseline for a quiet bucket, so the chart has no solid line.
+    /// Always the same three marks a bucket (a quiet one's capsules have no height, a busy one's dot no colour):
+    /// with `if`s here, each pass's new buckets made Swift Charts keep new graph nodes, about 1.3 MB a second.
     @ChartContentBuilder private func column(_ b: ChartBar, width: CGFloat) -> some ChartContent {
         let mid = b.start.addingTimeInterval(b.end.timeIntervalSince(b.start) / 2)
-        if b.tx > 0 {
-            RectangleMark(x: .value("time", mid), yStart: .value("zero", Self.split), yEnd: .value("sent", Self.split + b.tx), width: .fixed(width))
-                .cornerRadius(width / 2).foregroundStyle(Color.ratSent)
-        }
-        if b.rx > 0 {
-            RectangleMark(x: .value("time", mid), yStart: .value("zero", -Self.split), yEnd: .value("received", -Self.split - b.rx), width: .fixed(width))
-                .cornerRadius(width / 2).foregroundStyle(Color.ratReceived)
-        }
-        if b.tx <= 0 && b.rx <= 0 {
-            RectangleMark(x: .value("time", mid), y: .value("quiet", 0.0), width: .fixed(2), height: .fixed(2))
-                .cornerRadius(1).foregroundStyle(Color.white.opacity(0.15))
-        }
+        RectangleMark(x: .value("time", mid), yStart: .value("zero", Self.split), yEnd: .value("sent", Self.split + b.tx), width: .fixed(width))
+            .cornerRadius(width / 2).foregroundStyle(Color.ratSent)
+        RectangleMark(x: .value("time", mid), yStart: .value("zero", -Self.split), yEnd: .value("received", -Self.split - b.rx), width: .fixed(width))
+            .cornerRadius(width / 2).foregroundStyle(Color.ratReceived)
+        RectangleMark(x: .value("time", mid), y: .value("quiet", 0.0), width: .fixed(2), height: .fixed(2))
+            .cornerRadius(1).foregroundStyle(Color.white.opacity(b.tx <= 0 && b.rx <= 0 ? 0.15 : 0))
     }
 
     private func chart(_ l: ChartLayout) -> some View {
