@@ -967,8 +967,9 @@ final class Ledger: ObservableObject {
         table[ident.id] = e
     }
 
-    /// Fixed data for visual checks and snapshot tests: no sampling, no alerts, no real addresses.
-    func installDemoData() {
+    /// Fixed data for visual checks and snapshot tests: no sampling, no alerts, no real addresses. `openWarp`: also
+    /// OpenWarp's helper and its carrier (`RAT_DEMO_OPENWARP=1`).
+    func installDemoData(openWarp: Bool = ProcessInfo.processInfo.environment["RAT_DEMO_OPENWARP"] != nil) {
         demo = true
         myLocation = GeoPoint(coordinate: .init(latitude: 52.52, longitude: 13.405), city: "Berlin", country: "Germany", countryCode: "DE")
         let codes = ["United Kingdom": "GB", "Netherlands": "NL", "Germany": "DE", "France": "FR", "Sweden": "SE", "Spain": "ES"]
@@ -1042,7 +1043,7 @@ final class Ledger: ObservableObject {
         ]
         fx.remotes[0].country = "ES"
         table[firefox.id] = fx
-        if ProcessInfo.processInfo.environment["RAT_DEMO_OPENWARP"] != nil { installDemoOpenWarp() }
+        if openWarp { installDemoOpenWarp() }
         // Telegram Helper's tunnel goes to a server in the Netherlands.
         routes.set(tunnelAddresses: ["100.64.0.2": "utun3"], tunnelNames: ["utun3": "Windscribe"], proxies: [])
         tunnelServers = ["utun3": .country("NL")]; tunnelCarriers = ["utun3": ["192.0.2.99"]]
