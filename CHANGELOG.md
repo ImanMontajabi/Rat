@@ -6,6 +6,19 @@ DMG checksums, are on the [Releases](https://github.com/ImanMontajabi/Rat/releas
 
 <!-- releases -->
 
+## [1.8.0] - 2026-11-16
+
+### Added
+
+- A Control Center panel under the menu bar icon: whether the firewall is really enforcing or only monitoring (with the way to fix it), the traffic now and over the last five minutes, how the Internet leaves the Mac (VPN and the country of its server, a proxy, or directly), the apps moving data right now (a click shows one in the monitor), the mode and the profile, and the windows. A right-click still opens the classic menu. Country flags are now flat, framed flags in one style everywhere a place is shown (rows, map labels, the Summary, the inspector, the panel).
+- OpenWarp, the companion WARP client, shows as one app with its own icon (its root helper grouped under it), and its tunnel's connection to Cloudflare is listed (tagged VPN server · OpenWarp) and placed on the map at the data centre the tunnel exits at, such as Düsseldorf, instead of where the anycast address is registered. Only through a VPN in a country uses that exit too (OpenWarp 0.2 or later reports it).
+- A security policy (`SECURITY.md`) says how to report a vulnerability privately, through GitHub's Report a vulnerability, and what is in scope.
+
+### Changed
+
+- A calmer, cleaner monitor: the traffic chart is equalizer-style capsule columns on a log scale (quiet traffic stays visible next to a burst) with HH:mm times; apps, services and command-line tools without an icon get a matching tile; ✗/✓ is one quiet pill that lights up when chosen or under the pointer; the VPN tag repeated on every row is smaller; totals show a round ↑/↓ badge; the Summary lists two per group with app icons and names before bare addresses, so nothing is cut off; map labels are short pills (Cork, not Cork (Hollyhill Industrial Estate)) that never pile up or get cut by the map’s edge; the Local switch is a house button in the filter bar; the DB-IP credit moved from the map to Settings > GeoIP.
+- Rat now uses OpenWarp's dark, matte look: traffic is peach going out and blue coming in (no more purple), ✗/✓ and status colours are muted pastels, panels are flat instead of translucent, and the map's tracers are flat beams without glow.
+
 ## [1.7.0] - 2026-11-02
 
 ### Added
