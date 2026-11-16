@@ -19,8 +19,11 @@ targets:
     platform: macOS
     sources:
       - path: App
-        excludes: ["Vendor"]
+        excludes: ["Vendor", "Flags"]
       - path: App/Vendor
+        type: folder
+        buildPhase: resources
+      - path: App/Flags
         type: folder
         buildPhase: resources
     preBuildScripts:
@@ -42,7 +45,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.imanmontajabi.Rat
-        MARKETING_VERSION: 1.7.0
+        MARKETING_VERSION: 1.8.0
         CURRENT_PROJECT_VERSION: 1
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"

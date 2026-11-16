@@ -314,7 +314,7 @@ public enum NetworkRoutes {
         "fastestvpn", "flash vpn", "forticlient", "free vpn", "ghostery", "globalprotect", "hamachi", "hiddify", "hidemyass",
         "hotspot shield", "hysteria", "ipvanish", "ivacy", "ivacy vpn", "keepsolid vpn", "lantern", "lightning vpn", "liquid vpn",
         "loon", "mullvad", "mullvad-daemon", "mullvad-vpn", "naiveproxy", "nekoray", "nordlynx", "nordvpn", "obfs4proxy",
-        "octane vpn", "omega vpn", "onion browser", "openconnect", "openvpn", "orbot", "perfect privacy", "perfect-privacy", "pia",
+        "octane vpn", "omega vpn", "onion browser", "openconnect", "openvpn", "openwarp", "orbot", "perfect privacy", "perfect-privacy", "pia",
         "private internet access", "proton vpn", "protonvpn", "psiphon", "pulse secure", "pulsesecure", "purevpn", "quantumult",
         "riseup vpn", "riseup-vpn", "rocket vpn", "safervpn", "secure vpn", "shadowrocket", "shadowsocks", "sing-box", "sky vpn",
         "snowflake", "softether", "spideroak", "stash", "strongvpn", "sunset vpn", "sunset-vpn", "super vpn", "surfshark", "surge",
@@ -330,7 +330,7 @@ public enum NetworkRoutes {
         "openvpn": "OpenVPN", "wireguard": "WireGuard", "zerotier": "ZeroTier", "pia": "PIA", "globalprotect": "GlobalProtect",
         "forticlient": "FortiClient", "hidemyass": "HideMyAss", "airvpn": "AirVPN", "strongvpn": "StrongVPN", "safervpn": "SaferVPN",
         "fastestvpn": "FastestVPN", "v2ray": "V2Ray", "sing-box": "sing-box", "tailscaled": "Tailscale", "mullvad-daemon": "Mullvad",
-        "mullvad-vpn": "Mullvad", "cloudflared": "Cloudflare", "warp": "Cloudflare WARP", "1.1.1.1": "Cloudflare WARP",
+        "mullvad-vpn": "Mullvad", "openwarp": "OpenWarp", "cloudflared": "Cloudflare", "cloudflare warp": "Cloudflare WARP", "warp": "Cloudflare WARP", "1.1.1.1": "Cloudflare WARP",
         "wg-quick": "WireGuard", "boringtun": "WireGuard", "nordlynx": "NordVPN", "tor": "Tor", "cfw": "Clash for Windows",
     ]
 

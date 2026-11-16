@@ -80,7 +80,14 @@ public enum TrafficSampler {
             guard let i = s.lastIndex(of: v6 ? "." : ":"), let port = Int(s[s.index(after: i)...]) else { return nil }
             return (String(s[..<i]), port)
         }
-        guard let local = split(ends[0]), let remote = split(ends[1]), remote.1 != 0 else { return nil }
+        guard let local = split(ends[0]) else { return nil }
+        // A UDP socket without a peer (`*:*`) keeps remote port 0: OpenWarp's carrier is matched by that key
+        // (`TunnelCarrier`). A TCP one is a listener and carries nothing.
+        if ends[1] == "*:*" || ends[1] == "*.*" {
+            guard kind.hasPrefix("udp"), local.1 != 0 else { return nil }
+            return FlowCounter(pid: pid, proto: .udp, localPort: local.1, remoteAddress: "", remotePort: 0, bytesIn: inB, bytesOut: outB)
+        }
+        guard let remote = split(ends[1]), remote.1 != 0 else { return nil }
         return FlowCounter(pid: pid, proto: kind.hasPrefix("tcp") ? .tcp : .udp, localPort: local.1, remoteAddress: remote.0, remotePort: remote.1,
                            bytesIn: inB, bytesOut: outB)
     }

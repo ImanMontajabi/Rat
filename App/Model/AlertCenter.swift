@@ -177,15 +177,17 @@ struct AlertView: View {
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button { decide(.deny, scope, lifetime) } label: { Label("Deny", systemImage: "xmark").frame(maxWidth: .infinity) }
-                    .modifier(OptionalShortcut(key: .cancelAction, enabled: settings.confirmWithReturn)).tint(.red)
+                    .buttonStyle(MatteButtonStyle(fill: .ratRaised, text: .ratDanger))
+                    .modifier(OptionalShortcut(key: .cancelAction, enabled: settings.confirmWithReturn))
                 Button { decide(.allow, scope, lifetime) } label: { Label("Allow", systemImage: "checkmark").frame(maxWidth: .infinity) }
-                    .modifier(OptionalShortcut(key: .defaultAction, enabled: settings.confirmWithReturn)).buttonStyle(.borderedProminent).tint(.green)
+                    .buttonStyle(MatteButtonStyle(fill: .ratSuccess, text: .ratOnAccent))
+                    .modifier(OptionalShortcut(key: .defaultAction, enabled: settings.confirmWithReturn))
             }
             .controlSize(.large)
         }
         .padding(18)
         .frame(width: 380)
-        .background(.regularMaterial)
+        .background(Color.ratBase)
     }
 }
 

@@ -40,7 +40,7 @@ struct SummaryInspector: View {
     var body: some View {
         let s = ledger.summary(filter)
         let domains = ledger.domains(s.remotes), networks = ledger.networks(s.remotes)
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Image(systemName: "list.bullet.rectangle").font(.title2).foregroundStyle(.secondary)
                 VStack(alignment: .leading) {
@@ -51,7 +51,7 @@ struct SummaryInspector: View {
             }
             if s.filtered {
                 Label("Filtered: the listed apps and their matching connections", systemImage: "line.3.horizontal.decrease.circle")
-                    .font(.caption).foregroundStyle(Color.accentColor)
+                    .font(.caption).foregroundStyle(Color.ratAccent)
                     .accessibilityIdentifier("summary-filtered")
             }
             HStack(spacing: 8) { Pill(kind: .up, text: formatBytes(s.bytesOut)); Pill(kind: .down, text: formatBytes(s.bytesIn)) }
@@ -63,16 +63,20 @@ struct SummaryInspector: View {
             }
             SectionHeader(title: "Statistics", open: $stats)
             if stats {
-                group("Top Processes", s.topApps.map { ($0.identity.name, "\(formatBytes($0.totalIn)) down, \(formatBytes($0.totalOut)) up") })
-                group("Top Domains", domains.prefix(3).map { ($0.name, Self.connections($0.count)) })
+                group("Top Processes", s.topApps.prefix(2).map { StatRow(title: $0.identity.name, detail: "\(formatBytes($0.totalIn)) down, \(formatBytes($0.totalOut)) up", icon: $0.identity.icon) })
+                group("Top Domains", Ledger.topDomains(domains).map { d in
+                    // A server with no name is shown as its address, quieter, with a network badge.
+                    isIPLiteral(d.name) ? StatRow(title: d.name, detail: Self.connections(d.count), symbol: "network", address: true)
+                                        : StatRow(title: d.name, detail: Self.connections(d.count))
+                })
                 if ledger.geo.available {
-                    let flags = Dictionary(s.remotes.compactMap { $0.geo.map { ($0.country, $0.flag) } }, uniquingKeysWith: { a, _ in a })
-                    group("Top Countries", ledger.countries(s.remotes).prefix(3).map { c in
-                        ([flags[c.name] ?? "", c.name].filter { !$0.isEmpty }.joined(separator: " "), Self.connections(c.count))
+                    let codes = Dictionary(s.remotes.compactMap { $0.geo.map { ($0.country, $0.countryCode) } }, uniquingKeysWith: { a, _ in a })
+                    group("Top Countries", ledger.countries(s.remotes).prefix(2).map { c in
+                        StatRow(title: c.name, detail: Self.connections(c.count), flag: codes[c.name])
                     })
                 }
                 if ledger.geo.networksAvailable, !networks.isEmpty {
-                    group("Top Networks", networks.prefix(3).map { ($0.name, Self.connections($0.count)) })
+                    group("Top Networks", networks.prefix(2).map { StatRow(title: $0.name, detail: Self.connections($0.count)) })
                 }
             }
         }
@@ -84,11 +88,37 @@ struct SummaryInspector: View {
         HStack(spacing: 10) { Image(systemName: symbol).frame(width: 26).foregroundStyle(.secondary); Text(text).font(.title3) }.padding(.leading, 6)
     }
 
-    private func group(_ title: String, _ items: [(String, String)]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.callout).foregroundStyle(.secondary).padding(.top, 6)
+    /// A line of a statistics group: an app with its icon, a name, or a bare address with a badge.
+    struct StatRow {
+        var title: String
+        var detail: String
+        var icon: NSImage? = nil
+        var symbol: String? = nil
+        var address = false
+        /// A region code: Rat's flag before the title.
+        var flag: String? = nil
+    }
+
+    private func group(_ title: String, _ items: [StatRow]) -> some View {
+        // Two lines a group and tight spacing: all four groups fit in the window's height without clipping.
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.callout).foregroundStyle(.secondary).padding(.top, 2)
             ForEach(Array(items.enumerated()), id: \.offset) { _, it in
-                VStack(alignment: .leading, spacing: 0) { Text(it.0).font(.title3); Text(it.1).font(.callout).foregroundStyle(.secondary) }
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if let f = it.flag, Flags.image(f, height: 13) != nil {
+                        FlagView(code: f, height: 13).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
+                    } else if let icon = it.icon {
+                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 18, height: 18).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
+                    } else if let symbol = it.symbol {
+                        Image(systemName: symbol).font(.callout).foregroundStyle(Palette.textTertiary).frame(width: 18)
+                    }
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(it.title).font(it.address ? .system(.body, design: .monospaced) : .title3)
+                            .foregroundStyle(it.address ? Palette.textSecondary : Palette.text)
+                            .lineLimit(1).truncationMode(.middle)
+                        Text(it.detail).font(.callout).foregroundStyle(.secondary)
+                    }
+                }
             }
         }.padding(.leading, 6)
     }
@@ -160,11 +190,11 @@ struct ProcessInspector: View {
                 if ledger.rules.policy(for: app.identity.ruleKey) == .deny {
                     Group {
                         if !ledger.enforcer.helperInstalled {
-                            Text("Not enforced: this needs the firewall helper (Settings > Security).").foregroundStyle(.orange)
+                            Text("Not enforced: this needs the firewall helper (Settings > Security).").foregroundStyle(Color.ratWarning)
                         } else if ledger.enforcer.status == nil {
-                            Text("Not enforced: the firewall helper is not running (Settings > Security).").foregroundStyle(.orange)
+                            Text("Not enforced: the firewall helper is not running (Settings > Security).").foregroundStyle(Color.ratWarning)
                         } else if ledger.enforcer.helperOutdated {
-                            Text("May not be enforced: the firewall helper needs an update (Settings > Security).").foregroundStyle(.orange)
+                            Text("May not be enforced: the firewall helper needs an update (Settings > Security).").foregroundStyle(Color.ratWarning)
                         } else if let e = ledger.enforcement(for: app.id) {
                             Text("Blocked by the firewall helper: \(e.processes) processes, \(e.ports) open connections cut.").foregroundStyle(.secondary)
                         } else {
@@ -172,7 +202,7 @@ struct ProcessInspector: View {
                         }
                     }.font(.caption).padding(.leading, 6)
                 }
-                if let err = ledger.enforcer.lastError { Text(err).font(.caption).foregroundStyle(.red).padding(.leading, 6) }
+                if let err = ledger.enforcer.lastError { Text(err).font(.caption).foregroundStyle(Color.ratDanger).padding(.leading, 6) }
             }
             SectionHeader(title: "Code Signature", open: $sig)
             if sig { kv("Identifier", ident ?? "none"); kv("Team", team ?? "none") }
@@ -289,8 +319,9 @@ struct RemoteInspector: View {
                 kv("Direction", r.incoming ? "Incoming: the peer connected to this Mac" : r.stream ? "Outgoing, mostly receiving for a while" : "Outgoing")
                 if let p = r.process { kv("Process", p + (r.pid.map { " (pid \($0))" } ?? "")) }
                 if let n = r.network { kv("Network", n) }
-                if let g = r.geo { kv("Location", g.place) }
-                if let cc = r.country, !r.incoming {
+                if let g = r.geo { kvPlace("Location", g) }
+                if let exit = ledger.exitLabel(for: r) { kv(r.geo == nil ? "Location" : "Exit", exit).accessibilityIdentifier("inspector-exit") }
+                if let cc = r.country, !r.incoming, !r.carrier {
                     // A rule for every server in the country, for this app: the editor opens on it.
                     Button("Rule for Servers in \(Countries.label(cc))…") {
                         ledger.rules.focus = RulesModel.Target(app: app.identity.ruleKey)
@@ -303,12 +334,23 @@ struct RemoteInspector: View {
                 if let route = r.route { kv("Route", route.label) }
                 if let via = r.via {
                     kv("Proxy", via.label)
-                    if let g = via.serverGeo { kv("Proxy at", g.place) }
+                    if let g = via.serverGeo { kvPlace("Proxy at", g) }
                 }
             }
             SectionHeader(title: "Rules", open: $rules)
-            if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), incoming: r.incoming) }
+            if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), incoming: r.incoming, carrier: r.carrier) }
         }
+    }
+
+    /// A place with Rat's flag before its city and country.
+    private func kvPlace(_ k: String, _ g: GeoPoint) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(k + ":").foregroundStyle(.secondary).frame(width: 64, alignment: .trailing)
+            HStack(spacing: 6) {
+                if !g.flag.isEmpty { FlagView(code: g.countryCode, height: 11).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 } }
+                Text(g.placeName).textSelection(.enabled)
+            }
+        }.font(.callout)
     }
 
     private func kv(_ k: String, _ v: String) -> some View {
@@ -329,6 +371,8 @@ struct TargetRules: View {
     let target: RulesModel.Target?
     /// A connection a peer started (no rule names it).
     var incoming = false
+    /// A VPN client's own connection to its server from a socket that names no server (no rule can be enforced on it).
+    var carrier = false
 
     private var subject: String {
         switch target?.level { case .connection?: "this connection"; case .process?: "this process"; default: "this app" }
@@ -350,9 +394,9 @@ struct TargetRules: View {
                     if list.isEmpty { Text("No rules for \(subject)").foregroundStyle(.secondary) }
                     ForEach(list.prefix(8)) { r in
                         HStack(spacing: 6) {
-                            Image(systemName: r.verdict == .deny ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(r.verdict == .deny ? .red : .green)
+                            Image(systemName: r.verdict == .deny ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(r.verdict == .deny ? Color.ratDanger : Color.ratSuccess)
                             Text(r.summary(country: Countries.label)).lineLimit(1).truncationMode(.middle).opacity(r.enabled ? 1 : 0.5)
-                            if !r.approved { Circle().fill(.blue).frame(width: 7, height: 7) }
+                            if !r.approved { Circle().fill(Color.ratAccent).frame(width: 7, height: 7) }
                             if r.id == decides { Text("decides").font(.caption2).foregroundStyle(.secondary) }
                         }
                     }
@@ -364,7 +408,8 @@ struct TargetRules: View {
                 .accessibilityValue("\(list.count)")
             } else {
                 Text(incoming ? "A peer started this connection. Rules decide what this Mac connects to, so none names it; the app's ✗ still cuts it."
-                              : "No rule can name this connection: it stays inside the local network.")
+                     : carrier ? "This is the VPN client's own connection to its server. It sends from a socket that names no server (the server comes from the client's status), so a rule about this connection could not be enforced; the app's ✗ still cuts it, and the VPN with it."
+                     : "No rule can name this connection: it stays inside the local network.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Button("Manage Rules…") { ledger.rules.focus = target ?? RulesModel.Target(app: app.identity.ruleKey); openWindow(id: "rules") }
@@ -460,7 +505,7 @@ struct ProxyBadge: View {
             Text(hop.label).lineLimit(1).truncationMode(.middle)
             Text(hop.kind).padding(.horizontal, 4).padding(.vertical, 1).overlay(RoundedRectangle(cornerRadius: 3).stroke(.secondary))
         }
-        .font(.caption2).foregroundStyle(.orange)
+        .font(.caption2).foregroundStyle(Color.ratWarning)
         .help("\(hop.label), \(hop.kind)\(hop.serverGeo.map { ". Proxy server in \($0.place)" } ?? "")")
     }
 }

@@ -6,6 +6,24 @@ DMG checksums, are on the [Releases](https://github.com/ImanMontajabi/Rat/releas
 
 <!-- releases -->
 
+## [1.7.0] - 2026-11-02
+
+### Added
+
+- Click a place on the map (its pin or a line to it) to see what goes there: the inspector shows the city with its flag, the open connections and their apps, the data sent and received and the rate now, and every connection with its tags and its own ✗/✓ to deny or allow it right there. An app in that list shows the app; Escape, the close button or a click on empty map goes back. The map's own + / − buttons zoom without letting go of the place.
+
+### Fixed
+
+- The total download and upload rate (menu bar), the session's totals and the traffic chart count the Mac's traffic once, as the network line carries it: traffic between programs on the Mac (loopback, a local proxy) no longer counts, and traffic through a VPN no longer counts twice (once in the tunnel, once for the VPN app that carries it). On a 50 Mbps line the rate stays under about 6 MB/s instead of reaching 10–12 MB/s. Each app's, process's and connection's own traffic is unchanged.
+- Safari web apps made with Add to Dock show as themselves, with the name and icon you gave them, instead of one "Web App" row for all of them. Their WebKit networking process is listed under the web app it works for. A ✗ on a web app blocks that web app only, not your other web apps or Safari; the helper needs Update Helper for this.
+- The View Options menu's Group By and Sort By submenus stay open and take the click while traffic updates the list.
+
+### Development
+
+- Demo mode, used for the README screenshots and UI tests, shows a fixed account name and a fixed place for This Mac, and the screenshots use English number formats, so they show nothing of the Mac they were taken on; the screenshots are retaken.
+- The READMEs (English and Persian) open with what is new in 1.6 and show Only through a VPN in a country in a screenshot; the Persian page gives Only through a VPN and country rules sections of their own.
+- The READMEs (English and Persian) open with what is new in 1.7 and show a place chosen on the map in a new screenshot (map-place.png, taken from demo data by scripts/readme-screenshots.sh).
+
 ## [1.6.0] - 2026-10-31
 
 ### Added

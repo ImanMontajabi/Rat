@@ -20,16 +20,22 @@ struct MonitorWindow: View {
                 InspectorView(selection: selection, filter: filter, place: $place,
                               showApp: { app in place = nil; selection = MonitorSelection(appID: app.id) })
                     .frame(width: 330)
-                    .background(.ultraThinMaterial)
+                    .background(Color.ratBase)
+                    .overlay(alignment: .leading) { Rectangle().fill(Color.ratHairline).frame(width: 1) }
                     .transition(.move(edge: .trailing))
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.ratBase)
         .ignoresSafeArea()
         .animation(.easeInOut(duration: 0.2), value: showInspector)
         .modifier(OpenWindowBridge())
         .background(WindowLevelSetter(floating: settings.floatOnTop))
         .onChange(of: filter.hideLocal) { _, on in settings.hideLocal = on }
+        // An app chosen in the menu bar panel.
+        .onReceive(WindowRoutes.shared.$monitorApp.compactMap { $0 }) { id in
+            place = nil; selection = MonitorSelection(appID: id); showInspector = true
+            WindowRoutes.shared.monitorApp = nil
+        }
         // Choosing a row in the list shows that row; choosing a place shows the inspector.
         .onChange(of: selection) { _, _ in place = nil }
         .onChange(of: place) { _, p in if p != nil { showInspector = true } }

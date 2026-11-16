@@ -16,7 +16,7 @@ struct RouteBadges: View {
         var carrier = false
         var direction = false
         var help: String
-        var color: Color { direction ? .blue : carrier ? .secondary : vpn ? .teal : .orange }
+        var color: Color { direction ? .ratAccent : carrier ? .secondary : vpn ? .ratVPN : .ratProxy }
     }
 
     /// `directions`: also the direction tags (a connection's own row and the inspector; not an app's summary).
@@ -96,37 +96,44 @@ struct RouteSummaryBadges: View {
 struct RouteBadge: View {
     let item: RouteBadges.Item
     var symbolOnly = false
+    private var quiet: Bool { item.vpn && !item.carrier && !item.direction }
 
     var body: some View {
         Group {
             if symbolOnly { Image(systemName: item.symbol).accessibilityLabel(item.text) } else { Label(item.text, systemImage: item.symbol) }
         }
-            .font(.system(size: 9, weight: .semibold)).lineLimit(1)
-            .padding(.horizontal, 5).padding(.vertical, 1)
-            .foregroundStyle(item.color)
-            .background(item.color.opacity(0.15), in: Capsule())
+            // A tunnel's tag repeats on most rows while a VPN carries everything: smaller and quieter, so the names
+            // lead. Proxies, the tunnel's own carrier (`VPN server · …`) and directions keep the full tag.
+            .font(.system(size: quiet ? 8.5 : 9, weight: .semibold)).lineLimit(1)
+            .padding(.horizontal, quiet ? 4 : 5).padding(.vertical, quiet ? 0.5 : 1)
+            .foregroundStyle(item.color.opacity(quiet ? 0.72 : 1))
+            .background(item.color.opacity(quiet ? 0.07 : 0.15), in: Capsule())
             .fixedSize()
             .help(item.help)
             .accessibilityIdentifier("badge-\(item.text)")
     }
 }
 
+/// A traffic total: the arrow in a small round badge of the traffic colour, then the amount (`↑ 26,5 MB`), the same
+/// in the list's footer and every inspector.
 struct Pill: View {
     enum Kind { case up, down }
     let kind: Kind
     let text: String
-    var label: String? = nil
+    private var tint: Color { kind == .up ? .ratSent : .ratReceived }
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: kind == .up ? "arrow.up" : "arrow.down").fontWeight(.bold)
-            if let label { Text(label).font(.callout) }
+        HStack(spacing: 8) {
+            Image(systemName: kind == .up ? "arrow.up" : "arrow.down").font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Color.ratOnAccent)
+                .frame(width: 18, height: 18).background(tint, in: Circle())
             Spacer(minLength: 0)
-            Text(text).font(.title3.weight(.semibold)).monospacedDigit()
+            Text(text).font(.title3.weight(.semibold)).monospacedDigit().foregroundStyle(tint)
         }
-        .padding(.horizontal, 12).padding(.vertical, 7)
-        .foregroundStyle(.white)
-        .background(kind == .up ? Color(red: 0.55, green: 0.25, blue: 0.75).opacity(0.75) : Color(red: 0.15, green: 0.40, blue: 0.85).opacity(0.75),
-                    in: RoundedRectangle(cornerRadius: 12))
+        .padding(.leading, 7).padding(.trailing, 12).padding(.vertical, 6)
+        // Matte: the traffic colour on a soft fill of itself (OpenWarp's `Tint.soft`), peach out, blue in.
+        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: Radius.md))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(kind == .up ? "Sent" : "Received") \(text)")
     }
 }
 
@@ -140,32 +147,48 @@ struct PolicyToggle: View {
     /// "this process", "this connection": for the help text.
     var subject = "this app"
     let set: (Policy?) -> Void
+    @State private var hovered: Policy?
 
+    /// One pill, `[ ✗ | ✓ ]`: quiet until it matters. A choice fills its half with its pastel (dark glyph); one
+    /// followed from a wider row a soft tint of it; otherwise both glyphs are faint on a faint fill, and the half
+    /// under the pointer lights up in its colour. Each half is its own button (`policy-deny`, `policy-allow`).
     var body: some View {
-        HStack(spacing: compact ? 0 : 2) {
-            cell("xmark", choice: .deny, tint: .red)
+        HStack(spacing: 0) {
+            cell("xmark", choice: .deny, tint: .ratDanger)
                 .accessibilityLabel("Deny").accessibilityIdentifier("policy-deny")
-            cell("checkmark", choice: .allow, tint: .green)
+            cell("checkmark", choice: .allow, tint: .ratSuccess)
                 .accessibilityLabel("Allow").accessibilityIdentifier("policy-allow")
         }
+        .background(alignment: .center) {
+            Capsule().fill(Color.ratRaised.opacity(hovered == nil ? (compact ? 0.35 : 0.5) : 0.9))
+                .frame(width: size.width * 2, height: size.height)
+                .overlay { Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: size.height * 0.5) }
+        }
+        .animation(Motion.quick, value: hovered)
     }
+
+    private var size: CGSize { compact ? CGSize(width: 20, height: 16) : CGSize(width: 24, height: 20) }
 
     private func cell(_ symbol: String, choice: Policy, tint: Color) -> some View {
         let active = policy == choice
         let follows = policy == nil && inherited == choice
-        let undecided = policy == nil && inherited == nil
-        let fill: Color = active ? tint : follows ? tint.opacity(0.35) : undecided && !compact ? .blue : .gray.opacity(compact ? 0.2 : 0.35)
+        let hover = hovered == choice
+        let fill: Color = active ? tint : follows ? tint.opacity(0.2) : .clear
+        let glyph: Color = active ? .ratOnAccent : follows || hover ? tint : Color.white.opacity(hovered != nil ? 0.45 : 0.22)
+        let half = UnevenRoundedRectangle(topLeadingRadius: choice == .deny ? size.height / 2 : 0, bottomLeadingRadius: choice == .deny ? size.height / 2 : 0,
+                                          bottomTrailingRadius: choice == .allow ? size.height / 2 : 0, topTrailingRadius: choice == .allow ? size.height / 2 : 0)
         let verb = choice == .deny ? "Deny" : "Allow"
         return Button { set(active ? nil : choice) } label: {
-            Image(systemName: symbol).font(.system(size: compact ? 9 : 11, weight: .bold))
-                .frame(width: compact ? 18 : 22, height: compact ? 16 : 20)
-                .foregroundStyle(active || follows || (undecided && !compact) ? .white : .secondary)
-                .background(fill, in: RoundedRectangle(cornerRadius: compact ? 4 : 5))
-                // The small pair is drawn small but hit like the app row's: a click just beside it still counts.
-                .frame(width: 22, height: 20)
+            Image(systemName: symbol).font(.system(size: compact ? 8.5 : 10.5, weight: .bold))
+                .frame(width: size.width, height: size.height)
+                .foregroundStyle(glyph)
+                .background(fill, in: half)
+                // The small pill is drawn small but hit like the app row's: a click just above or below it counts.
+                .frame(height: 20)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { inside in hovered = inside ? choice : (hovered == choice ? nil : hovered) }
         .help(active ? "\(verb) \(subject) (click to clear)" : follows ? "\(choice == .deny ? "Denied" : "Allowed") by the wider row; click to \(verb.lowercased()) \(subject) itself" : "\(verb) \(subject)")
         .accessibilityValue(active ? "on" : follows ? "inherited" : "off")
     }
@@ -181,8 +204,8 @@ struct Sparkline: View {
                 let idx = i - (14 - rates.count)
                 let r = idx >= 0 ? rates[idx] : (rx: 0, tx: 0)
                 VStack(spacing: 0) {
-                    Rectangle().fill(.purple).frame(height: 16 * r.tx / peak)
-                    Rectangle().fill(.blue).frame(height: 16 * r.rx / peak)
+                    Rectangle().fill(Color.ratSent).frame(height: 16 * r.tx / peak)
+                    Rectangle().fill(Color.ratReceived).frame(height: 16 * r.rx / peak)
                     if r.rx + r.tx == 0 { Rectangle().fill(.white.opacity(0.12)).frame(height: 16) }
                 }
                 .frame(width: 3, height: 16, alignment: .bottom)

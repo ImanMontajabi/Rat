@@ -78,6 +78,9 @@ struct RemoteHost: Identifiable, Hashable {
     var rateOut = 0.0
     /// The country rules match (`GeoService.countryCode`): nil inside the local network, or when the database has none.
     var country: String? = nil
+    /// The VPN client's own connection to its server, from a socket that names no server (OpenWarp's carrier:
+    /// `ObservedConnection.carrier`). No rule can name it, so the row has no ✗/✓; the app's ✗ still cuts it.
+    var carrier = false
 }
 
 /// One executable of an app (its main binary, a helper, an XPC service working for it), by name.
@@ -182,8 +185,9 @@ extension AppEntry {
         guard let r = remote else { return RulesModel.Target(app: identity.ruleKey, executable: exe) }
         let e = RulesModel.Endpoint(host: r.host, address: r.address, port: r.port, proto: r.proto == "UDP" ? .udp : .tcp, country: r.country)
         if r.via == nil && (r.address.isEmpty || isLocalAddress(r.address)) { return nil }
-        // Rules decide what this Mac connects to; a peer that connected to it is not one of those.
-        if r.incoming { return nil }
+        // Rules decide what this Mac connects to; a peer that connected to it is not one of those. A tunnel's carrier
+        // socket names no server, so a rule about this one could not be enforced on it.
+        if r.incoming || r.carrier { return nil }
         if e.name == nil && r.address.isEmpty { return nil }
         return RulesModel.Target(app: identity.ruleKey, executable: exe, endpoint: e)
     }
@@ -203,6 +207,7 @@ struct MonitorSelection: Hashable {
 struct ChartBar: Identifiable {
     let start: Date
     let end: Date
+    /// Bar heights, 0…1 of the tallest bucket on a log scale (`ChartLayout.level`); 0 for a quiet bucket.
     let rx: Double
     let tx: Double
     var id: Date { start }
@@ -212,8 +217,48 @@ struct ChartLayout {
     var bars: [ChartBar]
     var start: Date
     var end: Date
+    /// The y extent the levels are drawn in (1, the tallest bucket, plus room above it).
     var peak: Double
     var labelFormat: Date.FormatStyle
+    /// Times as `HH:mm` on a 24-hour clock in every locale (5 minutes to a day); the week shows days.
+    var clock = true
+
+    private static let hourMinute: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "HH:mm"; return f
+    }()
+
+    /// An axis label: "06:50", or the weekday and day for the week.
+    func label(_ date: Date) -> String { clock ? Self.hourMinute.string(from: date) : date.formatted(labelFormat) }
+
+    /// Where the axis labels go: whole minutes (whole days for the week) inside the chart, at a step that gives at
+    /// most `limit` of them, so a label never repeats ("07:02 07:02" a minute after launch) and none sits on an edge.
+    func ticks(limit: Int = 5, calendar: Calendar = .current) -> [Date] {
+        let steps: [TimeInterval] = clock ? [60, 120, 300, 600, 900, 1800, 3600, 7200, 10_800, 21_600, 43_200] : [86_400, 172_800]
+        let span = end.timeIntervalSince(start)
+        let step = steps.first { span / $0 <= Double(limit) } ?? steps.last!
+        // The first whole step after the start (a local midnight for days), then every step before the end.
+        var t = clock ? (start.timeIntervalSinceReferenceDate / step).rounded(.up) * step
+                      : calendar.startOfDay(for: start).addingTimeInterval(86_400).timeIntervalSinceReferenceDate
+        var out: [Date] = []
+        let margin = span * 0.04
+        while t < end.timeIntervalSinceReferenceDate - margin {
+            if t > start.timeIntervalSinceReferenceDate + margin { out.append(Date(timeIntervalSinceReferenceDate: t)) }
+            t += step
+        }
+        return out
+    }
+
+    /// Bytes per bucket below which traffic counts as a trickle on the log scale.
+    static let floor = 1024.0
+    /// The shortest bar for any traffic at all, so a trickle never looks like silence.
+    static let minimumLevel = 0.08
+
+    /// A bucket's height relative to the tallest one on a log scale: a 50 KB bucket next to a 15 MB burst is still
+    /// about 40 % of it (a square root left it at 6 %, as flat as the quiet ticks). 0 only for no traffic.
+    static func level(_ value: Double, peak: Double) -> Double {
+        guard value > 0, peak > 0 else { return 0 }
+        return min(1, max(minimumLevel, log1p(value / floor) / log1p(max(peak, value) / floor)))
+    }
 }
 
 /// The network interfaces' counters, read with nettop's, and which interfaces lead to the Internet (`InternetTraffic`).
@@ -284,6 +329,9 @@ final class Ledger: ObservableObject {
     /// helper's view when it publishes one (it sees VPN clients running as root, and their local relays), else from
     /// this pass's connections of each tunnel's client. What "Only through a VPN in <country>" judges by.
     private(set) var tunnelServers: [String: TunnelServer] = [:]
+    /// OpenWarp's status on the last pass (`OpenWarpLink`: its tunnel, its endpoint and where it exits), nil while
+    /// it is not running.
+    private(set) var openWarp: OpenWarpStatus?
     /// The carrier addresses behind `tunnelServers`, by interface.
     private(set) var tunnelCarriers: [String: [String]] = [:]
     private var signingCache: [String: (identifier: String?, team: String?)] = [:]
@@ -373,8 +421,10 @@ final class Ledger: ObservableObject {
     private func loop() async {
         while running && !demo {
             let useSnapshot = enforcer.systemSnapshotText()
-            let (conns, traffic, link, sampled) = await Task.detached(priority: .utility) { () -> ([ObservedConnection], TrafficSampler.Sample, LinkSample, Date) in
+            let (conns, traffic, link, warp, sampled) = await Task.detached(priority: .utility) { () -> ([ObservedConnection], TrafficSampler.Sample, LinkSample, OpenWarpStatus?, Date) in
                 var c = ConnectionSampler.sample()
+                // OpenWarp's carrier socket names no server: its status does (read at most every 5 s).
+                let warp = OpenWarpLink.shared.current()
                 if let text = useSnapshot {
                     // Root helper snapshot: adds processes this app cannot inspect (other users, system daemons).
                     var seen = Set(c.map { "\($0.pid)|\($0.proto.rawValue)|\($0.localPort)|\($0.remoteAddress)|\($0.remotePort)" })
@@ -382,7 +432,7 @@ final class Ledger: ObservableObject {
                     // program was started by (a symlink into a cryptex, a bare name), and a rule made from that name
                     // would name a different file than the daemon sees.
                     var kernelPaths: [Int32: String] = [:]
-                    for var x in SystemSnapshot.parse(text, listeners: true) where seen.insert("\(x.pid)|\(x.proto.rawValue)|\(x.localPort)|\(x.remoteAddress)|\(x.remotePort)").inserted {
+                    for var x in SystemSnapshot.parse(text, listeners: true, unconnectedUDP: warp.map { [$0.pid] } ?? []) where seen.insert("\(x.pid)|\(x.proto.rawValue)|\(x.localPort)|\(x.remoteAddress)|\(x.remotePort)").inserted {
                         let k = kernelPaths[x.pid] ?? ConnectionSampler.path(of: x.pid)
                         kernelPaths[x.pid] = k
                         if !k.hasPrefix("pid ") { x.processPath = k }
@@ -394,10 +444,10 @@ final class Ledger: ObservableObject {
                 // samples, not by when the main actor got to them.
                 let link = LinkSample(counters: InternetTraffic.counters(),
                                       internet: InternetTraffic.internetInterfaces(defaultRoutes: InternetTraffic.defaultRouteInterfaces()))
-                return (c, traffic, link, Date())
+                return (c, traffic, link, warp, Date())
             }.value
             systemWide = useSnapshot != nil
-            await ingest(conns, traffic.processes, flows: traffic.flows, link: link, now: sampled)
+            await ingest(conns, traffic.processes, flows: traffic.flows, link: link, openWarp: warp, now: sampled)
             rules.refreshNetwork()
             refreshEnforcement()
             alerts.revalidate()
@@ -426,9 +476,13 @@ final class Ledger: ObservableObject {
 
     /// `now` is when the counters were read (tests give their own, so rates do not depend on how fast the machine runs).
     /// `link` is the interfaces' counters read with them, for the Mac's total traffic (none: the total stays 0).
-    func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter], flows: [FlowCounter] = [], link: LinkSample? = nil, now: Date = Date()) async {
-        // Which connections a peer started: their local port is a listener's.
-        let conns = SocketDirection.mark(conns)
+    /// `openWarp` is OpenWarp's status, which names the server its carrier socket sends to (`TunnelCarrier`).
+    func ingest(_ conns: [ObservedConnection], _ traffic: [TrafficCounter], flows: [FlowCounter] = [], link: LinkSample? = nil,
+                openWarp: OpenWarpStatus? = nil, now: Date = Date()) async {
+        self.openWarp = openWarp
+        // Which connections a peer started: their local port is a listener's. OpenWarp's unconnected UDP socket is
+        // its connection to the endpoint its status names.
+        let conns = TunnelCarrier.resolve(SocketDirection.mark(conns), openWarp: openWarp)
         // The time between this sample and the last; the floor only keeps a pass run right after another finite.
         let dt = max(now.timeIntervalSince(lastTick), 0.05)
         lastTick = now
@@ -531,7 +585,7 @@ final class Ledger: ObservableObject {
                         route: RouteTag? = nil) -> (Verdict, Rule?) {
                 let conn = Connection(process: ProcessIdentity(signingID: sig.0, teamID: sig.1, path: e.identity.ruleKey), executable: executable,
                                       host: host == address || isIPLiteral(host) ? nil : host, address: address, port: port, proto: proto, offVPN: offVPN,
-                                      country: geo.countryCode(address), tunnelServer: route.flatMap(tunnelServer(through:)))
+                                      country: serverCountry(address), tunnelServer: route.flatMap(tunnelServer(through:)))
                 // The process list's ✗/✓ decide first, narrowest first (`RuleEngine.decide`). Matches what is
                 // enforced: an app the helper blocks as a whole (`deniedAppPaths`) is denied for every server.
                 let decision = rules.engine.decide(conn)
@@ -559,7 +613,8 @@ final class Ledger: ObservableObject {
                 // A peer's connections to one port of this Mac are one row (each comes from a port of its own).
                 let key = c.incoming ? "in|\(c.remoteAddress):\(c.localPort)/\(c.proto.rawValue)|\(c.processName)"
                                      : "\(c.remoteAddress):\(c.remotePort)/\(c.proto.rawValue)|\(c.processName)"
-                let bytes = bytesByFlow[FlowCounter.key(pid: c.pid, proto: c.proto, localPort: c.localPort, remotePort: c.remotePort)]
+                // nettop names a carrier socket's flow without a remote port, as the socket has none.
+                let bytes = bytesByFlow[FlowCounter.key(pid: c.pid, proto: c.proto, localPort: c.localPort, remotePort: c.carrier ? 0 : c.remotePort)]
                 let socket = StreamDetector.key(pid: c.pid, proto: c.proto, localPort: c.localPort, remoteAddress: c.remoteAddress, remotePort: c.remotePort)
                 liveSockets.insert(socket)
                 let stream = !c.incoming && bytes != nil && streams.update(socket, bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0, now: now)
@@ -579,7 +634,7 @@ final class Ledger: ObservableObject {
                 }
                 guard seen.insert(key).inserted else { continue }
                 let (host, named) = names.lookup(c.remoteAddress)
-                let geoPoint = isLocalAddress(c.remoteAddress) ? nil : geo.lookup(c.remoteAddress)
+                let geoPoint = isLocalAddress(c.remoteAddress) ? nil : place(c.remoteAddress)
                 // A peer that connected to a local proxy does not go through it: only an outgoing connection is tagged.
                 let route = routes.route(localAddress: c.localAddress, remoteAddress: c.remoteAddress, remotePort: c.remotePort, processPath: c.processPath)
                     ?? (c.incoming ? nil : RouteMarker.localProxy(remoteAddress: c.remoteAddress, remotePort: c.remotePort, pid: c.pid, listener: listeners[c.remotePort]))
@@ -587,7 +642,8 @@ final class Ledger: ObservableObject {
                                           pid: c.pid, process: c.processName,
                                           network: isLocalAddress(c.remoteAddress) ? nil : geo.network(c.remoteAddress)?.label,
                                           route: route, bytesIn: bytes?.0 ?? 0, bytesOut: bytes?.1 ?? 0, incoming: c.incoming, stream: stream))
-                remotes[remotes.count - 1].country = geo.countryCode(c.remoteAddress)
+                remotes[remotes.count - 1].country = serverCountry(c.remoteAddress)
+                remotes[remotes.count - 1].carrier = c.carrier
                 indexByKey[key] = remotes.count - 1
 
                 guard !isLocalAddress(c.remoteAddress) else { continue }
@@ -596,7 +652,7 @@ final class Ledger: ObservableObject {
                 guard named else { continue }
                 // Judged by the socket's own ports, as the helper judges it.
                 let verdict = judge(host: host, address: c.remoteAddress, port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
-                                    executable: c.processPath, route: remotes.last?.route, incoming: c.incoming, offVPN: !remotes[remotes.count - 1].isVPN)
+                                    executable: c.processPath, route: remotes.last?.route, incoming: c.incoming || c.carrier, offVPN: !remotes[remotes.count - 1].isVPN)
                 remotes[remotes.count - 1].verdict = verdict
                 if verdict == .deny { deniedKeys.insert(key); if c.localPort != 0 { portsNow.insert(c.localPort) } }
             }
@@ -774,6 +830,31 @@ final class Ledger: ObservableObject {
                            geoDatabase: active.contains { $0.country != nil || $0.vpnCountry != nil } ? geo.loadedFile(.city)?.path : nil)
     }
 
+    /// The country rules and the list give a server: OpenWarp's exit for its endpoint (nil until it reported one),
+    /// unknown for any other Cloudflare WARP endpoint (anycast: a database's country for it is not where it leads),
+    /// else the database's.
+    func serverCountry(_ address: String) -> String? {
+        TunnelPlacement.serverCountry(address, lookup: geo.countryCode, openWarp: openWarp)
+    }
+
+    /// Where a server goes on the map: OpenWarp's endpoint at the Cloudflare data centre its tunnel exits at
+    /// (`Airports`), nowhere for any other WARP endpoint or before OpenWarp reported its exit (anycast: placed
+    /// nowhere rather than where the prefix is registered), else the database's place.
+    func place(_ address: String) -> GeoPoint? {
+        if let w = openWarp, w.connected, w.endpoint?.address == address { return w.colo.flatMap { Airports.exit(colo: $0, loc: w.loc) } }
+        if CloudflareWARP.isEndpoint(address) { return nil }
+        return geo.lookup(address)
+    }
+
+    /// What the inspector says about where a Cloudflare WARP endpoint leads: OpenWarp's data centre ("Cloudflare DUS")
+    /// for its endpoint, or "Unknown (anycast)" for a WARP endpoint it placed nowhere. Nil for any other server.
+    func exitLabel(for r: RemoteHost) -> String? {
+        if let w = openWarp, w.connected, w.endpoint?.address == r.address, let colo = w.colo {
+            return r.geo == nil ? "Cloudflare \(colo)\(w.loc.map { " · \(Countries.label($0))" } ?? "")" : "Cloudflare data centre \(colo)"
+        }
+        return CloudflareWARP.isEndpoint(r.address) && r.geo == nil ? "Unknown (anycast: Cloudflare answers from the nearest data centre)" : nil
+    }
+
     /// Where the tunnel a connection goes through leads (nil outside every tunnel).
     func tunnelServer(through route: RouteTag) -> TunnelServer? {
         guard case let .vpn(_, iface) = route else { return nil }
@@ -790,20 +871,22 @@ final class Ledger: ObservableObject {
         var servers: [String: TunnelServer] = [:], carriers: [String: [String]] = [:]
         if let status = enforcer.status, !enforcer.helperOutdated {
             for iface in interfaces {
-                guard let found = status.tunnelServers?[iface] else { continue }
+                guard let published = status.tunnelServers?[iface] else { continue }
+                let found = TunnelPlacement.carriers(of: iface, found: published, openWarp: openWarp)
                 carriers[iface] = found
-                servers[iface] = NetworkRoutes.serverCountry(found, lookup: geo.countryCode).map(TunnelServer.country) ?? .unknown
+                servers[iface] = TunnelPlacement.country(of: iface, carriers: found, lookup: geo.countryCode, openWarp: openWarp).map(TunnelServer.country) ?? .unknown
             }
             tunnelServers = servers; tunnelCarriers = carriers
             return
         }
         for iface in interfaces {
-            let found = routes.tunnelOwners[iface].map { owner in
+            let scanned = routes.tunnelOwners[iface].map { owner in
                 NetworkRoutes.carrierServers(owner: conns.filter { $0.processPath == owner }, relays: [], tunnels: routes.tunnelAddresses, isLocal: isLocalAddress,
                                              pinned: { NetworkRoutes.pinnedServers(for: iface, isLocal: isLocalAddress, internet: { self.routes.internetTunnel }) })
             } ?? []
+            let found = TunnelPlacement.carriers(of: iface, found: scanned, openWarp: openWarp)
             carriers[iface] = found
-            servers[iface] = NetworkRoutes.serverCountry(found, lookup: geo.countryCode).map(TunnelServer.country) ?? .unknown
+            servers[iface] = TunnelPlacement.country(of: iface, carriers: found, lookup: geo.countryCode, openWarp: openWarp).map(TunnelServer.country) ?? .unknown
         }
         tunnelServers = servers; tunnelCarriers = carriers
     }
@@ -839,6 +922,12 @@ final class Ledger: ObservableObject {
 
     func domains(_ remotes: [RemoteHost]? = nil) -> [(name: String, count: Int)] {
         Self.tally(remotes ?? apps.flatMap(\.remotes)) { registrableDomain($0.host) }
+    }
+
+    /// The Summary's Top Domains: names before bare addresses (a server with no name, such as
+    /// `2001:4860:4829:7800::`), which only fill the places names leave; each keeps its count order.
+    static func topDomains(_ domains: [(name: String, count: Int)], limit: Int = 2) -> [(name: String, count: Int)] {
+        Array((domains.filter { !isIPLiteral($0.name) } + domains.filter { isIPLiteral($0.name) }).prefix(limit))
     }
 
     /// Networks (ASN organizations) by number of connections, for the Summary.
@@ -897,18 +986,38 @@ final class Ledger: ObservableObject {
         }
         let starts = (0..<count).map { start.addingTimeInterval(Double($0) * size) }
         let ends = (0..<count).map { start.addingTimeInterval(Double($0 + 1) * size) }
-        // Square-root scale so quiet traffic stays visible next to a burst.
-        for i in 0..<count { rx[i] = rx[i].squareRoot(); tx[i] = tx[i].squareRoot() }
+        // Log scale against the tallest bucket in either direction, so quiet traffic stays visible next to a burst.
+        let top = (rx + tx).max() ?? 0
+        for i in 0..<count { rx[i] = ChartLayout.level(rx[i], peak: top); tx[i] = ChartLayout.level(tx[i], peak: top) }
         let bars = zip(zip(starts, ends), zip(rx, tx)).map { ChartBar(start: $0.0.0, end: $0.0.1, rx: $0.1.0, tx: $0.1.1) }
-        let peak = max((rx + tx).max() ?? 0, 1) * 1.1
+        let peak = 1.1
         let format: Date.FormatStyle = range == .week ? .dateTime.weekday(.abbreviated).day()
-            : range == .fiveMinutes ? .dateTime.hour().minute().second() : .dateTime.hour().minute()
-        return ChartLayout(bars: bars, start: start, end: start.addingTimeInterval(Double(count) * size), peak: peak, labelFormat: format)
+            : .dateTime.hour().minute()
+        return ChartLayout(bars: bars, start: start, end: start.addingTimeInterval(Double(count) * size), peak: peak, labelFormat: format, clock: range != .week)
     }
 
     #if DEBUG
-    /// Fixed data for visual checks and snapshot tests: no sampling, no alerts, no real addresses.
-    func installDemoData() {
+    /// OpenWarp in the demo (`RAT_DEMO_OPENWARP=1`, for its UI test; the snapshot goldens leave it out): its root
+    /// helper's carrier socket, named by its status, exits at Cloudflare's Düsseldorf data centre.
+    func installDemoOpenWarp() {
+        let helper = OpenWarpStatus.helperPath, name = (helper as NSString).lastPathComponent
+        let ident = AppIdentity.resolve(processPath: helper)
+        var e = AppEntry(identity: ident)
+        e.lastActive = Date(); e.totalIn = 2_381_253; e.totalOut = 2_207_109; e.pids = [627]
+        e.rates = (0..<14).map { k in (rx: Double(k % 4), tx: Double(k % 3)) }
+        e.processes[name] = ProcessStats(name: name, path: helper, pids: [627], totalIn: 2_381_253, totalOut: 2_207_109)
+        let dus = Airports.exit(colo: "DUS", loc: "DE")
+            ?? GeoPoint(coordinate: .init(latitude: 51.29, longitude: 6.77), city: "Düsseldorf", country: "Germany", countryCode: "DE")
+        var r = RemoteHost(address: "198.51.100.198", host: "198.51.100.198", port: 443, proto: "UDP", geo: dus, pid: 627, process: name,
+                           network: "AS64500 Example Networks", route: .vpnServer(name: "OpenWarp"), bytesIn: 2_381_253, bytesOut: 2_207_109)
+        r.carrier = true; r.country = "DE"; r.rateIn = 60_000; r.rateOut = 20_000
+        e.remotes = [r]
+        table[ident.id] = e
+    }
+
+    /// Fixed data for visual checks and snapshot tests: no sampling, no alerts, no real addresses. `openWarp`: also
+    /// OpenWarp's helper and its carrier (`RAT_DEMO_OPENWARP=1`).
+    func installDemoData(openWarp: Bool = ProcessInfo.processInfo.environment["RAT_DEMO_OPENWARP"] != nil) {
         demo = true
         myLocation = GeoPoint(coordinate: .init(latitude: 52.52, longitude: 13.405), city: "Berlin", country: "Germany", countryCode: "DE")
         let codes = ["United Kingdom": "GB", "Netherlands": "NL", "Germany": "DE", "France": "FR", "Sweden": "SE", "Spain": "ES"]
@@ -982,6 +1091,7 @@ final class Ledger: ObservableObject {
         ]
         fx.remotes[0].country = "ES"
         table[firefox.id] = fx
+        if openWarp { installDemoOpenWarp() }
         // Telegram Helper's tunnel goes to a server in the Netherlands.
         routes.set(tunnelAddresses: ["100.64.0.2": "utun3"], tunnelNames: ["utun3": "Windscribe"], proxies: [])
         tunnelServers = ["utun3": .country("NL")]; tunnelCarriers = ["utun3": ["192.0.2.99"]]

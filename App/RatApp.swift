@@ -22,6 +22,8 @@ struct RatApp: App {
                 .environmentObject(ledger)
                 .frame(minWidth: 1000, minHeight: 620)
                 .preferredColorScheme(.dark)
+                // OpenWarp's matte blue for system controls (switches, pickers, links) instead of the system accent.
+                .tint(Color.ratAccent)
                 .onAppear { boot() }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in ledger.shutdown() }
         }
@@ -37,28 +39,35 @@ struct RatApp: App {
         }
 
         Window("Rules", id: "rules") {
-            RulesWindow().environmentObject(ledger)
+            RulesWindow().environmentObject(ledger).tint(Color.ratAccent).background(Color.ratBase)
         }
         .defaultSize(width: 1000, height: 620)
 
         Settings {
-            SettingsView().environmentObject(ledger)
+            SettingsView().environmentObject(ledger).tint(Color.ratAccent)
         }
     }
 
     @MainActor private func boot() {
         ledger.start()
+        var created: MenuBarController?
         if menuBar == nil {
             let m = MenuBarController(ledger: ledger)
             ledger.onTick = { [weak m] in m?.update() }
             menuBar = m
+            created = m
         }
         Task { await UpdateChecker.checkIfDue() }
+        #if !DEBUG
+        _ = created
+        #endif
         #if DEBUG
         // Lets screenshots and manual checks open a window at launch: RAT_OPEN=settings|rules
         switch ProcessInfo.processInfo.environment["RAT_OPEN"] {
         case "settings"?: DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.activate(ignoringOtherApps: true); WindowOpener.open?("settings") }
         case "rules"?: DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.activate(ignoringOtherApps: true); WindowOpener.open?("rules") }
+        // @State does not hand back what was just set in this call: the controller made above.
+        case "panel"?: DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak created] in created?.showPanelAtLaunch() }
         default: break
         }
         #endif

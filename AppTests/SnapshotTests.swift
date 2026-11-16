@@ -2,6 +2,7 @@ import XCTest
 import SwiftUI
 import AppKit
 import RatFilterCore
+import RatMonitor
 @testable import Rat
 
 /// Renders real SwiftUI views to images and (1) compares them with stored golden images, (2) checks
@@ -13,11 +14,11 @@ final class SnapshotTests: XCTestCase {
     private static let snapshotDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Snapshots")
     private static let referenceDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("screenshot")
 
-    private func demoLedger() -> Ledger {
+    private func demoLedger(openWarp: Bool = false) -> Ledger {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rat-snap-\(UUID())")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let l = Ledger(directory: dir)
-        l.installDemoData()
+        l.installDemoData(openWarp: openWarp)
         return l
     }
 
@@ -114,9 +115,41 @@ final class SnapshotTests: XCTestCase {
         try assertMatchesGolden(render(view, size: CGSize(width: 400, height: 260)), "tagged-rows")
     }
 
+    /// OpenWarp's rows in the matte design: its helper's carrier (`VPN server · OpenWarp`, grey, placed at its exit)
+    /// under the OpenWarp app, and an app's connection through its tunnel (`VPN · OpenWarp`, teal).
+    func testOpenWarpRowsGolden() throws {
+        let ledger = demoLedger(openWarp: true)
+        let openWarp = try XCTUnwrap(ledger.apps.first { $0.identity.ruleKey == OpenWarpStatus.appPath })
+        var chrome = try XCTUnwrap(ledger.apps.first { $0.identity.name == "Google Chrome" })
+        chrome.remotes = chrome.remotes.map { var r = $0; r.route = .vpn(name: "OpenWarp", interface: "utun4"); return r }
+        let view = VStack(spacing: 0) {
+            ProcessRow(app: openWarp, selection: .constant(nil), open: true, openProcesses: ["com.local.openwarp"])
+            ProcessRow(app: chrome, selection: .constant(nil), open: true)
+        }
+        .environmentObject(ledger).padding(8).frame(width: 400).background(Color(white: 0.12))
+        try assertMatchesGolden(render(view, size: CGSize(width: 400, height: 290)), "openwarp-rows")
+    }
+
     func testSummaryInspectorMatchesGolden() throws {
         let ledger = demoLedger()
         try assertMatchesGolden(render(InspectorView(selection: nil).environmentObject(ledger), size: CGSize(width: 330, height: 700)), "inspector-summary")
+    }
+
+    /// The menu bar panel on demo data, with a fixed firewall state and route (not this Mac's).
+    func testControlCenterPanelGolden() throws {
+        let ledger = demoLedger(openWarp: true)
+        let view = ControlCenterPanel(rules: ledger.rules, enforcer: ledger.enforcer, alerts: ledger.alerts,
+                                      fixedProtection: .init(tone: .on, title: "Firewall on", detail: "Blocking 3 connections", fix: nil),
+                                      fixedRoute: .vpn(name: "OpenWarp", country: "DE"))
+            .environmentObject(ledger)
+        try assertMatchesGolden(render(view, size: CGSize(width: ControlCenterPanel.width, height: 560)), "control-center")
+    }
+
+    /// Rat's flags: rectangles of one size with a bold outline (wide, square and tall flags alike).
+    func testFlagsGolden() throws {
+        let row = HStack(spacing: 8) { ForEach(["NO", "PT", "PY", "CH", "ES", "DE", "IE", "US", "JP", "NP"], id: \.self) { FlagView(code: $0, height: 24) } }
+            .padding(12)
+        try assertMatchesGolden(render(row, size: CGSize(width: 480, height: 48)), "flags")
     }
 
     func testAlertPanelMatchesGolden() throws {

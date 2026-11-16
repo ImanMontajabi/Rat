@@ -240,6 +240,9 @@ public final class EnforcerDaemon {
     /// same as none (blocking its sockets' ports would reset good connections).
     private var tunnelProcesses: [String: NetworkRoutes.TunnelOwner] = [:]
     private var scannedTunnels = Set<String>()
+    /// OpenWarp's status (its tunnel, endpoint and exit), read with the scan while a VPN country is checked: its
+    /// carrier socket names no server and its endpoint is anycast (`TunnelPlacement`).
+    private var openWarp: OpenWarpStatus?
     public private(set) var reloads = 0
     private let trace = !(ProcessInfo.processInfo.environment["RAT_TRACE"] ?? "").isEmpty
     private var traceTicks = 0, traceTime = 0.0
@@ -438,7 +441,8 @@ public final class EnforcerDaemon {
                     let deny = socketVerdicts[key] ?? judge.denies(app: w.app, executable: w.executable, address: c.remoteAddress,
                                                                     port: c.remotePort, proto: c.proto == .udp ? .udp : .tcp,
                                                                     offVPN: judge.needsRoute ? leavesOutsideTunnel(c, judge) : nil,
-                                                                    country: judge.needsCountry ? geo?.db?.countryCode(c.remoteAddress) : nil,
+                                                                    country: judge.needsCountry ? geo?.db.flatMap { db in
+                                                                        TunnelPlacement.serverCountry(c.remoteAddress, lookup: db.countryCode, openWarp: nil) } : nil,
                                                                     countryKnown: geo?.db != nil,
                                                                     tunnelServer: judge.needsVPNCountry ? tunnelServer(c, judge) : nil)
                     verdicts[key] = deny
@@ -555,7 +559,8 @@ public final class EnforcerDaemon {
             background.async { [self] in
                 let up = Set(NetworkRoutes.tunnelAddresses().values)
                 let t = NetworkRoutes.tunnelOwnerProcesses(relays: relays)
-                tunnelLock.withLock { tunnels = t.mapValues(\.path); tunnelProcesses = t; scannedTunnels = relays ? up : [] }
+                let w = relays ? OpenWarpLink.shared.current() : nil
+                tunnelLock.withLock { tunnels = t.mapValues(\.path); tunnelProcesses = t; scannedTunnels = relays ? up : []; openWarp = w }
             }
         }
     }
@@ -678,16 +683,19 @@ public final class EnforcerDaemon {
         if let judge, judge.needsVPNCountry {
             // A tunnel that just came up has no known client until the next scan: ask for it now.
             if Set(tunnels.values) != Set(vpn.tunnels.values) { lastTunnelScan = .distantPast }
-            let (owners, scanned) = tunnelLock.withLock { (tunnelProcesses, scannedTunnels) }
+            let (owners, scanned, warp) = tunnelLock.withLock { (tunnelProcesses, scannedTunnels, openWarp) }
             for iface in Set(tunnels.values) where scanned.contains(iface) {
                 let o = owners[iface]
-                let servers = o.map { o in
+                let found = o.map { o in
                     NetworkRoutes.carrierServers(owner: ConnectionSampler.connections(of: o.pid), relays: o.relays.flatMap(ConnectionSampler.connections(of:)),
                                                  tunnels: tunnels, isLocal: judge.isLocal,
                                                  pinned: { NetworkRoutes.pinnedServers(for: iface, isLocal: judge.isLocal) })
                 } ?? []
+                let servers = TunnelPlacement.carriers(of: iface, found: found, openWarp: warp)
                 next.servers[iface] = servers
-                if let db = geo?.db { next.countries[iface] = NetworkRoutes.serverCountry(servers, lookup: db.countryCode).map(TunnelServer.country) ?? .unknown }
+                if let db = geo?.db {
+                    next.countries[iface] = TunnelPlacement.country(of: iface, carriers: servers, lookup: db.countryCode, openWarp: warp).map(TunnelServer.country) ?? .unknown
+                }
             }
         }
         if tunnels != vpn.tunnels || next.countries != vpn.countries { socketVerdicts.removeAll() }
