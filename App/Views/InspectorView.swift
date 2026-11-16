@@ -290,7 +290,8 @@ struct RemoteInspector: View {
                 if let p = r.process { kv("Process", p + (r.pid.map { " (pid \($0))" } ?? "")) }
                 if let n = r.network { kv("Network", n) }
                 if let g = r.geo { kv("Location", g.place) }
-                if let cc = r.country, !r.incoming {
+                if let exit = ledger.exitLabel(for: r) { kv(r.geo == nil ? "Location" : "Exit", exit).accessibilityIdentifier("inspector-exit") }
+                if let cc = r.country, !r.incoming, !r.carrier {
                     // A rule for every server in the country, for this app: the editor opens on it.
                     Button("Rule for Servers in \(Countries.label(cc))…") {
                         ledger.rules.focus = RulesModel.Target(app: app.identity.ruleKey)
@@ -307,7 +308,7 @@ struct RemoteInspector: View {
                 }
             }
             SectionHeader(title: "Rules", open: $rules)
-            if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), incoming: r.incoming) }
+            if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), incoming: r.incoming, carrier: r.carrier) }
         }
     }
 
@@ -329,6 +330,8 @@ struct TargetRules: View {
     let target: RulesModel.Target?
     /// A connection a peer started (no rule names it).
     var incoming = false
+    /// A VPN client's own connection to its server from a socket that names no server (no rule can be enforced on it).
+    var carrier = false
 
     private var subject: String {
         switch target?.level { case .connection?: "this connection"; case .process?: "this process"; default: "this app" }
@@ -364,7 +367,8 @@ struct TargetRules: View {
                 .accessibilityValue("\(list.count)")
             } else {
                 Text(incoming ? "A peer started this connection. Rules decide what this Mac connects to, so none names it; the app's ✗ still cuts it."
-                              : "No rule can name this connection: it stays inside the local network.")
+                     : carrier ? "This is the VPN client's own connection to its server. It sends from a socket that names no server (the server comes from the client's status), so a rule about this connection could not be enforced; the app's ✗ still cuts it, and the VPN with it."
+                     : "No rule can name this connection: it stays inside the local network.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Button("Manage Rules…") { ledger.rules.focus = target ?? RulesModel.Target(app: app.identity.ruleKey); openWindow(id: "rules") }

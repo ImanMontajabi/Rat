@@ -212,6 +212,6 @@ sudo scripts/verify-blocking.sh     # live end-to-end blocking test
 
 ## مجوز و منابع
 
-مجوز MIT؛ متن کامل در [LICENSE](LICENSE). داده‌های موقعیت IP و شبکه از [DB-IP.com](https://db-ip.com) است: پایگاه‌داده‌های IP to City Lite و IP to ASN Lite با مجوز [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+مجوز MIT؛ متن کامل در [LICENSE](LICENSE). داده‌های موقعیت IP و شبکه از [DB-IP.com](https://db-ip.com) است: پایگاه‌داده‌های IP to City Lite و IP to ASN Lite با مجوز [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). موقعیت فرودگاه‌ها برای مراکز داده Cloudflare از [OurAirports](https://ourairports.com/data/) است (مالکیت عمومی).
 
 </div>
