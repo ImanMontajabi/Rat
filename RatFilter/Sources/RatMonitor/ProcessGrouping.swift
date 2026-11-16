@@ -22,10 +22,18 @@ public enum ProcessGrouping {
     /// Programs an app installs outside its bundle and runs from there. Windscribe's root helper copies its tunnels
     /// (`windscribeamneziawg`, `windscribeopenvpn`, `windscribewstunnel`, `windscribectrld`) into
     /// /Library/Application Support/Windscribe/bin. They belong to the app in the list and when it is denied.
+    /// OpenWarp's root daemon is a copy of the CLI in /Library/PrivilegedHelperTools (its LaunchDaemon may not run a
+    /// file in a user-writable bundle); it holds the tunnel and its carrier socket (`OpenWarpStatus`).
     static let companions: [(prefix: String, app: String)] = [
         ("/Library/Application Support/Windscribe/", "/Applications/Windscribe.app"),
         ("/Library/PrivilegedHelperTools/com.windscribe.", "/Applications/Windscribe.app"),
+        (OpenWarpStatus.helperPath, OpenWarpStatus.appPath),
     ]
+
+    /// The bundle identifier of a companion app, to find it by LaunchServices when it is not at its usual path.
+    public static func companionBundleIdentifier(of app: String) -> String? {
+        app == OpenWarpStatus.appPath ? OpenWarpStatus.bundleIdentifier : nil
+    }
 
     /// The app a program installed outside its bundle belongs to (see `companions`).
     public static func companionApp(of path: String) -> String? {

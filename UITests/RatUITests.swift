@@ -10,6 +10,8 @@ final class RatUITests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchEnvironment["RAT_DEMO_MAP"] = "1"
+        // OpenWarp's row only for its own tests, so the others see the demo data they were written for.
+        if name.contains("OpenWarp") { app.launchEnvironment["RAT_DEMO_OPENWARP"] = "1" }
         // Start from a fresh window: a window minimized in an earlier run would come back minimized, and every
         // click and keystroke would miss it.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
@@ -379,6 +381,29 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(stream.label.contains("stream"), stream.label)
         XCTAssertFalse(stream.label.contains("Incoming"))
         XCTAssertTrue(el("remote-policy-demo2.example.com").buttons["policy-deny"].exists, "a stream this Mac opened can be denied")
+    }
+
+    // MARK: OpenWarp
+
+    /// OpenWarp's root helper is listed under OpenWarp, and its carrier socket as its connection to the endpoint,
+    /// tagged as the VPN's server, placed at the data centre the tunnel exits at, with no ✗/✓ of its own.
+    func testOpenWarpCarrierIsListedUnderItsApp() {
+        XCTAssertTrue(el("app-row-OpenWarp").waitForExistence(timeout: 10), "the helper is grouped under the app, not as com.local.openwarp")
+        XCTAssertFalse(el("app-row-com.local.openwarp").exists)
+        XCTAssertTrue(el("app-row-OpenWarp").descendants(matching: .any)["badge-VPN server · OpenWarp"].exists, "the app row shows its carrier")
+        expand("OpenWarp")
+        expand("com.local.openwarp")
+        let carrier = el("remote-row-198.51.100.198")
+        XCTAssertTrue(carrier.waitForExistence(timeout: 5))
+        XCTAssertTrue(carrier.label.contains("UDP 443"), carrier.label)
+        XCTAssertTrue(carrier.label.contains("VPN server · OpenWarp"), carrier.label)
+        XCTAssertFalse(el("remote-policy-198.51.100.198").buttons["policy-deny"].exists, "no rule can be enforced on a socket that names no server")
+        carrier.click()
+        XCTAssertTrue(inspectorTitle().contains("198.51.100.198"), inspectorTitle())
+        XCTAssertTrue(el("badge-VPN server · OpenWarp").waitForExistence(timeout: 5))
+        let place = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "Düsseldorf", "Düsseldorf")).firstMatch
+        XCTAssertTrue(place.waitForExistence(timeout: 5), "placed at the data centre, not where the anycast prefix is registered")
+        XCTAssertFalse(el("inspector-country-rule").exists, "no country rule from a carrier")
     }
 
     // MARK: flags and Hide Local

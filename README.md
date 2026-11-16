@@ -172,4 +172,4 @@ No Little Snitch code or assets are used. The screenshots below are of Little Sn
 
 ## Credits and license
 
-MIT, see [LICENSE](LICENSE). IP geolocation and network data come from [DB-IP.com](https://db-ip.com): the IP to City Lite and IP to ASN Lite databases, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+MIT, see [LICENSE](LICENSE). IP geolocation and network data come from [DB-IP.com](https://db-ip.com): the IP to City Lite and IP to ASN Lite databases, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Airport locations for Cloudflare data centres come from [OurAirports](https://ourairports.com/data/) (public domain).

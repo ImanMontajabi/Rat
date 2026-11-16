@@ -70,11 +70,19 @@ struct AppIdentity: Hashable {
         let img: NSImage
         if let bundlePath, bundlePath.hasSuffix(".AppBundle"), FileManager.default.fileExists(atPath: "/Applications/\(name).app") {
             img = NSWorkspace.shared.icon(forFile: "/Applications/\(name).app")
-        } else if let bundlePath { img = NSWorkspace.shared.icon(forFile: bundlePath) }
+        } else if let bundlePath { img = NSWorkspace.shared.icon(forFile: Self.iconPath(bundlePath)) }
         else if isSystem, let sys = NSImage(systemSymbolName: "apple.logo", accessibilityDescription: nil) { img = sys }
         else { img = NSWorkspace.shared.icon(forFile: id.replacingOccurrences(of: "#ext", with: "")) }
         Self.iconCache[id] = img
         return img
+    }
+
+    /// The file whose icon stands for a bundle: the bundle, or for a companion app that is not at its usual path (an
+    /// OpenWarp built elsewhere; its helper still names /Applications/OpenWarp.app) the copy LaunchServices knows.
+    static func iconPath(_ bundle: String, exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+                         locate: (String) -> String? = { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)?.path }) -> String {
+        guard !exists(bundle), let id = ProcessGrouping.companionBundleIdentifier(of: bundle), let found = locate(id) else { return bundle }
+        return found
     }
 
     /// Code-signing identifier and team for the bundle or executable.
