@@ -1,1 +1,0 @@
-Rat now uses OpenWarp's dark, matte look: traffic is peach going out and blue coming in (no more purple), ✗/✓ and status colours are muted pastels, panels are flat instead of translucent, and the map's tracers are flat beams without glow.
