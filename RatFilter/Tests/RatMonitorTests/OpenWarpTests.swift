@@ -71,15 +71,20 @@ final class OpenWarpTests: XCTestCase {
         addr.sun_family = sa_family_t(AF_UNIX)
         withUnsafeMutableBytes(of: &addr.sun_path) { raw in let b = Array(path.utf8); raw.copyBytes(from: b); raw[b.count] = 0 }
         let bound = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        // A client that refuses the peer hangs up before the answer. SO_NOSIGPIPE goes on the listening socket, which
+        // the accepted one inherits: set after accept, it fails (EINVAL) on a socket whose client has already gone,
+        // and the write below would kill the test process with SIGPIPE.
+        var one: Int32 = 1
+        XCTAssertEqual(setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size)), 0)
         XCTAssertEqual(bound, 0); XCTAssertEqual(Darwin.listen(fd, 1), 0)
         let done = expectation(description: "served")
         Thread.detachNewThread {
             let c = Darwin.accept(fd, nil, nil)
-            var one: Int32 = 1   // a client that refuses the peer has closed before the answer: no SIGPIPE
-            setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
             var buf = [UInt8](repeating: 0, count: 1024)
-            _ = Darwin.read(c, &buf, buf.count)
-            _ = response.withUnsafeBytes { Darwin.write(c, $0.baseAddress, $0.count) }
+            // No request (the client hung up): nothing to answer.
+            if Darwin.read(c, &buf, buf.count) > 0 {
+                _ = response.withUnsafeBytes { Darwin.write(c, $0.baseAddress, $0.count) }
+            }
             close(c); close(fd)
             done.fulfill()
         }
