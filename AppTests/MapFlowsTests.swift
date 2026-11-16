@@ -45,7 +45,7 @@ final class MapFlowsTests: XCTestCase {
     func testTracerTiming() {
         typealias T = MapFlows.Tracer
         XCTAssertLessThanOrEqual(T.beamTail, 1 / T.arrival - 1, "the tail lands within the cycle")
-        for tail in [T.beamTail, T.beamTail * 0.8, T.coreTail] {
+        for tail in [T.beamTail] {
             XCTAssertEqual(T.stroke(at: 0, tail: tail).end, 0)
             XCTAssertEqual(T.stroke(at: T.arrival / 2, tail: tail).end, 0.5, accuracy: 1e-9, "the head moves at an even speed")
             XCTAssertEqual(T.stroke(at: T.arrival, tail: tail).end, 1, accuracy: 1e-9, "at the far end by the arrival")
@@ -112,7 +112,7 @@ final class MapFlowsTests: XCTestCase {
         let host = PulseHost(frame: CGRect(x: 0, y: 0, width: 400, height: 300))
         let line = [CGPoint(x: 10, y: 10), CGPoint(x: 200, y: 120), CGPoint(x: 380, y: 280)]
         host.show([.init(id: "a", points: line, flow: .down, fast: false), .init(id: "b", points: line, flow: .both, fast: true)])
-        XCTAssertEqual(host.pulseCount, 5 + 20, "glow, beam, core, head and ripple per pulse: 1 pulse, then 4")
+        XCTAssertEqual(host.pulseCount, 3 + 12, "beam, head and ring per pulse (matte: no glow, core or halo): 1 pulse, then 4")
         XCTAssertTrue(host.layer?.masksToBounds ?? false, "tracers stop at the map's edge, never over the list or the inspector")
         let first = host.layer?.sublayers?.first
         let cycle = first?.animation(forKey: "flow") as? CAAnimationGroup
@@ -122,16 +122,18 @@ final class MapFlowsTests: XCTestCase {
         XCTAssertEqual(cycle?.preferredFrameRateRange.maximum, 30)
         XCTAssertEqual(Set(cycle?.animations?.compactMap { ($0 as? CAPropertyAnimation)?.keyPath } ?? []), ["strokeStart", "strokeEnd"], "the beam is drawn between its tail and its head")
         let layers = host.layer?.sublayers ?? []
-        let ring = layers[4] as? CAShapeLayer
+        let ring = layers[2] as? CAShapeLayer
         XCTAssertEqual(ring?.position, line.first, "a download lands on this Mac (the line's start)")
-        let head = layers[3]
+        let head = layers[1]
+        XCTAssertEqual(head.shadowOpacity, 0, "a flat head, no halo")
+        XCTAssertNil(ring?.fillColor, "a thin ring, no filled glow")
         let move = (head.animation(forKey: "flow") as? CAAnimationGroup)?.animations?.first as? CAKeyframeAnimation
         XCTAssertEqual(move?.keyPath, "position")
         XCTAssertEqual(move?.path?.currentPoint, line.first, "and its head runs from the server to this Mac")
         host.show([.init(id: "a", points: line, flow: .down, fast: false), .init(id: "b", points: line, flow: .both, fast: true)])
         XCTAssertTrue(host.layer?.sublayers?.first === first, "an unchanged line keeps its layers (no restart)")
         host.show([.init(id: "a", points: line.map { CGPoint(x: $0.x + 5, y: $0.y) }, flow: .down, fast: false)])
-        XCTAssertEqual(host.pulseCount, 5, "a moved camera rebuilds the line; a gone line goes")
+        XCTAssertEqual(host.pulseCount, 3, "a moved camera rebuilds the line; a gone line goes")
         host.show([])
         XCTAssertEqual(host.pulseCount, 0, "paused: no layers, no frames")
         XCTAssertTrue(host.layer?.sublayers?.isEmpty ?? true)

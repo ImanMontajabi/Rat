@@ -20,11 +20,12 @@ struct MonitorWindow: View {
                 InspectorView(selection: selection, filter: filter, place: $place,
                               showApp: { app in place = nil; selection = MonitorSelection(appID: app.id) })
                     .frame(width: 330)
-                    .background(.ultraThinMaterial)
+                    .background(Color.ratBase)
+                    .overlay(alignment: .leading) { Rectangle().fill(Color.ratHairline).frame(width: 1) }
                     .transition(.move(edge: .trailing))
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.ratBase)
         .ignoresSafeArea()
         .animation(.easeInOut(duration: 0.2), value: showInspector)
         .modifier(OpenWindowBridge())

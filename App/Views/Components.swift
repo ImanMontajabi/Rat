@@ -16,7 +16,7 @@ struct RouteBadges: View {
         var carrier = false
         var direction = false
         var help: String
-        var color: Color { direction ? .blue : carrier ? .secondary : vpn ? .teal : .orange }
+        var color: Color { direction ? .ratAccent : carrier ? .secondary : vpn ? .ratVPN : .ratProxy }
     }
 
     /// `directions`: also the direction tags (a connection's own row and the inspector; not an app's summary).
@@ -124,9 +124,9 @@ struct Pill: View {
             Text(text).font(.title3.weight(.semibold)).monospacedDigit()
         }
         .padding(.horizontal, 12).padding(.vertical, 7)
-        .foregroundStyle(.white)
-        .background(kind == .up ? Color(red: 0.55, green: 0.25, blue: 0.75).opacity(0.75) : Color(red: 0.15, green: 0.40, blue: 0.85).opacity(0.75),
-                    in: RoundedRectangle(cornerRadius: 12))
+        // Matte: the traffic colour as text on a soft fill of itself (OpenWarp's `Tint.soft`), peach out, blue in.
+        .foregroundStyle(kind == .up ? Color.ratSent : .ratReceived)
+        .background((kind == .up ? Color.ratSent : .ratReceived).opacity(0.16), in: RoundedRectangle(cornerRadius: Radius.md))
     }
 }
 
@@ -143,9 +143,9 @@ struct PolicyToggle: View {
 
     var body: some View {
         HStack(spacing: compact ? 0 : 2) {
-            cell("xmark", choice: .deny, tint: .red)
+            cell("xmark", choice: .deny, tint: .ratDanger)
                 .accessibilityLabel("Deny").accessibilityIdentifier("policy-deny")
-            cell("checkmark", choice: .allow, tint: .green)
+            cell("checkmark", choice: .allow, tint: .ratSuccess)
                 .accessibilityLabel("Allow").accessibilityIdentifier("policy-allow")
         }
     }
@@ -154,12 +154,15 @@ struct PolicyToggle: View {
         let active = policy == choice
         let follows = policy == nil && inherited == choice
         let undecided = policy == nil && inherited == nil
-        let fill: Color = active ? tint : follows ? tint.opacity(0.35) : undecided && !compact ? .blue : .gray.opacity(compact ? 0.2 : 0.35)
+        // Matte pastels: a choice is its colour with dark text; one followed from a wider row a soft fill of it; no
+        // choice yet the accent's soft fill; the other choice a raised control.
+        let fill: Color = active ? tint : follows ? tint.opacity(0.22) : undecided && !compact ? Color.ratAccent.opacity(0.22) : Color.ratRaised
+        let glyph: Color = active ? .ratOnAccent : follows ? tint : undecided && !compact ? .ratAccent : Palette.textTertiary
         let verb = choice == .deny ? "Deny" : "Allow"
         return Button { set(active ? nil : choice) } label: {
             Image(systemName: symbol).font(.system(size: compact ? 9 : 11, weight: .bold))
                 .frame(width: compact ? 18 : 22, height: compact ? 16 : 20)
-                .foregroundStyle(active || follows || (undecided && !compact) ? .white : .secondary)
+                .foregroundStyle(glyph)
                 .background(fill, in: RoundedRectangle(cornerRadius: compact ? 4 : 5))
                 // The small pair is drawn small but hit like the app row's: a click just beside it still counts.
                 .frame(width: 22, height: 20)
@@ -181,8 +184,8 @@ struct Sparkline: View {
                 let idx = i - (14 - rates.count)
                 let r = idx >= 0 ? rates[idx] : (rx: 0, tx: 0)
                 VStack(spacing: 0) {
-                    Rectangle().fill(.purple).frame(height: 16 * r.tx / peak)
-                    Rectangle().fill(.blue).frame(height: 16 * r.rx / peak)
+                    Rectangle().fill(Color.ratSent).frame(height: 16 * r.tx / peak)
+                    Rectangle().fill(Color.ratReceived).frame(height: 16 * r.rx / peak)
                     if r.rx + r.tx == 0 { Rectangle().fill(.white.opacity(0.12)).frame(height: 16) }
                 }
                 .frame(width: 3, height: 16, alignment: .bottom)
