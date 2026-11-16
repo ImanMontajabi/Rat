@@ -31,6 +31,11 @@ struct MonitorWindow: View {
         .modifier(OpenWindowBridge())
         .background(WindowLevelSetter(floating: settings.floatOnTop))
         .onChange(of: filter.hideLocal) { _, on in settings.hideLocal = on }
+        // An app chosen in the menu bar panel.
+        .onReceive(WindowRoutes.shared.$monitorApp.compactMap { $0 }) { id in
+            place = nil; selection = MonitorSelection(appID: id); showInspector = true
+            WindowRoutes.shared.monitorApp = nil
+        }
         // Choosing a row in the list shows that row; choosing a place shows the inspector.
         .onChange(of: selection) { _, _ in place = nil }
         .onChange(of: place) { _, p in if p != nil { showInspector = true } }

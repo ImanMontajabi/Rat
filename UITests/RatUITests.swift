@@ -12,6 +12,7 @@ final class RatUITests: XCTestCase {
         app.launchEnvironment["RAT_DEMO_MAP"] = "1"
         // OpenWarp's row only for its own tests, so the others see the demo data they were written for.
         if name.contains("OpenWarp") { app.launchEnvironment["RAT_DEMO_OPENWARP"] = "1" }
+        if name.contains("MenuBarPanel") { app.launchEnvironment["RAT_OPEN"] = "panel" }
         // Start from a fresh window: a window minimized in an earlier run would come back minimized, and every
         // click and keystroke would miss it.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
@@ -406,16 +407,57 @@ final class RatUITests: XCTestCase {
         XCTAssertFalse(el("inspector-country-rule").exists, "no country rule from a carrier")
     }
 
+    // MARK: menu bar panel
+
+    /// The menu bar panel: the firewall's state as it is (demo mode sees no helper: monitoring only, with the way to
+    /// install it), traffic, route, the mode (the rules' own) and the windows, and a busy app shown in the monitor.
+    /// Menu bar items are not in XCUITest's reach on this macOS (no status items at all), so the test opens the
+    /// panel at launch (`RAT_OPEN=panel`, Debug only); the click on the icon, Escape and the right-click menu are
+    /// checked live.
+    func testMenuBarPanelShowsStateAndControls() {
+        let panel = el("control-center")
+        XCTAssertTrue(panel.waitForExistence(timeout: 10), "the Control Center panel")
+        XCTAssertTrue(waitText(el("panel-protection"), "Monitoring only"), "never 'on' without the helper")
+        XCTAssertTrue(el("panel-fix").exists, "offers Settings > Security")
+        for id in ["panel-rate-up", "panel-rate-down", "panel-session", "panel-route", "panel-mode", "panel-profile",
+                   "panel-open-monitor", "panel-open-rules", "panel-open-settings", "panel-quit"] {
+            XCTAssertTrue(el(id).exists, id)
+        }
+
+        let mode = el("panel-mode")
+        let deny = mode.buttons["Silent Deny"], allow = mode.buttons["Silent Allow"], alert = mode.buttons["Alert"]
+        XCTAssertTrue(deny.waitForExistence(timeout: 5))
+        // A segment reports itself chosen as value 1.
+        let before = [alert, allow, deny].first { ($0.value as? String) == "1" || ($0.value as? NSNumber)?.intValue == 1 } ?? allow
+        XCTAssertNotEqual(before, deny, "the demo starts in another mode")
+        deny.click()
+        XCTAssertTrue(waitSwitch(deny, on: true), "the mode follows the click: \(mode.debugDescription)")
+        XCTAssertTrue(waitSwitch(before, on: false))
+        before.click()
+        XCTAssertTrue(waitSwitch(before, on: true), "and back")
+
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "panel-app-")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the apps moving data now")
+        let name = String(row.identifier.dropFirst("panel-app-".count))
+        row.click()
+        XCTAssertTrue(waitGone(panel), "choosing an app closes the panel")
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate { _, _ in self.inspectorTitle().contains(name) }, evaluatedWith: nil)], timeout: 5) == .completed,
+                      "the monitor shows \(name): \(inspectorTitle())")
+    }
+
     // MARK: flags and Hide Local
 
-    /// Places carry their country's flag: the Summary's Top Countries and a connection's location in the inspector.
+    /// Places carry their country's flag, drawn in Rat's style (`flag-<CC>`): the Summary's Top Countries and a
+    /// connection's location in the inspector.
     func testPlacesShowTheirFlags() {
-        XCTAssertTrue(app.staticTexts["🇪🇸 Spain"].waitForExistence(timeout: 5), "Top Countries")
+        XCTAssertTrue(app.staticTexts["Spain"].waitForExistence(timeout: 5), "Top Countries")
+        XCTAssertTrue(app.images["flag-ES"].exists, "with Spain's flag")
         expand("Google Chrome")
         let london = el("remote-row-demo0.example.com")
         XCTAssertTrue(london.waitForExistence(timeout: 5))
         london.click()
-        XCTAssertTrue(app.staticTexts["🇬🇧 London, United Kingdom"].waitForExistence(timeout: 5), "the inspector's location")
+        XCTAssertTrue(app.staticTexts["London, United Kingdom"].waitForExistence(timeout: 5), "the inspector's location")
+        XCTAssertTrue(app.images["flag-GB"].firstMatch.exists, "with the United Kingdom's flag")
     }
 
     /// The Local chip in the filter bar, turned off, leaves out Bonjour and LAN connections, and the

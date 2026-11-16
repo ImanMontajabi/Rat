@@ -8,12 +8,16 @@ enum WindowOpener {
     static var open: ((String) -> Void)?
 }
 
-/// The menu bar extra: live throughput, profile selector, silent mode and shortcuts.
+/// The menu bar extra: live throughput next to the icon. A click opens the Control Center panel
+/// (`ControlCenterPanel`, in a popover); a right-click or Control-click opens the classic menu (profile, mode, windows).
 @MainActor
-final class MenuBarController: NSObject, NSMenuDelegate {
+final class MenuBarController: NSObject, NSMenuDelegate, NSPopoverDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let ledger: Ledger
     private var rules: RulesModel { ledger.rules }
+    private let menu = NSMenu()
+    private let popover = NSPopover()
+    var isPanelShown: Bool { popover.isShown }
 
     init(ledger: Ledger) {
         self.ledger = ledger
@@ -21,10 +25,72 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         item.button?.image = NSImage(systemSymbolName: "network", accessibilityDescription: "Rat")
         item.button?.imagePosition = .imageLeading
         item.button?.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        let menu = NSMenu()
+        item.button?.target = self
+        item.button?.action = #selector(clicked(_:))
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        item.button?.setAccessibilityIdentifier("rat-status-item")
         menu.delegate = self
-        item.menu = menu
+        popover.behavior = .transient
+        popover.animates = true
+        popover.appearance = NSAppearance(named: .darkAqua)
+        popover.delegate = self
         update()
+    }
+
+    @objc private func clicked(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            popover.performClose(nil)
+            // The status item's own placement (right under the icon, never scrolled): attach the menu for this click only.
+            item.menu = menu
+            sender.performClick(nil)
+            item.menu = nil
+        } else {
+            togglePanel()
+        }
+    }
+
+    // MARK: panel
+
+    func togglePanel() {
+        if popover.isShown { popover.performClose(nil) } else { showPanel() }
+    }
+
+    /// Builds the panel each time it opens and drops it on close (`popoverDidClose`): closed, it costs nothing,
+    /// and nothing observes the ledger for it.
+    func showPanel() {
+        guard let button = item.button, item.isVisible, button.window != nil else { return }
+        show(relativeTo: button.bounds, of: button)
+    }
+
+    #if DEBUG
+    /// `RAT_OPEN=panel`: the panel at launch, for screenshots and UI tests. A menu bar too full for one more icon
+    /// (the UI tests' second Rat) has no window for it, so then the panel hangs from the monitor window's top right.
+    func showPanelAtLaunch() {
+        if let w = item.button?.window, w.isVisible, w.occlusionState.contains(.visible) { showPanel(); return }
+        guard let view = NSApp.windows.first(where: { $0.isVisible && $0.title == "Network Monitor" })?.contentView else { return }
+        show(relativeTo: NSRect(x: view.bounds.maxX - 60, y: view.bounds.maxY - 8, width: 1, height: 1), of: view)
+    }
+    #endif
+
+    private func show(relativeTo rect: NSRect, of view: NSView) {
+        let panel = ControlCenterPanel(rules: ledger.rules, enforcer: ledger.enforcer, alerts: ledger.alerts,
+                                       open: { [weak self] id in self?.open(id) }, quit: { NSApp.terminate(nil) })
+            .environmentObject(ledger)
+        let host = NSHostingController(rootView: panel)
+        host.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = host
+        popover.show(relativeTo: rect, of: view, preferredEdge: .minY)
+        // Key without bringing Rat's windows forward: Escape closes, Tab moves between the controls.
+        popover.contentViewController?.view.window?.makeKey()
+    }
+
+    func popoverDidClose(_ notification: Notification) { popover.contentViewController = nil }
+
+    private func open(_ id: String) {
+        popover.performClose(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        WindowOpener.open?(id)
     }
 
     /// Two-line throughput like "↑ 12 KB/s ↓ 1.2 MB/s", plus a moon while a Silent Mode is active.

@@ -23,7 +23,9 @@ struct GeoPoint: Hashable {
         return short.isEmpty ? city : short
     }
     /// "🇩🇪 Berlin, Germany"; the city is left out when the database has none.
-    var place: String { [flag, [city, country].filter { !$0.isEmpty }.joined(separator: ", ")].filter { !$0.isEmpty }.joined(separator: " ") }
+    var place: String { [flag, placeName].filter { !$0.isEmpty }.joined(separator: " ") }
+    /// "Berlin, Germany", without the flag (drawn as Rat's flag beside it).
+    var placeName: String { [city, country].filter { !$0.isEmpty }.joined(separator: ", ") }
     static func == (a: GeoPoint, b: GeoPoint) -> Bool { a.city == b.city && a.country == b.country && a.coordinate.latitude == b.coordinate.latitude }
     func hash(into h: inout Hasher) { h.combine(city); h.combine(country); h.combine(coordinate.latitude) }
 }
