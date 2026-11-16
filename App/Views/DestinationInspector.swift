@@ -17,7 +17,11 @@ struct DestinationInspector: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 10) {
-                Text(place.point.flag.isEmpty ? "📍" : place.point.flag).font(.system(size: 34))
+                if place.point.flag.isEmpty {
+                    Image(systemName: "mappin.circle.fill").font(.system(size: 30)).foregroundStyle(Palette.textSecondary)
+                } else {
+                    FlagView(code: place.point.countryCode, height: 26).padding(.top, 4)
+                }
                 VStack(alignment: .leading, spacing: 0) {
                     Text(place.point.city.isEmpty ? place.point.country : place.point.city).font(.title2.weight(.bold)).lineLimit(2)
                     if !place.point.city.isEmpty, !place.point.country.isEmpty { Text(place.point.country).font(.callout).foregroundStyle(.secondary) }

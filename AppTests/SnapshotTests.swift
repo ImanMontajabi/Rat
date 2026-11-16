@@ -135,6 +135,23 @@ final class SnapshotTests: XCTestCase {
         try assertMatchesGolden(render(InspectorView(selection: nil).environmentObject(ledger), size: CGSize(width: 330, height: 700)), "inspector-summary")
     }
 
+    /// The menu bar panel on demo data, with a fixed firewall state and route (not this Mac's).
+    func testControlCenterPanelGolden() throws {
+        let ledger = demoLedger(openWarp: true)
+        let view = ControlCenterPanel(rules: ledger.rules, enforcer: ledger.enforcer, alerts: ledger.alerts,
+                                      fixedProtection: .init(tone: .on, title: "Firewall on", detail: "Blocking 3 connections", fix: nil),
+                                      fixedRoute: .vpn(name: "OpenWarp", country: "DE"))
+            .environmentObject(ledger)
+        try assertMatchesGolden(render(view, size: CGSize(width: ControlCenterPanel.width, height: 560)), "control-center")
+    }
+
+    /// Rat's flags: rectangles of one size with a bold outline (wide, square and tall flags alike).
+    func testFlagsGolden() throws {
+        let row = HStack(spacing: 8) { ForEach(["NO", "PT", "PY", "CH", "ES", "DE", "IE", "US", "JP", "NP"], id: \.self) { FlagView(code: $0, height: 24) } }
+            .padding(12)
+        try assertMatchesGolden(render(row, size: CGSize(width: 480, height: 48)), "flags")
+    }
+
     func testAlertPanelMatchesGolden() throws {
         let a = ConnectionAlert(appID: "/Applications/Demo/Foo.app", appName: "Foo", host: "cdn.example.com", address: "203.0.113.9", port: 443, proto: "TCP")
         try assertMatchesGolden(render(AlertView(alert: a, icon: NSImage(), remaining: 2) { _, _, _ in }, size: CGSize(width: 380, height: 360)), "alert-panel")

@@ -85,7 +85,7 @@ Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
 - **Readable connections:** the usual service of each port (`TCP 443 · HTTPS`, `UDP 443 · QUIC`, `5223 · APN`), the network owner (`AS13335 Cloudflare, Inc.`), the country's flag and place (*🇩🇪 Berlin, Germany*), and reverse DNS that never holds up the monitor.
 - **Direction:** a peer's connections to a port on this Mac are a row of their own, tagged `↓ Incoming` (judged by the rules, never an alert). A long download that is still receiving is tagged `↓ stream`.
 - **Offline GeoIP:** bundled DB-IP Lite City and ASN databases. You can also use your own DB-IP or MaxMind file (Settings > GeoIP).
-- **Menu bar:** live throughput, a profile selector and a mode switch.
+- **Menu bar:** live throughput next to the icon; a click opens the Control Center panel: whether the firewall is really enforcing (or only monitoring), the traffic now and over the last minutes, how the Internet leaves the Mac (VPN and its country, proxy or direct), the apps moving data, the mode and the profile. A right-click opens the classic menu.
 - **Updates:** *Rat menu → Check for Updates…* reads GitHub Releases.
 
 | Rules window (⇧⌘R) | Settings (⌘,) |
@@ -172,4 +172,4 @@ No Little Snitch code or assets are used. The screenshots below are of Little Sn
 
 ## Credits and license
 
-MIT, see [LICENSE](LICENSE). IP geolocation and network data come from [DB-IP.com](https://db-ip.com): the IP to City Lite and IP to ASN Lite databases, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Airport locations for Cloudflare data centres come from [OurAirports](https://ourairports.com/data/) (public domain).
+MIT, see [LICENSE](LICENSE). IP geolocation and network data come from [DB-IP.com](https://db-ip.com): the IP to City Lite and IP to ASN Lite databases, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Airport locations for Cloudflare data centres come from [OurAirports](https://ourairports.com/data/) (public domain). Country flags are [flag-icons](https://github.com/lipis/flag-icons) by Panayiotis Lipiridis, MIT ([App/Flags/LICENSE](App/Flags/LICENSE)).

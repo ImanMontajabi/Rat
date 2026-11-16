@@ -342,7 +342,12 @@ struct MapLabelsLayer: View {
         ZStack(alignment: .topLeading) {
             Color.clear
             ForEach(MapLabels.layout(labelItems(), bounds: CGRect(origin: .zero, size: geo.size))) { l in
-                Text(l.text).font(MapLabels.font).foregroundStyle(Palette.text)
+                HStack(spacing: MapLabels.flagSpacing) {
+                    if let p = l.prefix { Text(p) }
+                    if let f = l.flag { FlagView(code: f, height: MapLabels.flagHeight) }
+                    Text(l.text)
+                }
+                    .font(MapLabels.font).foregroundStyle(Palette.text)
                     .padding(.horizontal, MapLabels.padding.width).padding(.vertical, MapLabels.padding.height)
                     .background(Color.ratBase.opacity(0.85), in: Capsule())
                     .overlay(Capsule().stroke(l.selected ? Color.ratAccent : Color.white.opacity(0.08), lineWidth: 1))
@@ -364,9 +369,10 @@ struct MapLabelsLayer: View {
         }
         for n in nodes {
             guard let at = proxy.convert(n.point.coordinate, to: .named(FlowOverlay.space)) else { continue }
-            let city = [n.point.flag, n.point.shortCity].filter { !$0.isEmpty }.joined(separator: " ")
-            items.append(.init(id: n.id, text: n.proxy ? "Proxy · \(city)" : city, anchor: at, pinRadius: n.selected ? 10 : 8,
-                               priority: n.selected ? 2 : n.highlighted ? 1 : 0, selected: n.selected))
+            let code = n.point.flag.isEmpty ? nil : n.point.countryCode
+            items.append(.init(id: n.id, text: n.point.shortCity, anchor: at, pinRadius: n.selected ? 10 : 8,
+                               priority: n.selected ? 2 : n.highlighted ? 1 : 0, selected: n.selected,
+                               flag: code, prefix: n.proxy ? "Proxy ·" : nil))
         }
         return items
     }
@@ -383,6 +389,10 @@ enum MapLabels {
     /// Points between a pin's edge and its label.
     static let spacing: CGFloat = 3
 
+    /// A flag's height in a label, and the room between it and the words around it.
+    static let flagHeight: CGFloat = 10
+    static let flagSpacing: CGFloat = 5
+
     struct Item {
         var id: String
         var text: String
@@ -390,6 +400,10 @@ enum MapLabels {
         var pinRadius: CGFloat
         var priority: Int
         var selected = false
+        /// The place's region code, drawn as Rat's flag before `text` (after `prefix`).
+        var flag: String? = nil
+        /// Words before the flag ("Proxy ·").
+        var prefix: String? = nil
     }
 
     struct Label: Identifiable, Equatable {
@@ -398,23 +412,27 @@ enum MapLabels {
         var text: String
         var frame: CGRect
         var selected: Bool
+        var flag: String? = nil
+        var prefix: String? = nil
     }
 
-    static func size(_ text: String) -> CGSize {
-        let t = (text as NSString).size(withAttributes: [.font: nsFont])
-        return CGSize(width: ceil(t.width) + padding.width * 2, height: ceil(t.height) + padding.height * 2)
+    static func size(_ item: Item) -> CGSize {
+        let words = [item.prefix, item.text].compactMap { $0 }.joined(separator: " ")
+        let t = (words as NSString).size(withAttributes: [.font: nsFont])
+        let flag = item.flag.map { _ in (flagHeight * Flags.aspect).rounded() + flagSpacing } ?? 0
+        return CGSize(width: ceil(t.width) + flag + padding.width * 2, height: ceil(t.height) + padding.height * 2)
     }
 
     /// The labels that fit, each centred under its pin. `measure` is the pill's size for a text. Within `bounds`
     /// (the map), a label slides sideways to stay inside, goes above its pin at the bottom edge, and a pin off the
     /// map has none: no pill is ever cut by the map's edge.
-    static func layout(_ items: [Item], bounds: CGRect? = nil, measure: (String) -> CGSize = size) -> [Label] {
+    static func layout(_ items: [Item], bounds: CGRect? = nil, measure: (Item) -> CGSize = size) -> [Label] {
         let pins = items.map { CGRect(x: $0.anchor.x - $0.pinRadius, y: $0.anchor.y - $0.pinRadius, width: $0.pinRadius * 2, height: $0.pinRadius * 2) }
         var placed: [Label] = []
         let order = items.indices.sorted { (items[$0].priority, -$0) > (items[$1].priority, -$1) }
         let edge: CGFloat = 4
         for i in order {
-            let it = items[i], s = measure(it.text)
+            let it = items[i], s = measure(it)
             var frame = CGRect(x: it.anchor.x - s.width / 2, y: it.anchor.y + it.pinRadius + spacing, width: s.width, height: s.height)
             if let b = bounds {
                 guard b.contains(it.anchor) else { continue }
@@ -424,7 +442,7 @@ enum MapLabels {
             }
             let hitsLabel = placed.contains { $0.frame.insetBy(dx: -2, dy: -1).intersects(frame) }
             let hitsPin = pins.indices.contains { $0 != i && pins[$0].intersects(frame) }
-            if !hitsLabel && !hitsPin { placed.append(Label(key: it.id, text: it.text, frame: frame, selected: it.selected)) }
+            if !hitsLabel && !hitsPin { placed.append(Label(key: it.id, text: it.text, frame: frame, selected: it.selected, flag: it.flag, prefix: it.prefix)) }
         }
         return placed
     }

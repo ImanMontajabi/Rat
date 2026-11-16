@@ -70,9 +70,9 @@ struct SummaryInspector: View {
                                         : StatRow(title: d.name, detail: Self.connections(d.count))
                 })
                 if ledger.geo.available {
-                    let flags = Dictionary(s.remotes.compactMap { $0.geo.map { ($0.country, $0.flag) } }, uniquingKeysWith: { a, _ in a })
+                    let codes = Dictionary(s.remotes.compactMap { $0.geo.map { ($0.country, $0.countryCode) } }, uniquingKeysWith: { a, _ in a })
                     group("Top Countries", ledger.countries(s.remotes).prefix(2).map { c in
-                        StatRow(title: [flags[c.name] ?? "", c.name].filter { !$0.isEmpty }.joined(separator: " "), detail: Self.connections(c.count))
+                        StatRow(title: c.name, detail: Self.connections(c.count), flag: codes[c.name])
                     })
                 }
                 if ledger.geo.networksAvailable, !networks.isEmpty {
@@ -95,6 +95,8 @@ struct SummaryInspector: View {
         var icon: NSImage? = nil
         var symbol: String? = nil
         var address = false
+        /// A region code: Rat's flag before the title.
+        var flag: String? = nil
     }
 
     private func group(_ title: String, _ items: [StatRow]) -> some View {
@@ -103,7 +105,9 @@ struct SummaryInspector: View {
             Text(title).font(.callout).foregroundStyle(.secondary).padding(.top, 2)
             ForEach(Array(items.enumerated()), id: \.offset) { _, it in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    if let icon = it.icon {
+                    if let f = it.flag, Flags.image(f, height: 13) != nil {
+                        FlagView(code: f, height: 13).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
+                    } else if let icon = it.icon {
                         Image(nsImage: icon).resizable().interpolation(.high).frame(width: 18, height: 18).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
                     } else if let symbol = it.symbol {
                         Image(systemName: symbol).font(.callout).foregroundStyle(Palette.textTertiary).frame(width: 18)
@@ -315,7 +319,7 @@ struct RemoteInspector: View {
                 kv("Direction", r.incoming ? "Incoming: the peer connected to this Mac" : r.stream ? "Outgoing, mostly receiving for a while" : "Outgoing")
                 if let p = r.process { kv("Process", p + (r.pid.map { " (pid \($0))" } ?? "")) }
                 if let n = r.network { kv("Network", n) }
-                if let g = r.geo { kv("Location", g.place) }
+                if let g = r.geo { kvPlace("Location", g) }
                 if let exit = ledger.exitLabel(for: r) { kv(r.geo == nil ? "Location" : "Exit", exit).accessibilityIdentifier("inspector-exit") }
                 if let cc = r.country, !r.incoming, !r.carrier {
                     // A rule for every server in the country, for this app: the editor opens on it.
@@ -330,12 +334,23 @@ struct RemoteInspector: View {
                 if let route = r.route { kv("Route", route.label) }
                 if let via = r.via {
                     kv("Proxy", via.label)
-                    if let g = via.serverGeo { kv("Proxy at", g.place) }
+                    if let g = via.serverGeo { kvPlace("Proxy at", g) }
                 }
             }
             SectionHeader(title: "Rules", open: $rules)
             if rules { TargetRules(app: app, target: app.ruleTarget(process: r.process, remote: r), incoming: r.incoming, carrier: r.carrier) }
         }
+    }
+
+    /// A place with Rat's flag before its city and country.
+    private func kvPlace(_ k: String, _ g: GeoPoint) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(k + ":").foregroundStyle(.secondary).frame(width: 64, alignment: .trailing)
+            HStack(spacing: 6) {
+                if !g.flag.isEmpty { FlagView(code: g.countryCode, height: 11).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 } }
+                Text(g.placeName).textSelection(.enabled)
+            }
+        }.font(.callout)
     }
 
     private func kv(_ k: String, _ v: String) -> some View {

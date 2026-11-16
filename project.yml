@@ -19,8 +19,11 @@ targets:
     platform: macOS
     sources:
       - path: App
-        excludes: ["Vendor"]
+        excludes: ["Vendor", "Flags"]
       - path: App/Vendor
+        type: folder
+        buildPhase: resources
+      - path: App/Flags
         type: folder
         buildPhase: resources
     preBuildScripts:

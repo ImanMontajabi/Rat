@@ -47,7 +47,7 @@ struct SidebarView: View {
                 var k = Set<String>()
                 for r in a.remotes {
                     guard let g = r.geo else { continue }
-                    let title = [g.flag, g.country].filter { !$0.isEmpty }.joined(separator: " ")
+                    let title = g.country
                     k.insert(title)
                     if let cc = r.country ?? Rule.countryCode(g.countryCode) { codes[title] = cc }
                 }
@@ -85,7 +85,11 @@ struct SidebarView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.right").font(.caption2).rotationEffect(.degrees(expandedGroups.contains(g.id) ? 90 : 0)).foregroundStyle(.secondary).frame(width: 14)
-                Image(systemName: settings.groupBy == .domain ? "globe" : "flag").frame(width: 24)
+                if settings.groupBy == .country, let cc = g.country, Flags.image(cc, height: 13) != nil {
+                    FlagView(code: cc, height: 13).frame(width: 24)
+                } else {
+                    Image(systemName: settings.groupBy == .domain ? "globe" : "flag").frame(width: 24)
+                }
                 Text(g.title).lineLimit(1).font(.system(size: 14, weight: .medium))
                 Spacer()
                 if let cc = g.country {
@@ -444,7 +448,7 @@ struct ProcessRow: View {
 
     private func connectionLabel(_ r: RemoteHost, tags: Bool, service: Bool) -> some View {
         HStack(spacing: 6) {
-            if let flag = r.geo?.flag, !flag.isEmpty { Text(flag).accessibilityHidden(true) }
+            if let g = r.geo, !g.flag.isEmpty { FlagView(code: g.countryCode, height: 11) }
             Text(r.host).lineLimit(1).truncationMode(.middle)
             HStack(spacing: tags ? 4 : 3) {
                 ForEach(RouteBadges.items(r, compact: true), id: \.self) { RouteBadge(item: $0, symbolOnly: !tags) }
@@ -600,10 +604,12 @@ struct Disclosure: View {
 struct TrafficChart: View {
     @EnvironmentObject var ledger: Ledger
     let range: TimeRange
+    /// The plot's height: 100 in the monitor, less in the menu bar panel.
+    var height: CGFloat = 100
 
     var body: some View {
         chart(ledger.chartLayout(range))
-            .frame(height: 100)
+            .frame(height: height)
             .padding(6)
             .background(Color.ratSurface, in: RoundedRectangle(cornerRadius: Radius.md))
     }

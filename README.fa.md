@@ -103,7 +103,7 @@ Rat تونل‌های فعال (`utun*`) را خودکار پیدا می‌کن�
 - **اتصال‌های خوانا:** سرویس معمول هر پورت (`TCP 443 · HTTPS`، `UDP 443 · QUIC`)، شبکهٔ مالک (`AS13335 Cloudflare, Inc.`)، پرچم و نام محل (*🇩🇪 Berlin, Germany*)، و DNS معکوس که هیچ‌وقت نمایشگر را معطل نمی‌کند.
 - **جهت اتصال:** اتصال‌هایی که دستگاه دیگری به یک پورت این Mac باز می‌کند، ردیف جداگانه‌ای با برچسب `↓ Incoming` دارند (با قانون‌ها سنجیده می‌شوند ولی هیچ‌وقت هشدار نمی‌دهند). دانلودی طولانی که هنوز در حال دریافت است، برچسب `↓ stream` می‌گیرد.
 - **GeoIP آفلاین:** پایگاه‌داده‌های DB-IP Lite (شهر و ASN) داخل برنامه است. از Settings > GeoIP می‌توانید فایل DB-IP یا MaxMind خودتان را هم بدهید.
-- **نوار منو:** سرعت لحظه‌ای، انتخاب پروفایل و تغییر حالت.
+- **نوار منو:** سرعت لحظه‌ای کنار آیکون؛ کلیک روی آن پنل Control Center را باز می‌کند: این‌که فایروال واقعاً مسدود می‌کند یا فقط نظارت می‌کند، ترافیک این لحظه و چند دقیقهٔ اخیر، راه خروج اینترنت از مک (وی‌پی‌ان و کشورش، پروکسی یا مستقیم)، برنامه‌هایی که الان داده جابه‌جا می‌کنند، حالت و پروفایل. کلیک راست منوی کلاسیک را باز می‌کند.
 - **به‌روزرسانی:** منوی Rat ← *Check for Updates…* نسخه‌های GitHub را بررسی می‌کند.
 
 | پنجرهٔ Rules (⇧⌘R) | تنظیمات (⌘,) |
@@ -212,6 +212,6 @@ sudo scripts/verify-blocking.sh     # live end-to-end blocking test
 
 ## مجوز و منابع
 
-مجوز MIT؛ متن کامل در [LICENSE](LICENSE). داده‌های موقعیت IP و شبکه از [DB-IP.com](https://db-ip.com) است: پایگاه‌داده‌های IP to City Lite و IP to ASN Lite با مجوز [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). موقعیت فرودگاه‌ها برای مراکز داده Cloudflare از [OurAirports](https://ourairports.com/data/) است (مالکیت عمومی).
+مجوز MIT؛ متن کامل در [LICENSE](LICENSE). داده‌های موقعیت IP و شبکه از [DB-IP.com](https://db-ip.com) است: پایگاه‌داده‌های IP to City Lite و IP to ASN Lite با مجوز [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). موقعیت فرودگاه‌ها برای مراکز داده Cloudflare از [OurAirports](https://ourairports.com/data/) است (مالکیت عمومی). پرچم‌ها از [flag-icons](https://github.com/lipis/flag-icons) ساختهٔ Panayiotis Lipiridis با مجوز MIT هستند ([App/Flags/LICENSE](App/Flags/LICENSE)).
 
 </div>

@@ -22,6 +22,8 @@ struct SettingsView: View {
         #if DEBUG
         .onAppear { if let t = ProcessInfo.processInfo.environment["RAT_SETTINGS_TAB"] { tab = t } }
         #endif
+        // A tab asked for by the menu bar panel (Security, to install or update the helper).
+        .onReceive(WindowRoutes.shared.$settingsTab.compactMap { $0 }) { t in tab = t; WindowRoutes.shared.settingsTab = nil }
         // Wide enough for all ten tabs: at 640 points the GeoIP tab pushed Advanced into the toolbar's overflow menu.
         .frame(width: 720)
         .preferredColorScheme(.dark)
