@@ -382,6 +382,8 @@ final class Ledger: ObservableObject {
             let useSnapshot = enforcer.systemSnapshotText()
             let (conns, traffic, link, warp, sampled) = await Task.detached(priority: .utility) { () -> ([ObservedConnection], TrafficSampler.Sample, LinkSample, OpenWarpStatus?, Date) in
                 var c = ConnectionSampler.sample()
+                // OpenWarp's carrier socket names no server: its status does (read at most every 5 s).
+                let warp = OpenWarpLink.shared.current()
                 if let text = useSnapshot {
                     // Root helper snapshot: adds processes this app cannot inspect (other users, system daemons).
                     var seen = Set(c.map { "\($0.pid)|\($0.proto.rawValue)|\($0.localPort)|\($0.remoteAddress)|\($0.remotePort)" })
@@ -389,7 +391,7 @@ final class Ledger: ObservableObject {
                     // program was started by (a symlink into a cryptex, a bare name), and a rule made from that name
                     // would name a different file than the daemon sees.
                     var kernelPaths: [Int32: String] = [:]
-                    for var x in SystemSnapshot.parse(text, listeners: true) where seen.insert("\(x.pid)|\(x.proto.rawValue)|\(x.localPort)|\(x.remoteAddress)|\(x.remotePort)").inserted {
+                    for var x in SystemSnapshot.parse(text, listeners: true, unconnectedUDP: warp.map { [$0.pid] } ?? []) where seen.insert("\(x.pid)|\(x.proto.rawValue)|\(x.localPort)|\(x.remoteAddress)|\(x.remotePort)").inserted {
                         let k = kernelPaths[x.pid] ?? ConnectionSampler.path(of: x.pid)
                         kernelPaths[x.pid] = k
                         if !k.hasPrefix("pid ") { x.processPath = k }
@@ -401,8 +403,7 @@ final class Ledger: ObservableObject {
                 // samples, not by when the main actor got to them.
                 let link = LinkSample(counters: InternetTraffic.counters(),
                                       internet: InternetTraffic.internetInterfaces(defaultRoutes: InternetTraffic.defaultRouteInterfaces()))
-                // OpenWarp's carrier socket names no server: its status does (read at most every 5 s).
-                return (c, traffic, link, OpenWarpLink.shared.current(), Date())
+                return (c, traffic, link, warp, Date())
             }.value
             systemWide = useSnapshot != nil
             await ingest(conns, traffic.processes, flows: traffic.flows, link: link, openWarp: warp, now: sampled)

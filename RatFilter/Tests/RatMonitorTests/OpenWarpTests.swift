@@ -150,6 +150,39 @@ final class OpenWarpTests: XCTestCase {
         XCTAssertEqual(TunnelCarrier.resolve(conns, openWarp: nil), conns)
     }
 
+    /// From the root helper's lsof lines (as Rat's snapshot reads them live) to the carrier: the socket without a
+    /// peer is kept only for OpenWarp's pid, and becomes its connection to the endpoint.
+    func testTheSnapshotKeepsOpenWarpsCarrierSocket() throws {
+        let text = """
+        p627
+        f12
+        PUDP
+        n*:53818
+        f13
+        PUDP
+        n127.0.0.1:53819
+        p200
+        f3
+        PUDP
+        n*:5353
+        #PS
+          627 /Library/PrivilegedHelperTools/com.local.openwarp
+          200 /usr/sbin/mDNSResponder
+        """
+        XCTAssertTrue(SystemSnapshot.parse(text, listeners: true).isEmpty, "no socket without a peer unless asked")
+        let kept = SystemSnapshot.parse(text, listeners: true, unconnectedUDP: [627])
+        XCTAssertEqual(kept.map(\.localPort), [53818, 53819], "only OpenWarp's, never mDNSResponder's")
+        let warp = OpenWarpStatus(pid: 627, connected: true, mode: "warp", transport: "MASQUE (HTTP/3)", interface: "utun4",
+                                  endpoint: .init(address: "162.159.198.2", port: 443), colo: "DUS", loc: "DE")
+        let resolved = TunnelCarrier.resolve(kept, openWarp: warp)
+        let carrier = try XCTUnwrap(resolved.first { $0.carrier })
+        XCTAssertEqual(carrier.localPort, 53818)
+        XCTAssertEqual(carrier.remoteAddress, "162.159.198.2"); XCTAssertEqual(carrier.remotePort, 443)
+        XCTAssertEqual(carrier.processPath, OpenWarpStatus.helperPath)
+        XCTAssertTrue(carrier.isOutbound)
+        XCTAssertEqual(resolved.filter(\.carrier).count, 1, "a loopback socket is not the carrier")
+    }
+
     func testWARPEndpointsAreAnycast() {
         for a in ["162.159.198.2", "162.159.192.1", "162.159.193.10", "162.159.197.3", "2606:4700:d0::a29f:c001", "2606:4700:d1::1", "2606:4700:102::3"] {
             XCTAssertTrue(CloudflareWARP.isEndpoint(a), a)
