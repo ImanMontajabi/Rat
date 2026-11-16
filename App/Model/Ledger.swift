@@ -207,6 +207,7 @@ struct MonitorSelection: Hashable {
 struct ChartBar: Identifiable {
     let start: Date
     let end: Date
+    /// Bar heights, 0…1 of the tallest bucket on a log scale (`ChartLayout.level`); 0 for a quiet bucket.
     let rx: Double
     let tx: Double
     var id: Date { start }
@@ -216,8 +217,48 @@ struct ChartLayout {
     var bars: [ChartBar]
     var start: Date
     var end: Date
+    /// The y extent the levels are drawn in (1, the tallest bucket, plus room above it).
     var peak: Double
     var labelFormat: Date.FormatStyle
+    /// Times as `HH:mm` on a 24-hour clock in every locale (5 minutes to a day); the week shows days.
+    var clock = true
+
+    private static let hourMinute: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "HH:mm"; return f
+    }()
+
+    /// An axis label: "06:50", or the weekday and day for the week.
+    func label(_ date: Date) -> String { clock ? Self.hourMinute.string(from: date) : date.formatted(labelFormat) }
+
+    /// Where the axis labels go: whole minutes (whole days for the week) inside the chart, at a step that gives at
+    /// most `limit` of them, so a label never repeats ("07:02 07:02" a minute after launch) and none sits on an edge.
+    func ticks(limit: Int = 5, calendar: Calendar = .current) -> [Date] {
+        let steps: [TimeInterval] = clock ? [60, 120, 300, 600, 900, 1800, 3600, 7200, 10_800, 21_600, 43_200] : [86_400, 172_800]
+        let span = end.timeIntervalSince(start)
+        let step = steps.first { span / $0 <= Double(limit) } ?? steps.last!
+        // The first whole step after the start (a local midnight for days), then every step before the end.
+        var t = clock ? (start.timeIntervalSinceReferenceDate / step).rounded(.up) * step
+                      : calendar.startOfDay(for: start).addingTimeInterval(86_400).timeIntervalSinceReferenceDate
+        var out: [Date] = []
+        let margin = span * 0.04
+        while t < end.timeIntervalSinceReferenceDate - margin {
+            if t > start.timeIntervalSinceReferenceDate + margin { out.append(Date(timeIntervalSinceReferenceDate: t)) }
+            t += step
+        }
+        return out
+    }
+
+    /// Bytes per bucket below which traffic counts as a trickle on the log scale.
+    static let floor = 1024.0
+    /// The shortest bar for any traffic at all, so a trickle never looks like silence.
+    static let minimumLevel = 0.08
+
+    /// A bucket's height relative to the tallest one on a log scale: a 50 KB bucket next to a 15 MB burst is still
+    /// about 40 % of it (a square root left it at 6 %, as flat as the quiet ticks). 0 only for no traffic.
+    static func level(_ value: Double, peak: Double) -> Double {
+        guard value > 0, peak > 0 else { return 0 }
+        return min(1, max(minimumLevel, log1p(value / floor) / log1p(max(peak, value) / floor)))
+    }
 }
 
 /// The network interfaces' counters, read with nettop's, and which interfaces lead to the Internet (`InternetTraffic`).
@@ -883,6 +924,12 @@ final class Ledger: ObservableObject {
         Self.tally(remotes ?? apps.flatMap(\.remotes)) { registrableDomain($0.host) }
     }
 
+    /// The Summary's Top Domains: names before bare addresses (a server with no name, such as
+    /// `2001:4860:4829:7800::`), which only fill the places names leave; each keeps its count order.
+    static func topDomains(_ domains: [(name: String, count: Int)], limit: Int = 2) -> [(name: String, count: Int)] {
+        Array((domains.filter { !isIPLiteral($0.name) } + domains.filter { isIPLiteral($0.name) }).prefix(limit))
+    }
+
     /// Networks (ASN organizations) by number of connections, for the Summary.
     func networks(_ remotes: [RemoteHost]? = nil) -> [(name: String, count: Int)] {
         Self.tally(remotes ?? apps.flatMap(\.remotes)) { $0.network }
@@ -939,13 +986,14 @@ final class Ledger: ObservableObject {
         }
         let starts = (0..<count).map { start.addingTimeInterval(Double($0) * size) }
         let ends = (0..<count).map { start.addingTimeInterval(Double($0 + 1) * size) }
-        // Square-root scale so quiet traffic stays visible next to a burst.
-        for i in 0..<count { rx[i] = rx[i].squareRoot(); tx[i] = tx[i].squareRoot() }
+        // Log scale against the tallest bucket in either direction, so quiet traffic stays visible next to a burst.
+        let top = (rx + tx).max() ?? 0
+        for i in 0..<count { rx[i] = ChartLayout.level(rx[i], peak: top); tx[i] = ChartLayout.level(tx[i], peak: top) }
         let bars = zip(zip(starts, ends), zip(rx, tx)).map { ChartBar(start: $0.0.0, end: $0.0.1, rx: $0.1.0, tx: $0.1.1) }
-        let peak = max((rx + tx).max() ?? 0, 1) * 1.1
+        let peak = 1.1
         let format: Date.FormatStyle = range == .week ? .dateTime.weekday(.abbreviated).day()
-            : range == .fiveMinutes ? .dateTime.hour().minute().second() : .dateTime.hour().minute()
-        return ChartLayout(bars: bars, start: start, end: start.addingTimeInterval(Double(count) * size), peak: peak, labelFormat: format)
+            : .dateTime.hour().minute()
+        return ChartLayout(bars: bars, start: start, end: start.addingTimeInterval(Double(count) * size), peak: peak, labelFormat: format, clock: range != .week)
     }
 
     #if DEBUG

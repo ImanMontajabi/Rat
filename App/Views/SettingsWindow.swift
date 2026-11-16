@@ -224,6 +224,9 @@ private struct GeoIPSettingsContent: View {
             if let err = dbs.lastError { Text(err).font(.callout).foregroundStyle(Color.ratDanger).fixedSize(horizontal: false, vertical: true) }
             Text("Lookups never leave this Mac. MaxMind GeoLite2 or GeoIP2 City and ASN files work too; download them with your own MaxMind account (their licence does not allow Rat to ship them). “Download Latest” fetches DB-IP's free monthly file (CC BY 4.0) from db-ip.com.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            // The credit DB-IP's licence asks for (it was on the map until 1.8.0).
+            Link("IP geolocation by DB-IP.com", destination: URL(string: "https://db-ip.com")!)
+                .font(.callout).accessibilityIdentifier("geoip-attribution")
         }
     }
 

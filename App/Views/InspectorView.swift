@@ -40,7 +40,7 @@ struct SummaryInspector: View {
     var body: some View {
         let s = ledger.summary(filter)
         let domains = ledger.domains(s.remotes), networks = ledger.networks(s.remotes)
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Image(systemName: "list.bullet.rectangle").font(.title2).foregroundStyle(.secondary)
                 VStack(alignment: .leading) {
@@ -63,16 +63,20 @@ struct SummaryInspector: View {
             }
             SectionHeader(title: "Statistics", open: $stats)
             if stats {
-                group("Top Processes", s.topApps.map { ($0.identity.name, "\(formatBytes($0.totalIn)) down, \(formatBytes($0.totalOut)) up") })
-                group("Top Domains", domains.prefix(3).map { ($0.name, Self.connections($0.count)) })
+                group("Top Processes", s.topApps.prefix(2).map { StatRow(title: $0.identity.name, detail: "\(formatBytes($0.totalIn)) down, \(formatBytes($0.totalOut)) up", icon: $0.identity.icon) })
+                group("Top Domains", Ledger.topDomains(domains).map { d in
+                    // A server with no name is shown as its address, quieter, with a network badge.
+                    isIPLiteral(d.name) ? StatRow(title: d.name, detail: Self.connections(d.count), symbol: "network", address: true)
+                                        : StatRow(title: d.name, detail: Self.connections(d.count))
+                })
                 if ledger.geo.available {
                     let flags = Dictionary(s.remotes.compactMap { $0.geo.map { ($0.country, $0.flag) } }, uniquingKeysWith: { a, _ in a })
-                    group("Top Countries", ledger.countries(s.remotes).prefix(3).map { c in
-                        ([flags[c.name] ?? "", c.name].filter { !$0.isEmpty }.joined(separator: " "), Self.connections(c.count))
+                    group("Top Countries", ledger.countries(s.remotes).prefix(2).map { c in
+                        StatRow(title: [flags[c.name] ?? "", c.name].filter { !$0.isEmpty }.joined(separator: " "), detail: Self.connections(c.count))
                     })
                 }
                 if ledger.geo.networksAvailable, !networks.isEmpty {
-                    group("Top Networks", networks.prefix(3).map { ($0.name, Self.connections($0.count)) })
+                    group("Top Networks", networks.prefix(2).map { StatRow(title: $0.name, detail: Self.connections($0.count)) })
                 }
             }
         }
@@ -84,11 +88,33 @@ struct SummaryInspector: View {
         HStack(spacing: 10) { Image(systemName: symbol).frame(width: 26).foregroundStyle(.secondary); Text(text).font(.title3) }.padding(.leading, 6)
     }
 
-    private func group(_ title: String, _ items: [(String, String)]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.callout).foregroundStyle(.secondary).padding(.top, 6)
+    /// A line of a statistics group: an app with its icon, a name, or a bare address with a badge.
+    struct StatRow {
+        var title: String
+        var detail: String
+        var icon: NSImage? = nil
+        var symbol: String? = nil
+        var address = false
+    }
+
+    private func group(_ title: String, _ items: [StatRow]) -> some View {
+        // Two lines a group and tight spacing: all four groups fit in the window's height without clipping.
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.callout).foregroundStyle(.secondary).padding(.top, 2)
             ForEach(Array(items.enumerated()), id: \.offset) { _, it in
-                VStack(alignment: .leading, spacing: 0) { Text(it.0).font(.title3); Text(it.1).font(.callout).foregroundStyle(.secondary) }
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if let icon = it.icon {
+                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 18, height: 18).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
+                    } else if let symbol = it.symbol {
+                        Image(systemName: symbol).font(.callout).foregroundStyle(Palette.textTertiary).frame(width: 18)
+                    }
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(it.title).font(it.address ? .system(.body, design: .monospaced) : .title3)
+                            .foregroundStyle(it.address ? Palette.textSecondary : Palette.text)
+                            .lineLimit(1).truncationMode(.middle)
+                        Text(it.detail).font(.callout).foregroundStyle(.secondary)
+                    }
+                }
             }
         }.padding(.leading, 6)
     }

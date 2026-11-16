@@ -15,6 +15,13 @@ struct GeoPoint: Hashable {
 
     /// The country's flag (`🇩🇪`), or empty.
     var flag: String { Flag.emoji(countryCode) }
+    /// The city as the map labels it: without the database's district in brackets ("Cork (Hollyhill Industrial
+    /// Estate)" → "Cork"). Keys, identifiers and the inspector keep `city`.
+    var shortCity: String { Self.shortCity(city) }
+    static func shortCity(_ city: String) -> String {
+        let short = city.replacingOccurrences(of: #"\s*\([^)]*\)"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+        return short.isEmpty ? city : short
+    }
     /// "🇩🇪 Berlin, Germany"; the city is left out when the database has none.
     var place: String { [flag, [city, country].filter { !$0.isEmpty }.joined(separator: ", ")].filter { !$0.isEmpty }.joined(separator: " ") }
     static func == (a: GeoPoint, b: GeoPoint) -> Bool { a.city == b.city && a.country == b.country && a.coordinate.latitude == b.coordinate.latitude }
