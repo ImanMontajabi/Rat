@@ -22,6 +22,8 @@ struct RatApp: App {
                 .environmentObject(ledger)
                 .frame(minWidth: 1000, minHeight: 620)
                 .preferredColorScheme(.dark)
+                // OpenWarp's matte blue for system controls (switches, pickers, links) instead of the system accent.
+                .tint(Color.ratAccent)
                 .onAppear { boot() }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in ledger.shutdown() }
         }
@@ -37,12 +39,12 @@ struct RatApp: App {
         }
 
         Window("Rules", id: "rules") {
-            RulesWindow().environmentObject(ledger)
+            RulesWindow().environmentObject(ledger).tint(Color.ratAccent).background(Color.ratBase)
         }
         .defaultSize(width: 1000, height: 620)
 
         Settings {
-            SettingsView().environmentObject(ledger)
+            SettingsView().environmentObject(ledger).tint(Color.ratAccent)
         }
     }
 

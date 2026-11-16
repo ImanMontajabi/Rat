@@ -133,7 +133,7 @@ struct MapPane: View {
 
             if !ledger.geo.available {
                 Text("Offline GeoIP database not found, so server locations are unavailable.")
-                    .font(.callout).padding(14).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .font(.callout).padding(14).background(Color.ratSurface, in: RoundedRectangle(cornerRadius: Radius.md))
             }
             Text("IP geolocation by DB-IP.com").font(.caption2).foregroundStyle(.secondary).padding(6)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
@@ -207,29 +207,29 @@ struct MapLayer: View, Equatable {
         Map(position: $position) {
             ForEach(arcs) { a in
                 MapPolyline(coordinates: a.coords)
-                    .stroke(a.highlighted ? (a.proxied ? Color.orange : Color.green) : Color(white: 0.75, opacity: 0.55),
+                    .stroke(a.highlighted ? (a.proxied ? Color.ratProxy : Color.ratSuccess) : Color(white: 0.75, opacity: 0.55),
                             style: StrokeStyle(lineWidth: a.highlighted ? 3 : 2, dash: a.proxied ? [7, 5] : []))
             }
             ForEach(nodes) { n in
                 let city = [n.point.flag, n.point.city].filter { !$0.isEmpty }.joined(separator: " ")
                 Annotation(n.proxy ? "Proxy · \(city)" : city, coordinate: n.point.coordinate, anchor: .center) {
                     if n.proxy {
-                        Image(systemName: "arrow.triangle.branch").font(.system(size: 9, weight: .bold)).foregroundStyle(.orange)
+                        Image(systemName: "arrow.triangle.branch").font(.system(size: 9, weight: .bold)).foregroundStyle(Color.ratProxy)
                             .frame(width: 18, height: 18)
-                            .background(RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.9)))
-                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(n.highlighted ? Color.orange : .gray, lineWidth: n.selected ? 3 : 2))
+                            .background(RoundedRectangle(cornerRadius: 5).fill(Color.ratSurface))
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(n.highlighted ? Color.ratProxy : .gray, lineWidth: n.selected ? 3 : 2))
                             .scaleEffect(n.selected ? 1.3 : 1)
                     } else {
-                        Circle().fill(n.selected ? Color.blue.opacity(0.9) : .white.opacity(0.85)).frame(width: n.selected ? 18 : 14, height: n.selected ? 18 : 14)
-                            .overlay(Circle().stroke(n.selected ? Color.white : n.highlighted ? Color.blue : .gray, lineWidth: n.selected ? 3 : 2))
-                            .shadow(color: n.selected ? .blue.opacity(0.8) : .clear, radius: 6)
+                        // Matte: a chosen place is a filled accent dot in a dark ring, no glow.
+                        Circle().fill(n.selected ? Color.ratAccent : .white.opacity(0.85)).frame(width: n.selected ? 18 : 14, height: n.selected ? 18 : 14)
+                            .overlay(Circle().stroke(n.selected ? Color.ratBase : n.highlighted ? Color.ratAccent : .gray, lineWidth: n.selected ? 3 : 2))
                     }
                 }
             }
             if let me {
                 Annotation("This Mac", coordinate: me.coordinate, anchor: .center) {
                     Image(systemName: "laptopcomputer").foregroundStyle(.white).padding(10)
-                        .background(Circle().fill(.gray.opacity(0.7)))
+                        .background(Circle().fill(Color.ratRaised))
                 }
             }
         }
@@ -311,8 +311,8 @@ struct MapZoomButtons: View {
             Divider().frame(width: 18)
             button("minus", factor: 2, label: "Zoom Out", id: "map-zoom-out")
         }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+        .background(Color.ratSurface, in: RoundedRectangle(cornerRadius: Radius.sm))
+        .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Color.ratHairline, lineWidth: 1))
     }
 
     private func button(_ symbol: String, factor: Double, label: String, id: String) -> some View {

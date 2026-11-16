@@ -51,7 +51,7 @@ struct SummaryInspector: View {
             }
             if s.filtered {
                 Label("Filtered: the listed apps and their matching connections", systemImage: "line.3.horizontal.decrease.circle")
-                    .font(.caption).foregroundStyle(Color.accentColor)
+                    .font(.caption).foregroundStyle(Color.ratAccent)
                     .accessibilityIdentifier("summary-filtered")
             }
             HStack(spacing: 8) { Pill(kind: .up, text: formatBytes(s.bytesOut)); Pill(kind: .down, text: formatBytes(s.bytesIn)) }
@@ -160,11 +160,11 @@ struct ProcessInspector: View {
                 if ledger.rules.policy(for: app.identity.ruleKey) == .deny {
                     Group {
                         if !ledger.enforcer.helperInstalled {
-                            Text("Not enforced: this needs the firewall helper (Settings > Security).").foregroundStyle(.orange)
+                            Text("Not enforced: this needs the firewall helper (Settings > Security).").foregroundStyle(Color.ratWarning)
                         } else if ledger.enforcer.status == nil {
-                            Text("Not enforced: the firewall helper is not running (Settings > Security).").foregroundStyle(.orange)
+                            Text("Not enforced: the firewall helper is not running (Settings > Security).").foregroundStyle(Color.ratWarning)
                         } else if ledger.enforcer.helperOutdated {
-                            Text("May not be enforced: the firewall helper needs an update (Settings > Security).").foregroundStyle(.orange)
+                            Text("May not be enforced: the firewall helper needs an update (Settings > Security).").foregroundStyle(Color.ratWarning)
                         } else if let e = ledger.enforcement(for: app.id) {
                             Text("Blocked by the firewall helper: \(e.processes) processes, \(e.ports) open connections cut.").foregroundStyle(.secondary)
                         } else {
@@ -172,7 +172,7 @@ struct ProcessInspector: View {
                         }
                     }.font(.caption).padding(.leading, 6)
                 }
-                if let err = ledger.enforcer.lastError { Text(err).font(.caption).foregroundStyle(.red).padding(.leading, 6) }
+                if let err = ledger.enforcer.lastError { Text(err).font(.caption).foregroundStyle(Color.ratDanger).padding(.leading, 6) }
             }
             SectionHeader(title: "Code Signature", open: $sig)
             if sig { kv("Identifier", ident ?? "none"); kv("Team", team ?? "none") }
@@ -353,9 +353,9 @@ struct TargetRules: View {
                     if list.isEmpty { Text("No rules for \(subject)").foregroundStyle(.secondary) }
                     ForEach(list.prefix(8)) { r in
                         HStack(spacing: 6) {
-                            Image(systemName: r.verdict == .deny ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(r.verdict == .deny ? .red : .green)
+                            Image(systemName: r.verdict == .deny ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(r.verdict == .deny ? Color.ratDanger : Color.ratSuccess)
                             Text(r.summary(country: Countries.label)).lineLimit(1).truncationMode(.middle).opacity(r.enabled ? 1 : 0.5)
-                            if !r.approved { Circle().fill(.blue).frame(width: 7, height: 7) }
+                            if !r.approved { Circle().fill(Color.ratAccent).frame(width: 7, height: 7) }
                             if r.id == decides { Text("decides").font(.caption2).foregroundStyle(.secondary) }
                         }
                     }
@@ -464,7 +464,7 @@ struct ProxyBadge: View {
             Text(hop.label).lineLimit(1).truncationMode(.middle)
             Text(hop.kind).padding(.horizontal, 4).padding(.vertical, 1).overlay(RoundedRectangle(cornerRadius: 3).stroke(.secondary))
         }
-        .font(.caption2).foregroundStyle(.orange)
+        .font(.caption2).foregroundStyle(Color.ratWarning)
         .help("\(hop.label), \(hop.kind)\(hop.serverGeo.map { ". Proxy server in \($0.place)" } ?? "")")
     }
 }

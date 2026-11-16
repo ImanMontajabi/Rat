@@ -63,7 +63,7 @@ struct GeneralSettings: View {
         SettingsPane {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text("Network Filter:").frame(width: 130, alignment: .trailing)
-                Label("On", systemImage: "circle.fill").foregroundStyle(.green).labelStyle(.titleAndIcon)
+                Label("On", systemImage: "circle.fill").foregroundStyle(Color.ratSuccess).labelStyle(.titleAndIcon)
             }
             Text("Connections are checked against the set of specified rules. Rat sees them as they start, so unknown ones are answered after the fact.")
                 .font(.callout).foregroundStyle(.secondary).padding(.leading, 140)
@@ -221,7 +221,7 @@ private struct GeoIPSettingsContent: View {
         SettingsPane {
             row(.city, title: "City database", detail: "Places servers on the map.")
             row(.asn, title: "Network database (ASN)", detail: "Names who runs each server's network.")
-            if let err = dbs.lastError { Text(err).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+            if let err = dbs.lastError { Text(err).font(.callout).foregroundStyle(Color.ratDanger).fixedSize(horizontal: false, vertical: true) }
             Text("Lookups never leave this Mac. MaxMind GeoLite2 or GeoIP2 City and ASN files work too; download them with your own MaxMind account (their licence does not allow Rat to ship them). “Download Latest” fetches DB-IP's free monthly file (CC BY 4.0) from db-ip.com.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
@@ -236,10 +236,10 @@ private struct GeoIPSettingsContent: View {
                       systemImage: i.custom ? "doc.badge.gearshape" : "shippingbox")
                 if dbs.isStale(i) {
                     Label("This data is more than three months old; DB-IP publishes a new file every month.", systemImage: "clock.badge.exclamationmark")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.ratWarning)
                 }
             } else {
-                Label("No database loaded", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                Label("No database loaded", systemImage: "exclamationmark.triangle").foregroundStyle(Color.ratWarning)
             }
             HStack {
                 Button("Choose File…") { pick(kind) }
@@ -270,20 +270,20 @@ struct SecuritySettings: View {
             Text("Firewall Helper").font(.system(size: 15, weight: .semibold))
             if enf.helperInstalled {
                 if let reason = enf.outdatedReason {
-                    Label("Installed, but it needs an update", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
+                    Label("Installed, but it needs an update", systemImage: "exclamationmark.shield.fill").foregroundStyle(Color.ratWarning)
                     Text(reason)
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button(enf.busy ? "Updating…" : "Update Helper…") { enf.installHelper() }.disabled(enf.busy)
                 } else {
-                    Label("Installed: blocking is applied automatically", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
+                    Label("Installed: blocking is applied automatically", systemImage: "checkmark.shield.fill").foregroundStyle(Color.ratSuccess)
                 }
                 if let st = enf.status {
                     if st.pfEnabled && st.anchorHooked && st.pfIssue == nil {
-                        Label("Packet filter enabled and evaluating Rat’s rules", systemImage: "checkmark.circle").foregroundStyle(.green)
+                        Label("Packet filter enabled and evaluating Rat’s rules", systemImage: "checkmark.circle").foregroundStyle(Color.ratSuccess)
                     } else {
-                        if !st.pfEnabled { Label("Packet filter is disabled", systemImage: "xmark.octagon").foregroundStyle(.red) }
+                        if !st.pfEnabled { Label("Packet filter is disabled", systemImage: "xmark.octagon").foregroundStyle(Color.ratDanger) }
                         if !st.anchorHooked {
-                            Label("The packet filter’s main ruleset does not evaluate the com.apple anchors, so Rat’s rules are not applied", systemImage: "xmark.octagon").foregroundStyle(.red)
+                            Label("The packet filter’s main ruleset does not evaluate the com.apple anchors, so Rat’s rules are not applied", systemImage: "xmark.octagon").foregroundStyle(Color.ratDanger)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         if let issue = st.pfIssue { Text(issue).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
@@ -300,10 +300,10 @@ struct SecuritySettings: View {
                     if let capture = st.proxyCapture {
                         Label(capture ? "Seeing destinations of connections through local proxies" : "Could not open a packet capture device on lo0, so proxied destinations come only from command lines",
                               systemImage: capture ? "arrow.triangle.branch" : "exclamationmark.triangle")
-                            .foregroundStyle(capture ? Color.secondary : Color.orange)
+                            .foregroundStyle(capture ? Color.secondary : Color.ratWarning)
                     }
                 } else {
-                    Label("The enforcer daemon is not running, so nothing is blocked", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Label("The enforcer daemon is not running, so nothing is blocked", systemImage: "exclamationmark.triangle.fill").foregroundStyle(Color.ratWarning)
                     Button(enf.busy ? "Reinstalling…" : "Reinstall Helper…") { enf.installHelper() }.disabled(enf.busy)
                 }
                 Label(ledger.systemWide ? "Seeing all processes system-wide" : "Waiting for the first system snapshot…", systemImage: "eye")
@@ -317,7 +317,7 @@ struct SecuritySettings: View {
                 Text("Installs two root LaunchDaemons after an administrator-password prompt: one blocks denied apps continuously, the other lists every process’s connections. “Remove Helper” uninstalls both and clears the firewall rules.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if let err = enf.lastError { Text(err).font(.caption).foregroundStyle(.red) }
+            if let err = enf.lastError { Text(err).font(.caption).foregroundStyle(Color.ratDanger) }
             Divider()
             Text("Denying an app blocks the ports of all its processes as soon as the helper sees a socket (a few milliseconds). Server addresses are never blocked, so other apps are not affected. A first connection to a very close server can still get a few packets through; blocking before a connection opens needs Apple’s Network Extension entitlement.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -357,7 +357,7 @@ struct UpdateSettings: View {
                         checking = true
                         Task { await UpdateChecker.check(); checking = false }
                     }.disabled(checking)
-                    Text(lastChecked).font(.callout).foregroundStyle(s.lastUpdateCheckFailed ? .orange : .primary)
+                    Text(lastChecked).font(.callout).foregroundStyle(s.lastUpdateCheckFailed ? Color.ratWarning : .primary)
                 }
                 Spacer()
             }.padding(.top, 14)
@@ -397,9 +397,9 @@ struct AdvancedSettings: View {
                 Text("Additional IP Ranges in Local Network:").font(.system(size: 14))
                 TextEditor(text: $s.additionalLocalRanges)
                     .font(.system(.body, design: .monospaced)).frame(height: 70)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(invalid.isEmpty ? Color.gray.opacity(0.4) : .red))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(invalid.isEmpty ? Color.gray.opacity(0.4) : Color.ratDanger))
                     .onChange(of: s.additionalLocalRanges) { _, new in invalid = LocalRanges.shared.set(new) }
-                if !invalid.isEmpty { Text("Invalid address range: \(invalid.joined(separator: ", "))").font(.caption).foregroundStyle(.red) }
+                if !invalid.isEmpty { Text("Invalid address range: \(invalid.joined(separator: ", "))").font(.caption).foregroundStyle(Color.ratDanger) }
                 else { Text("One range per line, e.g. 100.64.0.0/10").font(.caption).foregroundStyle(.secondary) }
             }
         }

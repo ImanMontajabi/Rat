@@ -76,7 +76,7 @@ struct RulesWindow: View {
                             Text(p.name)
                             Spacer()
                             if p.id == activeProfile {
-                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityLabel("Active").accessibilityIdentifier("profile-active")
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.ratSuccess).accessibilityLabel("Active").accessibilityIdentifier("profile-active")
                             }
                         }
                         .accessibilityElement(children: .contain)
@@ -245,7 +245,7 @@ struct RulesList: View {
                     if case .profile(let id) = category, id != rules.ruleSet.activeProfileID {
                         Button("Activate") { rules.activate(id) }.accessibilityIdentifier("activate-profile")
                     } else if case .profile = category {
-                        Label("Active", systemImage: "checkmark.circle.fill").foregroundStyle(.green).accessibilityIdentifier("profile-is-active")
+                        Label("Active", systemImage: "checkmark.circle.fill").foregroundStyle(Color.ratSuccess).accessibilityIdentifier("profile-is-active")
                     }
                 }
                 if !subtitle.isEmpty { Text(subtitle).font(.callout).foregroundStyle(.secondary) }
@@ -253,13 +253,13 @@ struct RulesList: View {
 
             if rules.unapprovedCount > 0 {
                 HStack {
-                    Circle().fill(.blue).frame(width: 9, height: 9)
+                    Circle().fill(Color.ratAccent).frame(width: 9, height: 9)
                     Text("\(rules.unapprovedCount) rule\(rules.unapprovedCount == 1 ? "" : "s") waiting for review")
                     Spacer()
                     Button("Approve All") { rules.approveAll() }
                     Button("Reject All", role: .destructive) { rules.rejectAllUnapproved() }
                 }
-                .padding(.horizontal, 16).padding(.vertical, 8).background(.blue.opacity(0.15))
+                .padding(.horizontal, 16).padding(.vertical, 8).background(Color.ratAccent.opacity(0.15))
             }
 
             Table(visible, selection: $selection) {
@@ -268,7 +268,7 @@ struct RulesList: View {
                 }.width(50)
                 TableColumn("Process") { r in
                     HStack(spacing: 6) {
-                        Image(systemName: r.verdict == .deny ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(r.verdict == .deny ? .red : .green)
+                        Image(systemName: r.verdict == .deny ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(r.verdict == .deny ? Color.ratDanger : Color.ratSuccess)
                         Text(processName(r)).lineLimit(1)
                     }
                 }.width(min: 130, ideal: 190, max: 260)
@@ -280,7 +280,7 @@ struct RulesList: View {
                 }.width(min: 260, ideal: 420)
                 TableColumn("Status") { r in
                     HStack(spacing: 6) {
-                        if !r.approved { Circle().fill(.blue).frame(width: 8, height: 8); Text("unapproved").font(.caption).fixedSize() }
+                        if !r.approved { Circle().fill(Color.ratAccent).frame(width: 8, height: 8); Text("unapproved").font(.caption).fixedSize() }
                         else if r.lifetime != .forever { Text("temporary").font(.caption).foregroundStyle(.secondary) }
                         Spacer()
                         if !r.approved { Button("Approve") { rules.approve(r.id) }.controlSize(.small) }

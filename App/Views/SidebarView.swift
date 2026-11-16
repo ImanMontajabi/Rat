@@ -81,7 +81,7 @@ struct SidebarView: View {
             }
             footer
         }
-        .background(.ultraThinMaterial)
+        .background(Color.ratBase)
     }
 
     private func groupRow(_ g: Group) -> some View {
@@ -136,7 +136,7 @@ struct SidebarView: View {
             Menu {
                 Picker("Route", selection: $filter.route) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
             } label: {
-                Image(systemName: filter.route.symbol).foregroundStyle(filter.route == .all ? Color.secondary : .accentColor)
+                Image(systemName: filter.route.symbol).foregroundStyle(filter.route == .all ? Color.secondary : .ratAccent)
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .help("Only connections through a VPN or a proxy (or type vpn / proxy in the search field)")
@@ -148,7 +148,7 @@ struct SidebarView: View {
             .accessibilityIdentifier("time-range")
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(.white.opacity(0.08), in: Capsule())
+        .background(Color.ratRaised, in: Capsule())
     }
 
     /// Local connections on or off (`MonitorFilter.hideLocal`, remembered as `AppSettings.hideLocal`): a labeled
@@ -164,7 +164,7 @@ struct SidebarView: View {
 
     private func chip(_ symbol: String, on: Binding<Bool>, help: String) -> some View {
         Button { on.wrappedValue.toggle() } label: {
-            Image(systemName: symbol).foregroundStyle(on.wrappedValue ? Color.accentColor : .secondary)
+            Image(systemName: symbol).foregroundStyle(on.wrappedValue ? Color.ratAccent : .secondary)
         }.buttonStyle(.plain).help(help)
     }
 
@@ -177,14 +177,14 @@ struct SidebarView: View {
             if showChart { TrafficChart(range: range) }
             if ledger.enforcer.helperInstalled && ledger.enforcer.helperOutdated {
                 Label("The firewall helper needs an update (Settings > Security)", systemImage: "exclamationmark.shield")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(Color.ratWarning)
             } else if !ledger.deniedAppPaths.isEmpty {
                 if !ledger.enforcer.helperInstalled {
                     Label("Deny is not enforced: install the firewall helper (Settings > Security)", systemImage: "exclamationmark.shield")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(Color.ratWarning)
                 } else if ledger.enforcer.status == nil {
                     Label("Deny is not enforced: the firewall helper is not running", systemImage: "exclamationmark.shield")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(Color.ratWarning)
                 } else if let st = ledger.enforcer.status, st.blockedPorts > 0 {
                     Label("Blocking \(st.blockedPorts) connections of denied apps", systemImage: "shield.checkered")
                         .font(.caption).foregroundStyle(.secondary)
@@ -339,7 +339,7 @@ struct ProcessRow: View {
                 }
             }
             .padding(.vertical, 7).padding(.horizontal, 6)
-            .background(selectedHere && selection?.process == nil && selection?.remote == nil ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .background(selectedHere && selection?.process == nil && selection?.remote == nil ? Color.ratAccent.opacity(0.24) : .clear, in: RoundedRectangle(cornerRadius: Radius.sm))
             .contentShape(Rectangle())
             .onTapGesture { select(MonitorSelection(appID: app.id)) }
             .accessibilityElement(children: .contain)
@@ -387,7 +387,7 @@ struct ProcessRow: View {
             rowPolicy(app.ruleTarget(process: node.name), service: node.name, subject: "this process")
         }
         .padding(.vertical, 3).padding(.leading, 30).padding(.trailing, 4)
-        .background(selection == s ? Color.accentColor.opacity(0.85) : .clear, in: RoundedRectangle(cornerRadius: 6))
+        .background(selection == s ? Color.ratAccent.opacity(0.22) : .clear, in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
         .onTapGesture { select(s) }
         .accessibilityElement(children: .contain)
@@ -422,7 +422,7 @@ struct ProcessRow: View {
                 .accessibilityIdentifier("remote-policy-\(r.host)")
         }
         .padding(.vertical, 2).padding(.leading, indent).padding(.trailing, 4)
-        .background(selection == s ? Color.accentColor.opacity(0.7) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .background(selection == s ? Color.ratAccent.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .onTapGesture { select(s) }
     }
@@ -603,18 +603,18 @@ struct TrafficChart: View {
         chart(ledger.chartLayout(range))
             .frame(height: 100)
             .padding(6)
-            .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+            .background(Color.ratSurface, in: RoundedRectangle(cornerRadius: Radius.md))
     }
 
     // Quiet buckets still draw a dim tick so the chart reads as filled across its whole width.
     @ChartContentBuilder private func sent(_ b: ChartBar, peak: Double) -> some ChartContent {
         RectangleMark(xStart: .value("from", b.start), xEnd: .value("to", b.end), yStart: .value("zero", 0.0), yEnd: .value("sent", max(b.tx, peak * 0.03)))
-            .foregroundStyle(b.tx > 0 ? Color.purple : Color.white.opacity(0.18))
+            .foregroundStyle(b.tx > 0 ? Color.ratSent : Color.white.opacity(0.14))
     }
 
     @ChartContentBuilder private func received(_ b: ChartBar, peak: Double) -> some ChartContent {
         RectangleMark(xStart: .value("from", b.start), xEnd: .value("to", b.end), yStart: .value("zero", 0.0), yEnd: .value("received", -max(b.rx, peak * 0.03)))
-            .foregroundStyle(b.rx > 0 ? Color.blue : Color.white.opacity(0.18))
+            .foregroundStyle(b.rx > 0 ? Color.ratReceived : Color.white.opacity(0.14))
     }
 
     private func chart(_ l: ChartLayout) -> some View {
