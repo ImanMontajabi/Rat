@@ -64,11 +64,8 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-            HStack(spacing: 10) {
-                searchField
-                localSwitch
-            }
-            .padding(.horizontal, 14).padding(.bottom, 10)
+            searchField
+                .padding(.horizontal, 14).padding(.bottom, 8)
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if settings.groupBy == .process {
@@ -133,6 +130,7 @@ struct SidebarView: View {
             TextField("Search", text: $filter.search).textFieldStyle(.plain).accessibilityIdentifier("search-field")
             chip("arrow.down.left.circle", on: $filter.onlyIncoming, help: "Only apps accepting incoming connections").accessibilityIdentifier("only-incoming")
             chip("xmark.rectangle", on: $filter.onlyDenied, help: "Only denied apps").accessibilityIdentifier("only-denied")
+            localChip
             Menu {
                 Picker("Route", selection: $filter.route) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
             } label: {
@@ -145,21 +143,26 @@ struct SidebarView: View {
                 ForEach(TimeRange.allCases) { r in Button(r.title) { filter.range = r } }
             } label: { Label(range.rawValue, systemImage: "clock").font(.callout) }
             .menuStyle(.borderlessButton).fixedSize()
+            .accessibilityValue(range.title)
             .accessibilityIdentifier("time-range")
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
+        .padding(.horizontal, 12).padding(.vertical, 6)
         .background(Color.ratRaised, in: Capsule())
     }
 
-    /// Local connections on or off (`MonitorFilter.hideLocal`, remembered as `AppSettings.hideLocal`): a labeled
-    /// switch beside the search field, on while they are shown.
-    private var localSwitch: some View {
-        Toggle(isOn: Binding(get: { !filter.hideLocal }, set: { filter.hideLocal = !$0 })) {
-            Text("Local").font(.callout).foregroundStyle(.secondary)
+    /// Local connections on or off (`MonitorFilter.hideLocal`, remembered as `AppSettings.hideLocal`): a chip in the
+    /// filter bar, a house while they are shown, a crossed-out house in the accent while they are hidden. Like a
+    /// switch it reports 1 while they are shown, 0 while hidden.
+    private var localChip: some View {
+        Button { filter.hideLocal.toggle() } label: {
+            Image(systemName: filter.hideLocal ? "house.slash" : "house")
+                .foregroundStyle(filter.hideLocal ? Color.ratAccent : .secondary)
         }
-        .toggleStyle(.switch).controlSize(.mini).fixedSize()
-        .help("Local connections: this Mac (loopback), the local network (LAN, link-local) and Bonjour (mDNS, multicast). Turn off to hide them in the list, the map and the Summary.")
-        .accessibilityLabel("Local connections").accessibilityIdentifier("show-local")
+        .buttonStyle(.plain)
+        .help(filter.hideLocal ? "Local connections are hidden: click to show this Mac (loopback), the local network and Bonjour again."
+                               : "Local connections: this Mac (loopback), the local network (LAN, link-local) and Bonjour (mDNS, multicast). Click to hide them in the list, the map and the Summary.")
+        .accessibilityLabel("Local connections").accessibilityValue(filter.hideLocal ? "0" : "1")
+        .accessibilityIdentifier("show-local")
     }
 
     private func chip(_ symbol: String, on: Binding<Bool>, help: String) -> some View {
@@ -171,8 +174,8 @@ struct SidebarView: View {
     private var footer: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                Pill(kind: .up, text: formatBytes(ledger.sessionOut), label: "sent")
-                Pill(kind: .down, text: formatBytes(ledger.sessionIn), label: "received")
+                Pill(kind: .up, text: formatBytes(ledger.sessionOut))
+                Pill(kind: .down, text: formatBytes(ledger.sessionIn))
             }
             if showChart { TrafficChart(range: range) }
             if ledger.enforcer.helperInstalled && ledger.enforcer.helperOutdated {
@@ -193,7 +196,6 @@ struct SidebarView: View {
             HStack {
                 Text(settings.groupBy == .process ? "\(rows.count) app\(rows.count == 1 ? "" : "s")" : "\(groups.count) group\(groups.count == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Text("Last \(range.title)").font(.caption).foregroundStyle(.secondary)
             }
             // How many passes the window has seen, for the UI tests (a menu must stay open across them).
             Text("Passes").font(.system(size: 1)).foregroundStyle(.clear).allowsHitTesting(false).frame(height: 1)
@@ -606,30 +608,39 @@ struct TrafficChart: View {
             .background(Color.ratSurface, in: RoundedRectangle(cornerRadius: Radius.md))
     }
 
-    // Quiet buckets still draw a dim tick so the chart reads as filled across its whole width.
-    @ChartContentBuilder private func sent(_ b: ChartBar, peak: Double) -> some ChartContent {
-        RectangleMark(xStart: .value("from", b.start), xEnd: .value("to", b.end), yStart: .value("zero", 0.0), yEnd: .value("sent", max(b.tx, peak * 0.03)))
-            .foregroundStyle(b.tx > 0 ? Color.ratSent : Color.white.opacity(0.14))
-    }
+    /// Points between two columns, like an equalizer's.
+    static let gap: CGFloat = 2.5
+    /// The space between the sent column above the baseline and the received one below it, in levels.
+    static let split = 0.025
 
-    @ChartContentBuilder private func received(_ b: ChartBar, peak: Double) -> some ChartContent {
-        RectangleMark(xStart: .value("from", b.start), xEnd: .value("to", b.end), yStart: .value("zero", 0.0), yEnd: .value("received", -max(b.rx, peak * 0.03)))
-            .foregroundStyle(b.rx > 0 ? Color.ratReceived : Color.white.opacity(0.14))
+    /// One bucket: a capsule up for what was sent, one down for what was received (heights from
+    /// `ChartLayout.level`), and a small dot on the baseline for a quiet bucket, so the chart has no solid line.
+    /// Always the same three marks a bucket (a quiet one's capsules have no height, a busy one's dot no colour):
+    /// with `if`s here, each pass's new buckets made Swift Charts keep new graph nodes, about 1.3 MB a second.
+    @ChartContentBuilder private func column(_ b: ChartBar, width: CGFloat) -> some ChartContent {
+        let mid = b.start.addingTimeInterval(b.end.timeIntervalSince(b.start) / 2)
+        RectangleMark(x: .value("time", mid), yStart: .value("zero", Self.split), yEnd: .value("sent", Self.split + b.tx), width: .fixed(width))
+            .cornerRadius(width / 2).foregroundStyle(Color.ratSent)
+        RectangleMark(x: .value("time", mid), yStart: .value("zero", -Self.split), yEnd: .value("received", -Self.split - b.rx), width: .fixed(width))
+            .cornerRadius(width / 2).foregroundStyle(Color.ratReceived)
+        RectangleMark(x: .value("time", mid), y: .value("quiet", 0.0), width: .fixed(2), height: .fixed(2))
+            .cornerRadius(1).foregroundStyle(Color.white.opacity(b.tx <= 0 && b.rx <= 0 ? 0.15 : 0))
     }
 
     private func chart(_ l: ChartLayout) -> some View {
-        Chart(l.bars) { b in
-            sent(b, peak: l.peak)
-            received(b, peak: l.peak)
-        }
-        .chartYAxis(.hidden)
-        .chartXScale(domain: l.start...l.end)
-        .chartYScale(domain: (-l.peak)...l.peak)
-        .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                AxisGridLine().foregroundStyle(Color.white.opacity(0.1))
-                AxisValueLabel(format: l.labelFormat).foregroundStyle(Color.white.opacity(0.7))
-            }
+        GeometryReader { geo in
+            // Each bucket's share of the width, less the gap: columns stay apart at any window size.
+            let width = max(1.5, geo.size.width / CGFloat(max(l.bars.count, 1)) - Self.gap)
+            Chart(l.bars) { b in column(b, width: width) }
+                .chartYAxis(.hidden)
+                .chartXScale(domain: l.start...l.end)
+                .chartYScale(domain: (-l.peak - Self.split)...(l.peak + Self.split))
+                .chartXAxis {
+                    // `.aligned`: the first and last labels stay inside the chart instead of being cut at its edges.
+                    AxisMarks(preset: .aligned, values: l.ticks()) { value in
+                        AxisValueLabel { if let d = value.as(Date.self) { Text(l.label(d)) } }.foregroundStyle(Palette.textSecondary)
+                    }
+                }
         }
     }
 }

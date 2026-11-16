@@ -71,7 +71,7 @@ Deny is enforced by `rat-enforcerd`, an opt-in root daemon:
 - **Left:** the app list with sparklines, session totals and a 5m / 1h / 1d / 1w traffic chart.
 - **Middle:** the world map, drawing only what the list shows. Busy connections show their traffic moving, peach for sent and blue for received, only while the window is visible and Reduce Motion is off. Click a city's pin or a line to it to see what goes there.
 - **Right:** the inspector for the selected app, process or connection, or a Summary of top processes, domains, countries and networks that follows the search and filters. For a place chosen on the map it lists the apps and every connection that go there, with the data and rate now, and each connection's ✗/✓ to deny or allow it right there.
-- **Local switch:** the Local switch beside the search field hides local-network traffic (the LAN, multicast and Bonjour) in the list, the map and the Summary when turned off, and Rat remembers it.
+- **Local:** the house button in the filter bar hides local-network traffic (the LAN, multicast and Bonjour) in the list, the map and the Summary when turned off, and Rat remembers it.
 
 ![A place on the map: Paris with its two connections from Google Chrome and Telegram](docs/screenshots/map-place.png)
 <sub>Demo data. Paris is chosen on the map: its pin is marked and only the lines that go there stay lit. The inspector shows Paris with its flag, "2 connections from 2 apps", the data sent and received and the rate now, then each app and each connection with its own ✗/✓.</sub>

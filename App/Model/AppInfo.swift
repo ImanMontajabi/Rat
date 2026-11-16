@@ -68,13 +68,73 @@ struct AppIdentity: Hashable {
     @MainActor var icon: NSImage {
         if let c = Self.iconCache[id] { return c }
         let img: NSImage
-        if let bundlePath, bundlePath.hasSuffix(".AppBundle"), FileManager.default.fileExists(atPath: "/Applications/\(name).app") {
+        if let tile = Self.tile(id: id, bundlePath: bundlePath, isSystem: isSystem, isExtension: isExtension) {
+            img = tile.image
+        } else if let bundlePath, bundlePath.hasSuffix(".AppBundle"), FileManager.default.fileExists(atPath: "/Applications/\(name).app") {
             img = NSWorkspace.shared.icon(forFile: "/Applications/\(name).app")
         } else if let bundlePath { img = NSWorkspace.shared.icon(forFile: Self.iconPath(bundlePath)) }
-        else if isSystem, let sys = NSImage(systemSymbolName: "apple.logo", accessibilityDescription: nil) { img = sys }
         else { img = NSWorkspace.shared.icon(forFile: id.replacingOccurrences(of: "#ext", with: "")) }
         Self.iconCache[id] = img
         return img
+    }
+
+    /// What stands in for an icon the row has not got: the macOS row, a system service, a command-line tool, or a
+    /// bundle without an icon of its own (identityservicesd.app in IDS.framework), which Finder would draw as a
+    /// blank document or a tiny black terminal.
+    enum IconTile: Equatable {
+        case mac, service, tool, app
+
+        var symbol: String {
+            switch self {
+            case .mac: "apple.logo"
+            case .service: "gearshape.2.fill"
+            case .tool: "terminal.fill"
+            case .app: "macwindow"
+            }
+        }
+
+        /// OpenWarp's raised tile (`Palette.raised`, a hairline edge) with the symbol in it, inset like an app icon
+        /// on its canvas, drawn at whatever size it is shown.
+        var image: NSImage {
+            let symbolColor = self == .mac ? NSColor(white: 0.93, alpha: 1) : NSColor(red: 0.76, green: 0.77, blue: 0.81, alpha: 1)
+            let image = NSImage(size: NSSize(width: 64, height: 64), flipped: false) { rect in
+                let tile = rect.insetBy(dx: rect.width * 0.07, dy: rect.height * 0.07)
+                let path = NSBezierPath(roundedRect: tile, xRadius: tile.width * 0.225, yRadius: tile.height * 0.225)
+                Palette.raised.nsColor.setFill(); path.fill()
+                path.lineWidth = rect.width / 32
+                NSColor(white: 1, alpha: 0.09).setStroke(); path.stroke()
+                let config = NSImage.SymbolConfiguration(pointSize: tile.width * (self == .mac ? 0.56 : 0.5), weight: .semibold)
+                    .applying(NSImage.SymbolConfiguration(hierarchicalColor: symbolColor))
+                if let symbol = NSImage(systemSymbolName: self.symbol, accessibilityDescription: nil)?.withSymbolConfiguration(config) {
+                    let s = symbol.size
+                    symbol.draw(in: NSRect(x: tile.midX - s.width / 2, y: tile.midY - s.height / 2, width: s.width, height: s.height))
+                }
+                return true
+            }
+            image.accessibilityDescription = symbol
+            return image
+        }
+    }
+
+    /// Programs of macOS itself (daemons and agents), as opposed to tools someone installed.
+    static func isSystemProgram(_ path: String) -> Bool {
+        ["/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/", "/Library/Apple/"].contains { path.hasPrefix($0) }
+    }
+
+    /// An Info.plist that names an icon.
+    static func bundleHasIcon(_ path: String) -> Bool {
+        guard let info = NSDictionary(contentsOfFile: (path as NSString).appendingPathComponent("Contents/Info.plist")) else { return false }
+        return ["CFBundleIconFile", "CFBundleIconName", "CFBundleIcons"].contains { info[$0] != nil }
+    }
+
+    /// The tile for a row without an icon of its own, or nil for one with an icon (an app, an extension, which
+    /// shows what Finder shows, Steam's client, a Safari web app).
+    static func tile(id: String, bundlePath: String?, isSystem: Bool, isExtension: Bool = false,
+                     hasIcon: (String) -> Bool = bundleHasIcon) -> IconTile? {
+        if isSystem { return .mac }
+        guard let bundle = bundlePath else { return isSystemProgram(id) ? .service : .tool }
+        if isExtension || bundle.hasSuffix(".AppBundle") || SafariWebApp.isWebAppBundle(bundle) || hasIcon(iconPath(bundle)) { return nil }
+        return isSystemProgram(bundle) ? .service : .app
     }
 
     /// The file whose icon stands for a bundle: the bundle, or for a companion app that is not at its usual path (an

@@ -418,14 +418,14 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["🇬🇧 London, United Kingdom"].waitForExistence(timeout: 5), "the inspector's location")
     }
 
-    /// The Local switch beside the search field, turned off, leaves out Bonjour and LAN connections, and the
+    /// The Local chip in the filter bar, turned off, leaves out Bonjour and LAN connections, and the
     /// processes that have only those; a connection through a local proxy stays (it leaves the Mac). It remembers
     /// its state for the next launch.
     func testLocalSwitchHidesLocalConnections() {
         let chip = el("show-local")
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         XCTAssertTrue(waitSwitch(chip, on: true), "local connections are shown at first: \(String(describing: chip.value))")
-        XCTAssertTrue(app.staticTexts["Local"].exists, "a labeled switch")
+        XCTAssertEqual(chip.label, "Local connections", "an icon chip, named for VoiceOver")
         let counts = el("summary-counts")
         XCTAssertTrue(counts.waitForExistence(timeout: 5))
         let before = [counts.label, counts.value as? String ?? ""].joined()
@@ -687,12 +687,13 @@ final class RatUITests: XCTestCase {
     // MARK: time range
 
     func testTimeRangeMenu() {
-        el("time-range").click()
+        let menu = el("time-range")
+        menu.click()
         app.menuItems["1 hour"].click()
-        XCTAssertTrue(app.staticTexts["Last 1 hour"].waitForExistence(timeout: 5))
-        el("time-range").click()
+        XCTAssertTrue(waitValue(menu, "1 hour"), "\(menu.value ?? "nil")")
+        menu.click()
         app.menuItems["5 minutes"].click()
-        XCTAssertTrue(app.staticTexts["Last 5 minutes"].waitForExistence(timeout: 5))
+        XCTAssertTrue(waitValue(menu, "5 minutes"), "\(menu.value ?? "nil")")
     }
 
     // MARK: rules window
