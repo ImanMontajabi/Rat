@@ -26,10 +26,13 @@ final class TrafficSamplerTests: XCTestCase {
         XCTAssertEqual(s.processes.map(\.pid), [388, 812])
         XCTAssertEqual(s.flows, [
             FlowCounter(pid: 388, proto: .tcp, localPort: 50576, remoteAddress: "17.57.146.22", remotePort: 5223, bytesIn: 5233, bytesOut: 16483),
+            // A UDP socket without a peer, as OpenWarp's carrier: remote port 0. A TCP listener is not a flow.
+            FlowCounter(pid: 388, proto: .udp, localPort: 56280, remoteAddress: "", remotePort: 0, bytesIn: 0, bytesOut: 2230),
             FlowCounter(pid: 812, proto: .tcp, localPort: 50972, remoteAddress: "2606:4700:4700::1111", remotePort: 443, bytesIn: 700, bytesOut: 60),
             FlowCounter(pid: 812, proto: .udp, localPort: 5353, remoteAddress: "ff02::fb", remotePort: 5353, bytesIn: 200, bytesOut: 20),
         ])
-        XCTAssertEqual(s.flows[1].key, FlowCounter.key(pid: 812, proto: .tcp, localPort: 50972, remotePort: 443))
+        XCTAssertEqual(s.flows[2].key, FlowCounter.key(pid: 812, proto: .tcp, localPort: 50972, remotePort: 443))
+        XCTAssertEqual(s.flows[1].key, FlowCounter.key(pid: 388, proto: .udp, localPort: 56280, remotePort: 0))
         // The -P form (processes only) still parses the same way.
         XCTAssertEqual(TrafficSampler.parse(csv).map(\.name), ["apsd", "Google Chrome He"])
     }

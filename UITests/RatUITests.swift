@@ -10,6 +10,9 @@ final class RatUITests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchEnvironment["RAT_DEMO_MAP"] = "1"
+        // OpenWarp's row only for its own tests, so the others see the demo data they were written for.
+        if name.contains("OpenWarp") { app.launchEnvironment["RAT_DEMO_OPENWARP"] = "1" }
+        if name.contains("MenuBarPanel") { app.launchEnvironment["RAT_OPEN"] = "panel" }
         // Start from a fresh window: a window minimized in an earlier run would come back minimized, and every
         // click and keystroke would miss it.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
@@ -381,26 +384,90 @@ final class RatUITests: XCTestCase {
         XCTAssertTrue(el("remote-policy-demo2.example.com").buttons["policy-deny"].exists, "a stream this Mac opened can be denied")
     }
 
+    // MARK: OpenWarp
+
+    /// OpenWarp's root helper is listed under OpenWarp, and its carrier socket as its connection to the endpoint,
+    /// tagged as the VPN's server, placed at the data centre the tunnel exits at, with no ✗/✓ of its own.
+    func testOpenWarpCarrierIsListedUnderItsApp() {
+        XCTAssertTrue(el("app-row-OpenWarp").waitForExistence(timeout: 10), "the helper is grouped under the app, not as com.local.openwarp")
+        XCTAssertFalse(el("app-row-com.local.openwarp").exists)
+        XCTAssertTrue(el("app-row-OpenWarp").descendants(matching: .any)["badge-VPN server · OpenWarp"].exists, "the app row shows its carrier")
+        expand("OpenWarp")
+        expand("com.local.openwarp")
+        let carrier = el("remote-row-198.51.100.198")
+        XCTAssertTrue(carrier.waitForExistence(timeout: 5))
+        XCTAssertTrue(carrier.label.contains("UDP 443"), carrier.label)
+        XCTAssertTrue(carrier.label.contains("VPN server · OpenWarp"), carrier.label)
+        XCTAssertFalse(el("remote-policy-198.51.100.198").buttons["policy-deny"].exists, "no rule can be enforced on a socket that names no server")
+        carrier.click()
+        XCTAssertTrue(inspectorTitle().contains("198.51.100.198"), inspectorTitle())
+        XCTAssertTrue(el("badge-VPN server · OpenWarp").waitForExistence(timeout: 5))
+        let place = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "Düsseldorf", "Düsseldorf")).firstMatch
+        XCTAssertTrue(place.waitForExistence(timeout: 5), "placed at the data centre, not where the anycast prefix is registered")
+        XCTAssertFalse(el("inspector-country-rule").exists, "no country rule from a carrier")
+    }
+
+    // MARK: menu bar panel
+
+    /// The menu bar panel: the firewall's state as it is (demo mode sees no helper: monitoring only, with the way to
+    /// install it), traffic, route, the mode (the rules' own) and the windows, and a busy app shown in the monitor.
+    /// Menu bar items are not in XCUITest's reach on this macOS (no status items at all), so the test opens the
+    /// panel at launch (`RAT_OPEN=panel`, Debug only); the click on the icon, Escape and the right-click menu are
+    /// checked live.
+    func testMenuBarPanelShowsStateAndControls() {
+        let panel = el("control-center")
+        XCTAssertTrue(panel.waitForExistence(timeout: 10), "the Control Center panel")
+        XCTAssertTrue(waitText(el("panel-protection"), "Monitoring only"), "never 'on' without the helper")
+        XCTAssertTrue(el("panel-fix").exists, "offers Settings > Security")
+        for id in ["panel-rate-up", "panel-rate-down", "panel-session", "panel-route", "panel-mode", "panel-profile",
+                   "panel-open-monitor", "panel-open-rules", "panel-open-settings", "panel-quit"] {
+            XCTAssertTrue(el(id).exists, id)
+        }
+
+        let mode = el("panel-mode")
+        let deny = mode.buttons["Silent Deny"], allow = mode.buttons["Silent Allow"], alert = mode.buttons["Alert"]
+        XCTAssertTrue(deny.waitForExistence(timeout: 5))
+        // A segment reports itself chosen as value 1.
+        let before = [alert, allow, deny].first { ($0.value as? String) == "1" || ($0.value as? NSNumber)?.intValue == 1 } ?? allow
+        XCTAssertNotEqual(before, deny, "the demo starts in another mode")
+        deny.click()
+        XCTAssertTrue(waitSwitch(deny, on: true), "the mode follows the click: \(mode.debugDescription)")
+        XCTAssertTrue(waitSwitch(before, on: false))
+        before.click()
+        XCTAssertTrue(waitSwitch(before, on: true), "and back")
+
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "panel-app-")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the apps moving data now")
+        let name = String(row.identifier.dropFirst("panel-app-".count))
+        row.click()
+        XCTAssertTrue(waitGone(panel), "choosing an app closes the panel")
+        XCTAssertTrue(XCTWaiter().wait(for: [expectation(for: NSPredicate { _, _ in self.inspectorTitle().contains(name) }, evaluatedWith: nil)], timeout: 5) == .completed,
+                      "the monitor shows \(name): \(inspectorTitle())")
+    }
+
     // MARK: flags and Hide Local
 
-    /// Places carry their country's flag: the Summary's Top Countries and a connection's location in the inspector.
+    /// Places carry their country's flag, drawn in Rat's style (`flag-<CC>`): the Summary's Top Countries and a
+    /// connection's location in the inspector.
     func testPlacesShowTheirFlags() {
-        XCTAssertTrue(app.staticTexts["🇪🇸 Spain"].waitForExistence(timeout: 5), "Top Countries")
+        XCTAssertTrue(app.staticTexts["Spain"].waitForExistence(timeout: 5), "Top Countries")
+        XCTAssertTrue(app.images["flag-ES"].exists, "with Spain's flag")
         expand("Google Chrome")
         let london = el("remote-row-demo0.example.com")
         XCTAssertTrue(london.waitForExistence(timeout: 5))
         london.click()
-        XCTAssertTrue(app.staticTexts["🇬🇧 London, United Kingdom"].waitForExistence(timeout: 5), "the inspector's location")
+        XCTAssertTrue(app.staticTexts["London, United Kingdom"].waitForExistence(timeout: 5), "the inspector's location")
+        XCTAssertTrue(app.images["flag-GB"].firstMatch.exists, "with the United Kingdom's flag")
     }
 
-    /// The Local switch beside the search field, turned off, leaves out Bonjour and LAN connections, and the
+    /// The Local chip in the filter bar, turned off, leaves out Bonjour and LAN connections, and the
     /// processes that have only those; a connection through a local proxy stays (it leaves the Mac). It remembers
     /// its state for the next launch.
     func testLocalSwitchHidesLocalConnections() {
         let chip = el("show-local")
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         XCTAssertTrue(waitSwitch(chip, on: true), "local connections are shown at first: \(String(describing: chip.value))")
-        XCTAssertTrue(app.staticTexts["Local"].exists, "a labeled switch")
+        XCTAssertEqual(chip.label, "Local connections", "an icon chip, named for VoiceOver")
         let counts = el("summary-counts")
         XCTAssertTrue(counts.waitForExistence(timeout: 5))
         let before = [counts.label, counts.value as? String ?? ""].joined()
@@ -662,12 +729,13 @@ final class RatUITests: XCTestCase {
     // MARK: time range
 
     func testTimeRangeMenu() {
-        el("time-range").click()
+        let menu = el("time-range")
+        menu.click()
         app.menuItems["1 hour"].click()
-        XCTAssertTrue(app.staticTexts["Last 1 hour"].waitForExistence(timeout: 5))
-        el("time-range").click()
+        XCTAssertTrue(waitValue(menu, "1 hour"), "\(menu.value ?? "nil")")
+        menu.click()
         app.menuItems["5 minutes"].click()
-        XCTAssertTrue(app.staticTexts["Last 5 minutes"].waitForExistence(timeout: 5))
+        XCTAssertTrue(waitValue(menu, "5 minutes"), "\(menu.value ?? "nil")")
     }
 
     // MARK: rules window

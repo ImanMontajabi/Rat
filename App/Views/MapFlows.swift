@@ -33,8 +33,8 @@ enum MapFlows {
     /// Above this many bytes per second a line carries two pulses each way.
     static let fastRate = 256.0 * 1024
 
-    static let sent = Color(red: 0.78, green: 0.47, blue: 1.0)       // the purple of the "sent" pill, brighter
-    static let received = Color(red: 0.36, green: 0.66, blue: 1.0)   // the blue of the "received" pill, brighter
+    static let sent = RatColors.sent.color           // peach, like the "sent" pill
+    static let received = RatColors.received.color   // blue, like the "received" pill
 
     /// Pulses run only while someone can see them and something moves: the window is on screen (not covered,
     /// minimized or hidden), Reduce Motion is off, and at least one line carries traffic. Otherwise no frame is drawn.
@@ -61,8 +61,6 @@ enum MapFlows {
         static let arrival = 0.8
         /// The beam's tail, as a share of the line's length (at most `1 / arrival - 1`, so it has landed by the end).
         static let beamTail = 0.22
-        /// The white-hot core just behind the head.
-        static let coreTail = 0.05
 
         /// Keyframes of a stroke with `tail`: its end (the head) runs 0 → 1 until `arrival` and waits there; its start
         /// stays at 0 until the head is `tail` along, then follows it at the same speed until it reaches 1 too.
@@ -184,23 +182,21 @@ final class PulseHost: NSView {
         CATransaction.commit()
     }
 
-    /// Each pulse is a laser tracer, like the attack maps of hacker films: a soft wide glow and a bright beam with a
-    /// fading tail, a white-hot core and a haloed head racing along the line, and a ring that ripples out where it
-    /// lands. Five layers a pulse, all moved by the render server (`MapFlows.Tracer` has the timing).
+    /// Each pulse is a matte tracer (OpenWarp's design language: flat, no glow): a solid beam with a tail and a dot
+    /// for its head running along the line, and a thin ring where it lands. Three layers a pulse, all moved by the
+    /// render server (`MapFlows.Tracer` has the timing).
     static func pulses(for t: PulseLayerView.Track) -> [CALayer] {
         let forward = CGMutablePath(), backward = CGMutablePath()
         forward.addLines(between: t.points); backward.addLines(between: t.points.reversed())
         let now = CACurrentMediaTime()
         var out: [CALayer] = []
         for run in MapFlows.runs(flow: t.flow, fast: t.fast) {
-            let color = NSColor(run.sent ? MapFlows.sent : MapFlows.received)
+            let color = run.sent ? RatColors.sent.nsColor : RatColors.received.nsColor
             let path = run.reverse ? backward : forward
             // Started in the past so every pulse is where `MapFlows.phase` says, whenever it was added.
             let begin = now - MapFlows.phase(time: now, offset: run.offset) * MapFlows.travelTime
             let layers: [(CALayer, [CAAnimation])] = [
-                beam(path, color: color.withAlphaComponent(0.28), width: 7, tail: MapFlows.Tracer.beamTail),
-                beam(path, color: color, width: 2.4, tail: MapFlows.Tracer.beamTail * 0.8),
-                beam(path, color: NSColor.white.withAlphaComponent(0.95), width: 1.4, tail: MapFlows.Tracer.coreTail),
+                beam(path, color: color, width: 2.4, tail: MapFlows.Tracer.beamTail),
                 head(path, color: color),
                 ripple(at: (run.reverse ? t.points.first : t.points.last) ?? .zero, color: color),
             ]
@@ -240,18 +236,12 @@ final class PulseHost: NSView {
         return (l, [keyframes("strokeEnd", MapFlows.Tracer.strokeEnd()), keyframes("strokeStart", MapFlows.Tracer.strokeStart(tail: tail))])
     }
 
-    /// The head: a bright core in a soft halo (a shadow with an explicit path, which the render server draws cheaply),
-    /// on the beam's tip until it lands.
+    /// The head: a flat dot in the beam's colour on its tip until it lands.
     private static func head(_ path: CGPath, color: NSColor) -> (CALayer, [CAAnimation]) {
         let dot = CALayer()
         dot.bounds = CGRect(x: 0, y: 0, width: 6, height: 6)
         dot.cornerRadius = 3
-        dot.backgroundColor = NSColor.white.cgColor
-        dot.shadowColor = color.cgColor
-        dot.shadowOpacity = 1
-        dot.shadowRadius = 7
-        dot.shadowOffset = .zero
-        dot.shadowPath = CGPath(ellipseIn: dot.bounds.insetBy(dx: -4, dy: -4), transform: nil)
+        dot.backgroundColor = color.cgColor
         dot.opacity = 0
         let move = CAKeyframeAnimation(keyPath: "position")
         move.path = path
@@ -269,13 +259,13 @@ final class PulseHost: NSView {
         ring.bounds = .zero
         ring.position = point
         ring.path = CGPath(ellipseIn: CGRect(x: -6, y: -6, width: 12, height: 12), transform: nil)
-        ring.fillColor = color.withAlphaComponent(0.18).cgColor
+        ring.fillColor = nil
         ring.strokeColor = color.cgColor
-        ring.lineWidth = 1.5
+        ring.lineWidth = 1.2
         ring.opacity = 0
         let a = MapFlows.Tracer.arrival
         let grow = keyframes("transform.scale", ([0.3, 0.3, 2.6], [0, a, 1]))
-        let fade = keyframes("opacity", ([0, 0, 0.95, 0], [0, a, min(1, a + 0.03), 1]))
+        let fade = keyframes("opacity", ([0, 0, 0.7, 0], [0, a, min(1, a + 0.03), 1]))
         return (ring, [grow, fade])
     }
 }

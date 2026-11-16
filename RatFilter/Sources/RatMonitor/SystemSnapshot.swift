@@ -5,7 +5,9 @@ import Foundation
 public enum SystemSnapshot {
     /// Connections only, or with `listeners` also the TCP listening sockets (no remote end; `*` is any address), which
     /// tell which connections a peer started (`SocketDirection`).
-    public static func parse(_ text: String, listeners: Bool = false) -> [ObservedConnection] {
+    /// `unconnectedUDP`: processes whose UDP sockets without a peer are kept too (remote empty), such as OpenWarp's
+    /// helper, whose carrier socket names no server (`TunnelCarrier`).
+    public static func parse(_ text: String, listeners: Bool = false, unconnectedUDP: Set<Int32> = []) -> [ObservedConnection] {
         var paths: [Int32: String] = [:]
         var lsofLines: [Substring] = []
         var inPS = false
@@ -31,6 +33,9 @@ public enum SystemSnapshot {
                 if listeners, proto == .tcp, state == "LISTEN", let l = splitEndpoint(name) {
                     out.append(ObservedConnection(pid: pid, processPath: paths[pid] ?? "pid \(pid)", proto: .tcp, remoteAddress: "", remotePort: 0,
                                                   localPort: l.port, tcpState: "LISTEN", localAddress: l.host == "*" ? "" : l.host))
+                } else if proto == .udp, unconnectedUDP.contains(pid), let l = splitEndpoint(name) {
+                    out.append(ObservedConnection(pid: pid, processPath: paths[pid] ?? "pid \(pid)", proto: .udp, remoteAddress: "", remotePort: 0,
+                                                  localPort: l.port, tcpState: nil, localAddress: l.host == "*" ? "" : l.host))
                 }
                 return
             }

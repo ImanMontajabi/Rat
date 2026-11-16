@@ -47,7 +47,7 @@ struct SidebarView: View {
                 var k = Set<String>()
                 for r in a.remotes {
                     guard let g = r.geo else { continue }
-                    let title = [g.flag, g.country].filter { !$0.isEmpty }.joined(separator: " ")
+                    let title = g.country
                     k.insert(title)
                     if let cc = r.country ?? Rule.countryCode(g.countryCode) { codes[title] = cc }
                 }
@@ -64,11 +64,8 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-            HStack(spacing: 10) {
-                searchField
-                localSwitch
-            }
-            .padding(.horizontal, 14).padding(.bottom, 10)
+            searchField
+                .padding(.horizontal, 14).padding(.bottom, 8)
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if settings.groupBy == .process {
@@ -81,14 +78,18 @@ struct SidebarView: View {
             }
             footer
         }
-        .background(.ultraThinMaterial)
+        .background(Color.ratBase)
     }
 
     private func groupRow(_ g: Group) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.right").font(.caption2).rotationEffect(.degrees(expandedGroups.contains(g.id) ? 90 : 0)).foregroundStyle(.secondary).frame(width: 14)
-                Image(systemName: settings.groupBy == .domain ? "globe" : "flag").frame(width: 24)
+                if settings.groupBy == .country, let cc = g.country, Flags.image(cc, height: 13) != nil {
+                    FlagView(code: cc, height: 13).frame(width: 24)
+                } else {
+                    Image(systemName: settings.groupBy == .domain ? "globe" : "flag").frame(width: 24)
+                }
                 Text(g.title).lineLimit(1).font(.system(size: 14, weight: .medium))
                 Spacer()
                 if let cc = g.country {
@@ -133,10 +134,11 @@ struct SidebarView: View {
             TextField("Search", text: $filter.search).textFieldStyle(.plain).accessibilityIdentifier("search-field")
             chip("arrow.down.left.circle", on: $filter.onlyIncoming, help: "Only apps accepting incoming connections").accessibilityIdentifier("only-incoming")
             chip("xmark.rectangle", on: $filter.onlyDenied, help: "Only denied apps").accessibilityIdentifier("only-denied")
+            localChip
             Menu {
                 Picker("Route", selection: $filter.route) { ForEach(RouteFilter.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) } }.pickerStyle(.inline)
             } label: {
-                Image(systemName: filter.route.symbol).foregroundStyle(filter.route == .all ? Color.secondary : .accentColor)
+                Image(systemName: filter.route.symbol).foregroundStyle(filter.route == .all ? Color.secondary : .ratAccent)
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .help("Only connections through a VPN or a proxy (or type vpn / proxy in the search field)")
@@ -145,46 +147,51 @@ struct SidebarView: View {
                 ForEach(TimeRange.allCases) { r in Button(r.title) { filter.range = r } }
             } label: { Label(range.rawValue, systemImage: "clock").font(.callout) }
             .menuStyle(.borderlessButton).fixedSize()
+            .accessibilityValue(range.title)
             .accessibilityIdentifier("time-range")
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(.white.opacity(0.08), in: Capsule())
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(Color.ratRaised, in: Capsule())
     }
 
-    /// Local connections on or off (`MonitorFilter.hideLocal`, remembered as `AppSettings.hideLocal`): a labeled
-    /// switch beside the search field, on while they are shown.
-    private var localSwitch: some View {
-        Toggle(isOn: Binding(get: { !filter.hideLocal }, set: { filter.hideLocal = !$0 })) {
-            Text("Local").font(.callout).foregroundStyle(.secondary)
+    /// Local connections on or off (`MonitorFilter.hideLocal`, remembered as `AppSettings.hideLocal`): a chip in the
+    /// filter bar, a house while they are shown, a crossed-out house in the accent while they are hidden. Like a
+    /// switch it reports 1 while they are shown, 0 while hidden.
+    private var localChip: some View {
+        Button { filter.hideLocal.toggle() } label: {
+            Image(systemName: filter.hideLocal ? "house.slash" : "house")
+                .foregroundStyle(filter.hideLocal ? Color.ratAccent : .secondary)
         }
-        .toggleStyle(.switch).controlSize(.mini).fixedSize()
-        .help("Local connections: this Mac (loopback), the local network (LAN, link-local) and Bonjour (mDNS, multicast). Turn off to hide them in the list, the map and the Summary.")
-        .accessibilityLabel("Local connections").accessibilityIdentifier("show-local")
+        .buttonStyle(.plain)
+        .help(filter.hideLocal ? "Local connections are hidden: click to show this Mac (loopback), the local network and Bonjour again."
+                               : "Local connections: this Mac (loopback), the local network (LAN, link-local) and Bonjour (mDNS, multicast). Click to hide them in the list, the map and the Summary.")
+        .accessibilityLabel("Local connections").accessibilityValue(filter.hideLocal ? "0" : "1")
+        .accessibilityIdentifier("show-local")
     }
 
     private func chip(_ symbol: String, on: Binding<Bool>, help: String) -> some View {
         Button { on.wrappedValue.toggle() } label: {
-            Image(systemName: symbol).foregroundStyle(on.wrappedValue ? Color.accentColor : .secondary)
+            Image(systemName: symbol).foregroundStyle(on.wrappedValue ? Color.ratAccent : .secondary)
         }.buttonStyle(.plain).help(help)
     }
 
     private var footer: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                Pill(kind: .up, text: formatBytes(ledger.sessionOut), label: "sent")
-                Pill(kind: .down, text: formatBytes(ledger.sessionIn), label: "received")
+                Pill(kind: .up, text: formatBytes(ledger.sessionOut))
+                Pill(kind: .down, text: formatBytes(ledger.sessionIn))
             }
             if showChart { TrafficChart(range: range) }
             if ledger.enforcer.helperInstalled && ledger.enforcer.helperOutdated {
                 Label("The firewall helper needs an update (Settings > Security)", systemImage: "exclamationmark.shield")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(Color.ratWarning)
             } else if !ledger.deniedAppPaths.isEmpty {
                 if !ledger.enforcer.helperInstalled {
                     Label("Deny is not enforced: install the firewall helper (Settings > Security)", systemImage: "exclamationmark.shield")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(Color.ratWarning)
                 } else if ledger.enforcer.status == nil {
                     Label("Deny is not enforced: the firewall helper is not running", systemImage: "exclamationmark.shield")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(Color.ratWarning)
                 } else if let st = ledger.enforcer.status, st.blockedPorts > 0 {
                     Label("Blocking \(st.blockedPorts) connections of denied apps", systemImage: "shield.checkered")
                         .font(.caption).foregroundStyle(.secondary)
@@ -193,7 +200,6 @@ struct SidebarView: View {
             HStack {
                 Text(settings.groupBy == .process ? "\(rows.count) app\(rows.count == 1 ? "" : "s")" : "\(groups.count) group\(groups.count == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Text("Last \(range.title)").font(.caption).foregroundStyle(.secondary)
             }
             // How many passes the window has seen, for the UI tests (a menu must stay open across them).
             Text("Passes").font(.system(size: 1)).foregroundStyle(.clear).allowsHitTesting(false).frame(height: 1)
@@ -339,7 +345,7 @@ struct ProcessRow: View {
                 }
             }
             .padding(.vertical, 7).padding(.horizontal, 6)
-            .background(selectedHere && selection?.process == nil && selection?.remote == nil ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .background(selectedHere && selection?.process == nil && selection?.remote == nil ? Color.ratAccent.opacity(0.24) : .clear, in: RoundedRectangle(cornerRadius: Radius.sm))
             .contentShape(Rectangle())
             .onTapGesture { select(MonitorSelection(appID: app.id)) }
             .accessibilityElement(children: .contain)
@@ -387,7 +393,7 @@ struct ProcessRow: View {
             rowPolicy(app.ruleTarget(process: node.name), service: node.name, subject: "this process")
         }
         .padding(.vertical, 3).padding(.leading, 30).padding(.trailing, 4)
-        .background(selection == s ? Color.accentColor.opacity(0.85) : .clear, in: RoundedRectangle(cornerRadius: 6))
+        .background(selection == s ? Color.ratAccent.opacity(0.22) : .clear, in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
         .onTapGesture { select(s) }
         .accessibilityElement(children: .contain)
@@ -422,7 +428,7 @@ struct ProcessRow: View {
                 .accessibilityIdentifier("remote-policy-\(r.host)")
         }
         .padding(.vertical, 2).padding(.leading, indent).padding(.trailing, 4)
-        .background(selection == s ? Color.accentColor.opacity(0.7) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .background(selection == s ? Color.ratAccent.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .onTapGesture { select(s) }
     }
@@ -442,7 +448,7 @@ struct ProcessRow: View {
 
     private func connectionLabel(_ r: RemoteHost, tags: Bool, service: Bool) -> some View {
         HStack(spacing: 6) {
-            if let flag = r.geo?.flag, !flag.isEmpty { Text(flag).accessibilityHidden(true) }
+            if let g = r.geo, !g.flag.isEmpty { FlagView(code: g.countryCode, height: 11) }
             Text(r.host).lineLimit(1).truncationMode(.middle)
             HStack(spacing: tags ? 4 : 3) {
                 ForEach(RouteBadges.items(r, compact: true), id: \.self) { RouteBadge(item: $0, symbolOnly: !tags) }
@@ -598,38 +604,49 @@ struct Disclosure: View {
 struct TrafficChart: View {
     @EnvironmentObject var ledger: Ledger
     let range: TimeRange
+    /// The plot's height: 100 in the monitor, less in the menu bar panel.
+    var height: CGFloat = 100
 
     var body: some View {
         chart(ledger.chartLayout(range))
-            .frame(height: 100)
+            .frame(height: height)
             .padding(6)
-            .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+            .background(Color.ratSurface, in: RoundedRectangle(cornerRadius: Radius.md))
     }
 
-    // Quiet buckets still draw a dim tick so the chart reads as filled across its whole width.
-    @ChartContentBuilder private func sent(_ b: ChartBar, peak: Double) -> some ChartContent {
-        RectangleMark(xStart: .value("from", b.start), xEnd: .value("to", b.end), yStart: .value("zero", 0.0), yEnd: .value("sent", max(b.tx, peak * 0.03)))
-            .foregroundStyle(b.tx > 0 ? Color.purple : Color.white.opacity(0.18))
-    }
+    /// Points between two columns, like an equalizer's.
+    static let gap: CGFloat = 2.5
+    /// The space between the sent column above the baseline and the received one below it, in levels.
+    static let split = 0.025
 
-    @ChartContentBuilder private func received(_ b: ChartBar, peak: Double) -> some ChartContent {
-        RectangleMark(xStart: .value("from", b.start), xEnd: .value("to", b.end), yStart: .value("zero", 0.0), yEnd: .value("received", -max(b.rx, peak * 0.03)))
-            .foregroundStyle(b.rx > 0 ? Color.blue : Color.white.opacity(0.18))
+    /// One bucket: a capsule up for what was sent, one down for what was received (heights from
+    /// `ChartLayout.level`), and a small dot on the baseline for a quiet bucket, so the chart has no solid line.
+    /// Always the same three marks a bucket (a quiet one's capsules have no height, a busy one's dot no colour):
+    /// with `if`s here, each pass's new buckets made Swift Charts keep new graph nodes, about 1.3 MB a second.
+    @ChartContentBuilder private func column(_ b: ChartBar, width: CGFloat) -> some ChartContent {
+        let mid = b.start.addingTimeInterval(b.end.timeIntervalSince(b.start) / 2)
+        RectangleMark(x: .value("time", mid), yStart: .value("zero", Self.split), yEnd: .value("sent", Self.split + b.tx), width: .fixed(width))
+            .cornerRadius(width / 2).foregroundStyle(Color.ratSent)
+        RectangleMark(x: .value("time", mid), yStart: .value("zero", -Self.split), yEnd: .value("received", -Self.split - b.rx), width: .fixed(width))
+            .cornerRadius(width / 2).foregroundStyle(Color.ratReceived)
+        RectangleMark(x: .value("time", mid), y: .value("quiet", 0.0), width: .fixed(2), height: .fixed(2))
+            .cornerRadius(1).foregroundStyle(Color.white.opacity(b.tx <= 0 && b.rx <= 0 ? 0.15 : 0))
     }
 
     private func chart(_ l: ChartLayout) -> some View {
-        Chart(l.bars) { b in
-            sent(b, peak: l.peak)
-            received(b, peak: l.peak)
-        }
-        .chartYAxis(.hidden)
-        .chartXScale(domain: l.start...l.end)
-        .chartYScale(domain: (-l.peak)...l.peak)
-        .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                AxisGridLine().foregroundStyle(Color.white.opacity(0.1))
-                AxisValueLabel(format: l.labelFormat).foregroundStyle(Color.white.opacity(0.7))
-            }
+        GeometryReader { geo in
+            // Each bucket's share of the width, less the gap: columns stay apart at any window size.
+            let width = max(1.5, geo.size.width / CGFloat(max(l.bars.count, 1)) - Self.gap)
+            Chart(l.bars) { b in column(b, width: width) }
+                .chartYAxis(.hidden)
+                .chartXScale(domain: l.start...l.end)
+                .chartYScale(domain: (-l.peak - Self.split)...(l.peak + Self.split))
+                .chartXAxis {
+                    // `.aligned`: the first and last labels stay inside the chart instead of being cut at its edges.
+                    AxisMarks(preset: .aligned, values: l.ticks()) { value in
+                        AxisValueLabel { if let d = value.as(Date.self) { Text(l.label(d)) } }.foregroundStyle(Palette.textSecondary)
+                    }
+                }
         }
     }
 }

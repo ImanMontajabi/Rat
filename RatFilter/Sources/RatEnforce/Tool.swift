@@ -27,18 +27,23 @@ public func runEnforcerTool(_ args: [String]) -> Never {
         }
         let tunnels = NetworkRoutes.tunnelAddresses()
         let owners = NetworkRoutes.tunnelOwnerProcesses(relays: true)
+        let warp = OpenWarpStatus.read()
         for iface in Set(tunnels.values).sorted() {
-            let servers = owners[iface].map { o in
+            let found = owners[iface].map { o in
                 NetworkRoutes.carrierServers(owner: ConnectionSampler.connections(of: o.pid), relays: o.relays.flatMap(ConnectionSampler.connections(of:)),
                                              tunnels: tunnels, isLocal: { LocalNetwork.contains($0) },
                                              pinned: { NetworkRoutes.pinnedServers(for: iface, isLocal: { LocalNetwork.contains($0) }) })
             } ?? []
-            print(([iface, NetworkRoutes.serverCountry(servers, lookup: db.countryCode) ?? "-"] + servers).joined(separator: " "))
+            let servers = TunnelPlacement.carriers(of: iface, found: found, openWarp: warp)
+            print(([iface, TunnelPlacement.country(of: iface, carriers: servers, lookup: db.countryCode, openWarp: warp) ?? "-"] + servers).joined(separator: " "))
             if args.contains("--verbose") {
                 if let o = owners[iface] {
                     print("  owner \(o.pid) \(o.path)")
                     for r in o.relays { print("  relay \(r) \(ConnectionSampler.path(of: r))") }
                 } else { print("  owner unknown") }
+                if let w = warp, w.connected, w.interface == iface {
+                    print("  openwarp \(w.pid) \(w.transport ?? "-") \(w.endpoint.map { "\($0.address):\($0.port)" } ?? "-") exit \(w.colo ?? "-") \(w.loc ?? "-")")
+                }
             }
         }
         if args.contains("--verbose") {

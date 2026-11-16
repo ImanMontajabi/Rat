@@ -19,6 +19,9 @@ public struct ObservedConnection: Hashable, Sendable {
     public var localAddress: String
     /// A peer started it: a listener on this Mac accepted it (`SocketDirection.mark`). Not known from one socket.
     public var incoming: Bool
+    /// A tunnel client's unconnected UDP socket, named by the server its client reports (`TunnelCarrier`): the
+    /// socket itself has no peer, so no rule about a server can be enforced on it, only the app's ✗.
+    public var carrier = false
 
     public init(pid: Int32, processPath: String, proto: Proto, remoteAddress: String, remotePort: Int, localPort: Int, tcpState: String?,
                 localAddress: String = "", incoming: Bool = false) {

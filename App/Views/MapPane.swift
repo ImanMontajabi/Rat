@@ -110,6 +110,7 @@ struct MapPane: View {
                     FlowOverlay(camera: camera,
                                 lines: g.arcs.filter { $0.flow != .idle }.map { FlowOverlay.Line(id: $0.id, coords: $0.coords, flow: $0.flow, fast: max($0.rateIn, $0.rateOut) >= MapFlows.fastRate) },
                                 proxy: proxy, paused: !animating)
+                    MapLabelsLayer(camera: camera, nodes: g.nodes, me: ledger.myLocation, proxy: proxy)
                     MapPlacesOverlay(camera: camera, nodes: g.nodes, arcs: g.arcs, proxy: proxy) { choose($0, in: g.nodes) }
                 }
                 .coordinateSpace(.named(FlowOverlay.space))
@@ -133,10 +134,8 @@ struct MapPane: View {
 
             if !ledger.geo.available {
                 Text("Offline GeoIP database not found, so server locations are unavailable.")
-                    .font(.callout).padding(14).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .font(.callout).padding(14).background(Color.ratSurface, in: RoundedRectangle(cornerRadius: Radius.md))
             }
-            Text("IP geolocation by DB-IP.com").font(.caption2).foregroundStyle(.secondary).padding(6)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             // The places on the map, for VoiceOver and the UI tests (map annotations are not reachable there).
             Text("Map").font(.system(size: 1)).foregroundStyle(.clear).allowsHitTesting(false)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -207,30 +206,32 @@ struct MapLayer: View, Equatable {
         Map(position: $position) {
             ForEach(arcs) { a in
                 MapPolyline(coordinates: a.coords)
-                    .stroke(a.highlighted ? (a.proxied ? Color.orange : Color.green) : Color(white: 0.75, opacity: 0.55),
+                    .stroke(a.highlighted ? (a.proxied ? Color.ratProxy : Color.ratSuccess) : Color(white: 0.75, opacity: 0.55),
                             style: StrokeStyle(lineWidth: a.highlighted ? 3 : 2, dash: a.proxied ? [7, 5] : []))
             }
             ForEach(nodes) { n in
                 let city = [n.point.flag, n.point.city].filter { !$0.isEmpty }.joined(separator: " ")
                 Annotation(n.proxy ? "Proxy · \(city)" : city, coordinate: n.point.coordinate, anchor: .center) {
                     if n.proxy {
-                        Image(systemName: "arrow.triangle.branch").font(.system(size: 9, weight: .bold)).foregroundStyle(.orange)
+                        Image(systemName: "arrow.triangle.branch").font(.system(size: 9, weight: .bold)).foregroundStyle(Color.ratProxy)
                             .frame(width: 18, height: 18)
-                            .background(RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.9)))
-                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(n.highlighted ? Color.orange : .gray, lineWidth: n.selected ? 3 : 2))
+                            .background(RoundedRectangle(cornerRadius: 5).fill(Color.ratSurface))
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(n.highlighted ? Color.ratProxy : .gray, lineWidth: n.selected ? 3 : 2))
                             .scaleEffect(n.selected ? 1.3 : 1)
                     } else {
-                        Circle().fill(n.selected ? Color.blue.opacity(0.9) : .white.opacity(0.85)).frame(width: n.selected ? 18 : 14, height: n.selected ? 18 : 14)
-                            .overlay(Circle().stroke(n.selected ? Color.white : n.highlighted ? Color.blue : .gray, lineWidth: n.selected ? 3 : 2))
-                            .shadow(color: n.selected ? .blue.opacity(0.8) : .clear, radius: 6)
+                        // Matte: a chosen place is a filled accent dot in a dark ring, no glow.
+                        Circle().fill(n.selected ? Color.ratAccent : .white.opacity(0.85)).frame(width: n.selected ? 18 : 14, height: n.selected ? 18 : 14)
+                            .overlay(Circle().stroke(n.selected ? Color.ratBase : n.highlighted ? Color.ratAccent : .gray, lineWidth: n.selected ? 3 : 2))
                     }
                 }
+                .annotationTitles(.hidden)   // labelled by `MapPlacesOverlay`'s pills
             }
             if let me {
                 Annotation("This Mac", coordinate: me.coordinate, anchor: .center) {
                     Image(systemName: "laptopcomputer").foregroundStyle(.white).padding(10)
-                        .background(Circle().fill(.gray.opacity(0.7)))
+                        .background(Circle().fill(Color.ratRaised))
                 }
+                .annotationTitles(.hidden)
             }
         }
         .onMapCameraChange(frequency: .continuous) { camera.version &+= 1 }
@@ -311,8 +312,8 @@ struct MapZoomButtons: View {
             Divider().frame(width: 18)
             button("minus", factor: 2, label: "Zoom Out", id: "map-zoom-out")
         }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+        .background(Color.ratSurface, in: RoundedRectangle(cornerRadius: Radius.sm))
+        .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Color.ratHairline, lineWidth: 1))
     }
 
     private func button(_ symbol: String, factor: Double, label: String, id: String) -> some View {
@@ -323,5 +324,126 @@ struct MapZoomButtons: View {
         .help(label)
         .accessibilityLabel(label)
         .accessibilityIdentifier(id)
+    }
+}
+
+/// The places' names as pills under their pins, following the camera like the pins' buttons, in a view of its own
+/// under `MapPlacesOverlay` and out of the accessibility tree: the pins' buttons (`map-place-<city>`, value
+/// `selected`) stay exactly as they were. Which labels fit is `MapLabels.layout`.
+struct MapLabelsLayer: View {
+    @ObservedObject var camera: MapCameraTicks
+    let nodes: [MapPane.Node]
+    var me: GeoPoint?
+    let proxy: MapProxy
+
+    var body: some View {
+        let _ = camera.version
+        GeometryReader { geo in
+        ZStack(alignment: .topLeading) {
+            Color.clear
+            ForEach(MapLabels.layout(labelItems(), bounds: CGRect(origin: .zero, size: geo.size))) { l in
+                HStack(spacing: MapLabels.flagSpacing) {
+                    if let p = l.prefix { Text(p) }
+                    if let f = l.flag { FlagView(code: f, height: MapLabels.flagHeight) }
+                    Text(l.text)
+                }
+                    .font(MapLabels.font).foregroundStyle(Palette.text)
+                    .padding(.horizontal, MapLabels.padding.width).padding(.vertical, MapLabels.padding.height)
+                    .background(Color.ratBase.opacity(0.85), in: Capsule())
+                    .overlay(Capsule().stroke(l.selected ? Color.ratAccent : Color.white.opacity(0.08), lineWidth: 1))
+                    .fixedSize()
+                    .position(x: l.frame.midX, y: l.frame.midY)
+            }
+        }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// This Mac and each place, in the order they claim room for a label: This Mac, the chosen place, the places
+    /// the selection highlights, then the rest.
+    private func labelItems() -> [MapLabels.Item] {
+        var items: [MapLabels.Item] = []
+        if let me, let at = proxy.convert(me.coordinate, to: .named(FlowOverlay.space)) {
+            items.append(.init(id: "me", text: "This Mac", anchor: at, pinRadius: 18, priority: 3))
+        }
+        for n in nodes {
+            guard let at = proxy.convert(n.point.coordinate, to: .named(FlowOverlay.space)) else { continue }
+            let code = n.point.flag.isEmpty ? nil : n.point.countryCode
+            items.append(.init(id: n.id, text: n.point.shortCity, anchor: at, pinRadius: n.selected ? 10 : 8,
+                               priority: n.selected ? 2 : n.highlighted ? 1 : 0, selected: n.selected,
+                               flag: code, prefix: n.proxy ? "Proxy ·" : nil))
+        }
+        return items
+    }
+}
+
+/// The map's labels: a pill under each pin with the place's short name ("🇮🇪 Cork", never its district in
+/// brackets). Like MapKit's own titles, a label that would cover another label or another pin is left out, the more
+/// important first (This Mac, the chosen place, the highlighted ones, then in order), so a cluster of places near
+/// each other shows one name, not a pile.
+enum MapLabels {
+    static let font = Font.system(size: 11.5, weight: .semibold)
+    static let nsFont = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
+    static let padding = CGSize(width: 8, height: 4)
+    /// Points between a pin's edge and its label.
+    static let spacing: CGFloat = 3
+
+    /// A flag's height in a label, and the room between it and the words around it.
+    static let flagHeight: CGFloat = 10
+    static let flagSpacing: CGFloat = 5
+
+    struct Item {
+        var id: String
+        var text: String
+        var anchor: CGPoint
+        var pinRadius: CGFloat
+        var priority: Int
+        var selected = false
+        /// The place's region code, drawn as Rat's flag before `text` (after `prefix`).
+        var flag: String? = nil
+        /// Words before the flag ("Proxy ·").
+        var prefix: String? = nil
+    }
+
+    struct Label: Identifiable, Equatable {
+        var key: String
+        var id: String { "label|" + key }
+        var text: String
+        var frame: CGRect
+        var selected: Bool
+        var flag: String? = nil
+        var prefix: String? = nil
+    }
+
+    static func size(_ item: Item) -> CGSize {
+        let words = [item.prefix, item.text].compactMap { $0 }.joined(separator: " ")
+        let t = (words as NSString).size(withAttributes: [.font: nsFont])
+        let flag = item.flag.map { _ in (flagHeight * Flags.aspect).rounded() + flagSpacing } ?? 0
+        return CGSize(width: ceil(t.width) + flag + padding.width * 2, height: ceil(t.height) + padding.height * 2)
+    }
+
+    /// The labels that fit, each centred under its pin. `measure` is the pill's size for a text. Within `bounds`
+    /// (the map), a label slides sideways to stay inside, goes above its pin at the bottom edge, and a pin off the
+    /// map has none: no pill is ever cut by the map's edge.
+    static func layout(_ items: [Item], bounds: CGRect? = nil, measure: (Item) -> CGSize = size) -> [Label] {
+        let pins = items.map { CGRect(x: $0.anchor.x - $0.pinRadius, y: $0.anchor.y - $0.pinRadius, width: $0.pinRadius * 2, height: $0.pinRadius * 2) }
+        var placed: [Label] = []
+        let order = items.indices.sorted { (items[$0].priority, -$0) > (items[$1].priority, -$1) }
+        let edge: CGFloat = 4
+        for i in order {
+            let it = items[i], s = measure(it)
+            var frame = CGRect(x: it.anchor.x - s.width / 2, y: it.anchor.y + it.pinRadius + spacing, width: s.width, height: s.height)
+            if let b = bounds {
+                guard b.contains(it.anchor) else { continue }
+                if frame.maxY > b.maxY - edge { frame.origin.y = it.anchor.y - it.pinRadius - spacing - s.height }
+                frame.origin.x = min(max(frame.minX, b.minX + edge), b.maxX - edge - s.width)
+                guard frame.minY >= b.minY + edge, frame.width <= b.width - 2 * edge else { continue }
+            }
+            let hitsLabel = placed.contains { $0.frame.insetBy(dx: -2, dy: -1).intersects(frame) }
+            let hitsPin = pins.indices.contains { $0 != i && pins[$0].intersects(frame) }
+            if !hitsLabel && !hitsPin { placed.append(Label(key: it.id, text: it.text, frame: frame, selected: it.selected, flag: it.flag, prefix: it.prefix)) }
+        }
+        return placed
     }
 }
